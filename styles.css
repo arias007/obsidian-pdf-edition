@@ -1,0 +1,164 @@
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content[data-type="pdf"] .view-header,
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-header,
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-header,
+body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title,
+body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title {
+  min-height: 44px;
+  overflow: visible;
+  position: relative;
+  z-index: 160;
+}
+
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions,
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-actions,
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-actions,
+body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title,
+body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title {
+  align-items: center;
+  gap: 4px;
+  min-height: 40px;
+  overflow: visible;
+  position: relative;
+  z-index: 161;
+}
+
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions .clickable-icon,
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-actions .clickable-icon,
+body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-actions .clickable-icon,
+body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title .clickable-icon,
+body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .clickable-icon {
+  min-height: 34px;
+  min-width: 34px;
+}
+
+.xodo-pdf-ink-root {
+  position: relative;
+}
+
+.xodo-pdf-ink-button {
+  color: var(--text-muted);
+}
+
+.xodo-pdf-ink-button.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.xodo-pdf-ink-page {
+  position: relative !important;
+}
+
+.xodo-pdf-ink-canvas {
+  cursor: crosshair;
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  touch-action: none;
+  z-index: 25;
+}
+
+.xodo-pdf-ink-selecting .xodo-pdf-ink-canvas {
+  cursor: pointer;
+}
+
+.xodo-pdf-ink-embed-actions {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  display: flex;
+  gap: 4px;
+  min-height: 34px;
+  padding: 4px;
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  z-index: 10001;
+}
+
+.xodo-pdf-ink-enabled .xodo-pdf-ink-canvas {
+  pointer-events: auto;
+}
+
+.xodo-pdf-ink-toolbar {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  display: flex;
+  gap: 5px;
+  padding: 6px;
+  position: absolute;
+  right: 12px;
+  top: 68px;
+  z-index: 10000;
+}
+
+.xodo-pdf-ink-toolbar .clickable-icon {
+  height: 32px;
+  width: 32px;
+}
+
+.xodo-pdf-ink-toolbar .clickable-icon.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.xodo-pdf-ink-palette-panel {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(230px, calc(100vw - 32px));
+  padding: 10px;
+  position: absolute;
+  right: 12px;
+  top: 112px;
+  width: 210px;
+  z-index: 10002;
+}
+
+.xodo-pdf-ink-palette-colors {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.xodo-pdf-ink-color {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 50%;
+  box-sizing: border-box;
+  cursor: pointer;
+  height: 24px;
+  width: 24px;
+}
+
+.xodo-pdf-ink-color.is-active {
+  border-color: var(--text-normal);
+  box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--interactive-accent);
+}
+
+.xodo-pdf-ink-width {
+  accent-color: var(--interactive-accent);
+  width: 100%;
+}
+
+.xodo-pdf-ink-palette-range {
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 4px;
+  line-height: 1.2;
+}
+
+.xodo-pdf-ink-opacity-pen,
+.xodo-pdf-ink-opacity-highlight {
+  accent-color: var(--interactive-accent);
+  width: 100%;
+}

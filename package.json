@@ -1,0 +1,23 @@
+{
+  "name": "ob-pdf-ink-xodo",
+  "version": "0.2.6",
+  "description": "Auto-saving Xodo-style ink annotations for Obsidian PDF views and embedded PDFs.",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "check": "tsc --noEmit",
+    "dist": "npm run check && npm run build"
+  },
+  "keywords": [],
+  "author": "Murat / Codex",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "pdf-lib": "^1.17.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "obsidian": "^1.13.0",
+    "typescript": "^6.0.3"
+  }
+}

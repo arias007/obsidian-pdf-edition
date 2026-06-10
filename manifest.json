@@ -1,0 +1,10 @@
+{
+  "id": "ob-pdf-ink-xodo",
+  "name": "OB PDF Ink Xodo",
+  "version": "0.2.6",
+  "minAppVersion": "1.8.0",
+  "description": "Add auto-saving Xodo-style ink annotations to Obsidian PDF views and embedded PDFs.",
+  "author": "Murat / Codex",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
