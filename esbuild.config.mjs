@@ -5,6 +5,9 @@ await esbuild.build({
   entryPoints: ["src/main.ts"],
   external: ["obsidian"],
   format: "cjs",
+  loader: {
+    ".otf": "base64"
+  },
   logLevel: "info",
   outfile: "main.js",
   platform: "browser",

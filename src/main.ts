@@ -1,9 +1,34 @@
 import { Notice, Plugin, TFile, WorkspaceLeaf, setIcon } from "obsidian";
-import { PDFDocument, rgb } from "pdf-lib";
+import * as fontkitModule from "@pdf-lib/fontkit";
+import { PDFDocument, degrees, rgb } from "pdf-lib";
 
-type ToolMode = "select" | "pen" | "highlight" | "eraser";
+type ToolMode = "select" | "pen" | "highlight" | "eraser" | "text" | "cover" | "image-crop";
+type ResizeHandle = "nw" | "ne" | "sw" | "se";
 
-const INK_COLORS = ["#d9480f", "#fab005", "#228be6", "#2f9e44", "#212529"];
+const AUTO_SAVE_IDLE_DELAY_MS = 1800;
+const AUTO_SAVE_CLOSE_DELAY_MS = 200;
+const OVERLAY_HEALTH_CHECK_MS = 5000;
+const INK_COLORS = [
+  "#000000",
+  "#ffffff",
+  "#e03131",
+  "#c2255c",
+  "#fab005",
+  "#2f9e44",
+  "#1971c2",
+  "#7048e8",
+  "#f76707",
+  "#868e96"
+];
+const PDFTION_AI_API_NAME = "PdftionAI";
+const LEGACY_PDF_EDIT_AI_API_NAME = "ObPdfInkXodoAI";
+const TEXT_FONTS = [
+  { label: "默认", value: "sans-serif" },
+  { label: "宋体", value: "SimSun, STSong, serif" },
+  { label: "黑体", value: "SimHei, Microsoft YaHei, sans-serif" },
+  { label: "等宽", value: "Consolas, monospace" },
+  { label: "衬线", value: "Georgia, serif" }
+];
 
 interface PdfViewLike {
   containerEl?: HTMLElement;
@@ -20,6 +45,7 @@ interface InkPoint {
 interface InkStroke {
   color: string;
   id: string;
+  kind: "stroke";
   opacity: number;
   pageCssHeight: number;
   pageCssWidth: number;
@@ -28,6 +54,137 @@ interface InkStroke {
   saved: boolean;
   tool: Exclude<ToolMode, "eraser" | "select">;
   width: number;
+}
+
+interface InkText {
+  color: string;
+  fontFamily?: string;
+  fontSize: number;
+  id: string;
+  kind: "text";
+  opacity: number;
+  pageCssHeight: number;
+  pageCssWidth: number;
+  pageIndex: number;
+  saved: boolean;
+  text: string;
+  x: number;
+  y: number;
+}
+
+interface InkCover {
+  color: string;
+  height: number;
+  id: string;
+  kind: "cover";
+  opacity: number;
+  pageCssHeight: number;
+  pageCssWidth: number;
+  pageIndex: number;
+  saved: boolean;
+  source?: "manual" | "native-region" | "native-text";
+  width: number;
+  x: number;
+  y: number;
+}
+
+interface InkImage {
+  dataUrl: string;
+  height: number;
+  id: string;
+  kind: "image";
+  opacity: number;
+  pageCssHeight: number;
+  pageCssWidth: number;
+  pageIndex: number;
+  saved: boolean;
+  width: number;
+  x: number;
+  y: number;
+}
+
+type InkElement = InkStroke | InkText | InkCover | InkImage;
+
+interface PdftionElementQuery {
+  color?: string;
+  ids?: string[];
+  kind?: InkElement["kind"];
+  pageIndex?: number;
+  text?: string;
+}
+
+interface PdftionObsidianLinkInput {
+  color?: string;
+  fontSize?: number;
+  label?: string;
+  link: string;
+  pageIndex?: number;
+  x?: number;
+  y?: number;
+}
+
+interface PdftionVaultImageInput {
+  height?: number;
+  opacity?: number;
+  pageIndex?: number;
+  path: string;
+  width?: number;
+  x?: number;
+  y?: number;
+}
+
+type PdftionPlanOperation =
+  | { action: "addCover"; input: Partial<InkCover> & Pick<InkCover, "height" | "pageIndex" | "width" | "x" | "y"> }
+  | { action: "addImage"; input: Partial<InkImage> & Pick<InkImage, "dataUrl" | "pageIndex" | "x" | "y"> }
+  | { action: "addStroke"; input: Partial<InkStroke> & Pick<InkStroke, "pageIndex" | "points"> }
+  | { action: "addText"; input: Partial<InkText> & Pick<InkText, "pageIndex" | "text" | "x" | "y"> }
+  | { action: "deleteElements"; ids: string[] }
+  | { action: "exportAnnotatedPdf" }
+  | { action: "exportAnnotationsDocx" }
+  | { action: "exportAnnotationsMarkdown" }
+  | { action: "exportMarkdownDocxBridge" }
+  | { action: "insertObsidianLink"; input: PdftionObsidianLinkInput }
+  | { action: "insertVaultImage"; input: PdftionVaultImageInput }
+  | { action: "replaceElements"; elements: InkElement[] }
+  | { action: "selectElements"; ids: string[] }
+  | { action: "updateElements"; elements: InkElement[] };
+
+interface PdftionPlanResult {
+  added: string[];
+  deleted: number;
+  errors: string[];
+  exported: string[];
+  ok: boolean;
+  selected: number;
+  updated: number;
+}
+
+interface PdfFingerprint {
+  mtime?: number;
+  sha256: string;
+  size: number;
+}
+
+interface AnnotationStateRecord {
+  basePdfFingerprint?: PdfFingerprint;
+  elements: InkElement[];
+  filePath?: string;
+  overlayAnnotationsOnly?: boolean;
+  overlayTextOnly?: boolean;
+  pdfFingerprint: PdfFingerprint;
+  updatedAt?: string;
+  version?: number;
+}
+
+interface PdfNativeObject {
+  height: number;
+  id: string;
+  kind: "text" | "region";
+  pageIndex: number;
+  text?: string;
+  width: number;
+  x: number;
+  y: number;
 }
 
 interface PageOverlay {
@@ -40,21 +197,129 @@ interface PageOverlay {
   pageIndex: number;
 }
 
+interface VisualConversionPage {
+  bytes: Uint8Array;
+  height: number;
+  pageIndex: number;
+  path?: string;
+  width: number;
+}
+
 interface TouchScrollState {
+  initialDistance: number;
+  initialBounds?: NormalizedBounds;
+  initialElements?: InkElement[];
+  lastX: number;
   lastY: number;
+  mode: "scroll" | "resize-selection";
   scrollEl: HTMLElement;
 }
 
-export default class ObPdfInkXodoPlugin extends Plugin {
+interface SelectionDragState {
+  current: InkPoint;
+  handle?: ResizeHandle;
+  moved: boolean;
+  mode: "move" | "marquee" | "resize";
+  originalBounds?: NormalizedBounds;
+  originalElements?: InkElement[];
+  pageIndex: number;
+  start: InkPoint;
+}
+
+interface NormalizedBounds {
+  maxX: number;
+  maxY: number;
+  minX: number;
+  minY: number;
+}
+
+interface ConversionResult {
+  covers: number;
+  pages?: number;
+  skipped?: number;
+  texts: number;
+}
+
+interface PdfElementStats {
+  covers: number;
+  images: number;
+  pages: number;
+  strokes: number;
+  texts: number;
+  total: number;
+}
+
+interface PdftionAiApi {
+  addImage(input: Partial<InkImage> & Pick<InkImage, "dataUrl" | "pageIndex" | "x" | "y">): string | null;
+  addCover(input: Partial<InkCover> & Pick<InkCover, "height" | "pageIndex" | "width" | "x" | "y">): string | null;
+  addStroke(input: Partial<InkStroke> & Pick<InkStroke, "pageIndex" | "points">): string | null;
+  addText(input: Partial<InkText> & Pick<InkText, "pageIndex" | "text" | "x" | "y">): string | null;
+  applyPlan(operations: PdftionPlanOperation[]): Promise<PdftionPlanResult>;
+  convertNativeDocument(): ConversionResult;
+  convertNativePage(pageIndex?: number): ConversionResult;
+  convertNativeSelection(): ConversionResult;
+  coverNativeSelection(): string | null;
+  deleteElements(ids: string[]): number;
+  exportAnnotatedPdf(): Promise<string | null>;
+  exportAnnotationsDocx(): Promise<string | null>;
+  exportAnnotationsMarkdown(): Promise<string | null>;
+  exportMarkdownDocxBridge(): Promise<string | null>;
+  findElements(query?: PdftionElementQuery): InkElement[];
+  getAnnotationsMarkdown(): string;
+  getCurrentFile(): string | null;
+  getElements(): InkElement[];
+  getNativeSelection(): PdfNativeObject | null;
+  getSelectedElements(): InkElement[];
+  getStats(): PdfElementStats;
+  groupElementsByPage(): Record<string, InkElement[]>;
+  jumpToPage(pageIndex: number): boolean;
+  replaceNativeText(text: string): { coverId: string | null; textId: string | null } | null;
+  replaceElements(elements: InkElement[]): boolean;
+  selectElements(ids: string[]): number;
+  insertObsidianLink(input: PdftionObsidianLinkInput): Promise<string | null>;
+  insertVaultImage(input: PdftionVaultImageInput): Promise<string | null>;
+  setPageCrop(pageIndex: number, crop: { bottom?: number; left?: number; right?: number; top?: number }): boolean;
+  getPageCrops(): Record<string, { bottom: number; left: number; right: number; top: number }>;
+  updateElements(elements: InkElement[]): number;
+}
+
+interface PdfEditAiApi {
+  addCover(input: Partial<InkCover> & Pick<InkCover, "height" | "pageIndex" | "width" | "x" | "y">): string | null;
+  addStroke(input: Partial<InkStroke> & Pick<InkStroke, "pageIndex" | "points">): string | null;
+  addText(input: Partial<InkText> & Pick<InkText, "pageIndex" | "text" | "x" | "y">): string | null;
+  convertNativeDocument(): ConversionResult;
+  convertNativePage(pageIndex?: number): ConversionResult;
+  convertNativeSelection(): ConversionResult;
+  coverNativeSelection(): string | null;
+  deleteElements(ids: string[]): number;
+  exportAnnotatedPdf(): Promise<string | null>;
+  getCurrentFile(): string | null;
+  getElements(): InkElement[];
+  getNativeSelection(): PdfNativeObject | null;
+  getSelectedElements(): InkElement[];
+  replaceNativeText(text: string): { coverId: string | null; textId: string | null } | null;
+  replaceElements(elements: InkElement[]): boolean;
+  updateElements(elements: InkElement[]): number;
+}
+
+declare global {
+  interface Window {
+    PdftionAI?: PdftionAiApi;
+    ObPdfInkXodoAI?: PdfEditAiApi;
+  }
+}
+
+export default class PdftionPlugin extends Plugin {
+  private annotationFontBytes: Uint8Array | null = null;
   private sessions = new Map<HTMLElement, InkSession>();
   private surfaceScanTimers: number[] = [];
 
   async onload(): Promise<void> {
-    document.body.classList.add("xodo-pdf-ink-menu-boost");
+    document.body.classList.add("xodo-pdf-ink-menu-boost", "pdftion-menu-boost");
 
     this.addCommand({
-      id: "toggle-pdf-ink",
-      name: "Toggle PDF ink annotation",
+      id: "toggle-pdftion",
+      name: "Toggle pdftion PDF annotation",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -65,16 +330,81 @@ export default class ObPdfInkXodoPlugin extends Plugin {
       }
     });
 
+    this.addCommand({
+      id: "export-annotated-pdf",
+      name: "Pdftion: export current PDF with visible annotations",
+      callback: () => {
+        const session = this.getActivePdfSession();
+        if (!session) {
+          new Notice("Open a PDF first.");
+          return;
+        }
+        void session.exportAnnotatedPdf();
+      }
+    });
+
+    this.addCommand({
+      id: "export-annotations-markdown",
+      name: "Pdftion: export annotations to Markdown",
+      callback: () => {
+        const session = this.getActivePdfSession();
+        if (!session) {
+          new Notice("Open a PDF first.");
+          return;
+        }
+        void session.exportAnnotationsMarkdown();
+      }
+    });
+
+    this.addCommand({
+      id: "show-pdf-page-navigator",
+      name: "Pdftion: show page navigator",
+      callback: () => {
+        const session = this.getActivePdfSession();
+        if (!session) {
+          new Notice("Open a PDF first.");
+          return;
+        }
+        session.showPageNavigator();
+      }
+    });
+
+    this.addCommand({
+      id: "convert-pdf-markdown-docx",
+      name: "Pdftion: PDF/Markdown/DOCX conversion hub",
+      callback: () => {
+        const session = this.getActivePdfSession();
+        if (!session) {
+          new Notice("Open a PDF first.");
+          return;
+        }
+        void session.exportMarkdownDocxBridge();
+      }
+    });
+
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.queuePdfSurfaceScans()));
     this.registerEvent(this.app.workspace.on("layout-change", () => this.queuePdfSurfaceScans()));
     this.registerEvent(this.app.workspace.on("file-open", () => this.queuePdfSurfaceScans()));
+    this.registerDomEvent(document, "visibilitychange", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(document, "pointerdown", (event) => this.commitEditorsOnOutsidePointer(event), { capture: true });
+    this.registerDomEvent(window, "pagehide", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(window, "beforeunload", () => this.flushAllSessionsSoon());
     this.register(() => this.clearSurfaceScanTimers());
 
     this.queuePdfSurfaceScans();
+    this.installAiApi();
   }
 
   onunload(): void {
-    document.body.classList.remove("xodo-pdf-ink-menu-boost");
+    if (window.PdftionAI) {
+      delete window.PdftionAI;
+    }
+    if (window.ObPdfInkXodoAI) {
+      delete window.ObPdfInkXodoAI;
+    }
+    delete (window as unknown as Record<string, unknown>)[PDFTION_AI_API_NAME];
+    delete (window as unknown as Record<string, unknown>)[LEGACY_PDF_EDIT_AI_API_NAME];
+    document.body.classList.remove("xodo-pdf-ink-menu-boost", "pdftion-menu-boost");
     for (const session of this.sessions.values()) {
       session.destroy();
     }
@@ -84,7 +414,7 @@ export default class ObPdfInkXodoPlugin extends Plugin {
 
   private queuePdfSurfaceScans(): void {
     this.clearSurfaceScanTimers();
-    for (const delay of [0, 120, 420, 1000, 2200]) {
+    for (const delay of [0, 80, 180, 420, 900, 1800, 3200]) {
       const timer = window.setTimeout(() => {
         this.surfaceScanTimers = this.surfaceScanTimers.filter((value) => value !== timer);
         this.scanPdfSurfaces();
@@ -98,6 +428,144 @@ export default class ObPdfInkXodoPlugin extends Plugin {
       window.clearTimeout(timer);
     }
     this.surfaceScanTimers = [];
+  }
+
+  async loadAnnotationFontBytes(): Promise<Uint8Array> {
+    if (this.annotationFontBytes) {
+      return this.annotationFontBytes;
+    }
+
+    const dir = this.manifest.dir;
+    if (!dir) {
+      throw new Error("Plugin directory is unavailable.");
+    }
+
+    const buffer = await this.app.vault.adapter.readBinary(`${dir}/fonts/NotoSansSC-Regular.otf`);
+    this.annotationFontBytes = new Uint8Array(buffer);
+    return this.annotationFontBytes;
+  }
+
+  async loadAnnotationState(file: TFile): Promise<{ elements: InkElement[]; overlayAnnotationsOnly: boolean; overlayTextOnly: boolean } | null> {
+    const currentBytes = await this.app.vault.readBinary(file);
+    const currentFingerprint = await fingerprintPdfBytes(currentBytes, file.stat.mtime);
+    const state = await this.loadVerifiedAnnotationRecord(file, currentFingerprint);
+    if (!state) {
+      return null;
+    }
+    return {
+      elements: state.elements,
+      overlayAnnotationsOnly: state.overlayAnnotationsOnly === true,
+      overlayTextOnly: state.overlayTextOnly === true
+    };
+  }
+
+  async saveAnnotationState(file: TFile, elements: InkElement[], basePdfFingerprint: PdfFingerprint, savedBytes: ArrayBuffer): Promise<void> {
+    const path = this.getAnnotationStatePath(file);
+    const pdfFingerprint = await fingerprintPdfBytes(savedBytes, file.stat.mtime);
+    await this.ensureAdapterFolder(path.substring(0, path.lastIndexOf("/")));
+    await this.app.vault.adapter.write(
+      path,
+      JSON.stringify(
+        {
+          basePdfFingerprint,
+          filePath: file.path,
+          overlayAnnotationsOnly: true,
+          overlayTextOnly: true,
+          pdfFingerprint,
+          updatedAt: new Date().toISOString(),
+          version: 6,
+          elements
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  async loadBasePdfBytes(file: TFile, fingerprint: PdfFingerprint): Promise<ArrayBuffer | null> {
+    try {
+      return await this.app.vault.adapter.readBinary(this.getBasePdfPath(file, fingerprint.sha256));
+    } catch {
+      return null;
+    }
+  }
+
+  async ensureBasePdfBytes(file: TFile, currentBytes: ArrayBuffer): Promise<{ bytes: ArrayBuffer; fingerprint: PdfFingerprint }> {
+    const currentFingerprint = await fingerprintPdfBytes(currentBytes, file.stat.mtime);
+    const state = await this.loadVerifiedAnnotationRecord(file, currentFingerprint);
+    if (state?.basePdfFingerprint) {
+      const existing = await this.loadBasePdfBytes(file, state.basePdfFingerprint);
+      if (existing) {
+        return { bytes: existing, fingerprint: state.basePdfFingerprint };
+      }
+    }
+
+    const path = this.getBasePdfPath(file, currentFingerprint.sha256);
+    await this.ensureAdapterFolder(path.substring(0, path.lastIndexOf("/")));
+    await this.app.vault.adapter.writeBinary(path, currentBytes);
+    return { bytes: currentBytes, fingerprint: currentFingerprint };
+  }
+
+  private getAnnotationStatePath(file: TFile): string {
+    return `${this.manifest.dir}/data/annotations/${safeAnnotationKey(file.path)}.json`;
+  }
+
+  private getBasePdfPath(file: TFile, sha256: string): string {
+    return `${this.manifest.dir}/data/base-pdfs/${safeAnnotationKey(file.path)}--${sha256}.pdf`;
+  }
+
+  private async loadVerifiedAnnotationRecord(file: TFile, currentFingerprint: PdfFingerprint): Promise<AnnotationStateRecord | null> {
+    try {
+      const raw = await this.app.vault.adapter.read(this.getAnnotationStatePath(file));
+      const parsed = JSON.parse(raw) as {
+        basePdfFingerprint?: unknown;
+        elements?: unknown;
+        filePath?: unknown;
+        overlayAnnotationsOnly?: unknown;
+        overlayTextOnly?: unknown;
+        pdfFingerprint?: unknown;
+        updatedAt?: unknown;
+        version?: unknown;
+      };
+      if (!Array.isArray(parsed.elements)) {
+        return null;
+      }
+      if (!isPdfFingerprint(parsed.pdfFingerprint)) {
+        console.warn("pdftion skipped annotation state without a PDF fingerprint.", file.path);
+        return null;
+      }
+      if (parsed.pdfFingerprint.sha256 !== currentFingerprint.sha256) {
+        console.warn("pdftion skipped annotation state for a replaced PDF.", file.path);
+        return null;
+      }
+
+      return {
+        basePdfFingerprint: isPdfFingerprint(parsed.basePdfFingerprint) ? parsed.basePdfFingerprint : undefined,
+        elements: parsed.elements.filter(isInkElement),
+        filePath: typeof parsed.filePath === "string" ? parsed.filePath : undefined,
+        overlayAnnotationsOnly: parsed.overlayAnnotationsOnly === true,
+        overlayTextOnly: parsed.overlayTextOnly === true,
+        pdfFingerprint: parsed.pdfFingerprint,
+        updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined,
+        version: typeof parsed.version === "number" ? parsed.version : undefined
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async ensureAdapterFolder(path: string): Promise<void> {
+    if (!path) {
+      return;
+    }
+    const parts = path.split("/").filter(Boolean);
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(current))) {
+        await this.app.vault.adapter.mkdir(current);
+      }
+    }
   }
 
   private scanPdfSurfaces(): void {
@@ -124,11 +592,62 @@ export default class ObPdfInkXodoPlugin extends Plugin {
       }
     });
 
+    const activeLeaf = this.app.workspace.activeLeaf ?? this.app.workspace.getLeavesOfType("markdown")[0] ?? this.app.workspace.getLeavesOfType("pdf")[0] ?? null;
+    if (activeLeaf) {
+      for (const surface of this.findPdfSurfaces(document.body, activeLeaf.view as unknown as PdfViewLike)) {
+        if (!this.isDetachedPdfSurface(surface.rootEl) || this.isCoveredByExistingSession(surface.rootEl)) {
+          continue;
+        }
+        liveRoots.add(surface.rootEl);
+        const existing = this.sessions.get(surface.rootEl);
+        if (existing) {
+          existing.updateFile(surface.file);
+          existing.scheduleQuietScan();
+          continue;
+        }
+
+        const session = new InkSession(this, activeLeaf, surface.file, surface.rootEl);
+        this.sessions.set(surface.rootEl, session);
+      }
+    }
+
     for (const [rootEl, session] of this.sessions.entries()) {
       if (!document.body.contains(rootEl) || !liveRoots.has(rootEl)) {
         session.destroy();
         this.sessions.delete(rootEl);
       }
+    }
+  }
+
+  private flushAllSessionsSoon(): void {
+    for (const session of this.sessions.values()) {
+      session.flushSoon();
+    }
+  }
+
+  private isCoveredByExistingSession(rootEl: HTMLElement): boolean {
+    for (const existingRoot of this.sessions.keys()) {
+      if (existingRoot === rootEl || existingRoot.contains(rootEl) || rootEl.contains(existingRoot)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private isDetachedPdfSurface(rootEl: HTMLElement): boolean {
+    if (rootEl.closest(".workspace-leaf-content")) {
+      return false;
+    }
+    return rootEl.closest(".sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card, .modal") !== null;
+  }
+
+  private commitEditorsOnOutsidePointer(event: PointerEvent): void {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.closest(".xodo-pdf-ink-native-editor, .pdftion-panel")) {
+      return;
+    }
+    for (const session of this.sessions.values()) {
+      session.commitNativeTextEditor();
     }
   }
 
@@ -143,9 +662,10 @@ export default class ObPdfInkXodoPlugin extends Plugin {
     const roots = new Set<HTMLElement>();
     for (const page of this.findPdfPageElements(hostEl)) {
       const root =
-        page.closest<HTMLElement>(
-          ".internal-embed, .media-embed, .file-embed, .pdf-embed, .pdf-container, .pdf-viewer, .pdfViewer"
-        ) ?? page.parentElement ?? hostEl;
+        page.closest<HTMLElement>(".internal-embed, .media-embed, .file-embed, .markdown-embed") ??
+        page.closest<HTMLElement>(".pdf-embed, .pdf-container, .pdf-viewer, .pdfViewer") ??
+        page.parentElement ??
+        hostEl;
       roots.add(root);
     }
 
@@ -235,41 +755,127 @@ export default class ObPdfInkXodoPlugin extends Plugin {
       }
     }
 
-    return null;
+    return this.getVisiblePdfSession();
+  }
+
+  private getVisiblePdfSession(): InkSession | null {
+    let best: { score: number; session: InkSession } | null = null;
+    for (const [rootEl, session] of this.sessions.entries()) {
+      const rect = rootEl.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0 || rect.bottom < 0 || rect.top > window.innerHeight) {
+        continue;
+      }
+      const score = Math.abs(rect.top + rect.height / 2 - window.innerHeight / 2);
+      if (!best || score < best.score) {
+        best = { score, session };
+      }
+    }
+    return best?.session ?? null;
+  }
+
+  private installAiApi(): void {
+    const api: PdftionAiApi = {
+      addImage: (input) => this.getActivePdfSession()?.aiAddImage(input) ?? null,
+      addCover: (input) => this.getActivePdfSession()?.aiAddCover(input) ?? null,
+      addStroke: (input) => this.getActivePdfSession()?.aiAddStroke(input) ?? null,
+      addText: (input) => this.getActivePdfSession()?.aiAddText(input) ?? null,
+      applyPlan: (operations) => this.getActivePdfSession()?.aiApplyPlan(operations) ?? Promise.resolve({ added: [], deleted: 0, errors: ["No active PDF session."], exported: [], ok: false, selected: 0, updated: 0 }),
+      convertNativeDocument: () => this.getActivePdfSession()?.convertNativeDocumentToEditable() ?? { covers: 0, skipped: 0, texts: 0 },
+      convertNativePage: (pageIndex) => this.getActivePdfSession()?.convertNativePageToEditable(pageIndex) ?? { covers: 0, skipped: 0, texts: 0 },
+      convertNativeSelection: () => this.getActivePdfSession()?.convertNativeSelectionToEditable() ?? { covers: 0, skipped: 0, texts: 0 },
+      coverNativeSelection: () => this.getActivePdfSession()?.aiCoverNativeSelection() ?? null,
+      deleteElements: (ids) => this.getActivePdfSession()?.aiDeleteElements(ids) ?? 0,
+      exportAnnotatedPdf: () => this.getActivePdfSession()?.exportAnnotatedPdf() ?? Promise.resolve(null),
+      exportAnnotationsDocx: () => this.getActivePdfSession()?.exportAnnotationsDocx() ?? Promise.resolve(null),
+      exportAnnotationsMarkdown: () => this.getActivePdfSession()?.exportAnnotationsMarkdown() ?? Promise.resolve(null),
+      exportMarkdownDocxBridge: () => this.getActivePdfSession()?.exportMarkdownDocxBridge() ?? Promise.resolve(null),
+      findElements: (query) => this.getActivePdfSession()?.aiFindElements(query) ?? [],
+      getAnnotationsMarkdown: () => this.getActivePdfSession()?.getAnnotationsMarkdown() ?? "",
+      getCurrentFile: () => this.getActivePdfSession()?.getFilePath() ?? null,
+      getElements: () => this.getActivePdfSession()?.aiGetElements() ?? [],
+      getNativeSelection: () => this.getActivePdfSession()?.aiGetNativeSelection() ?? null,
+      getSelectedElements: () => this.getActivePdfSession()?.aiGetSelectedElements() ?? [],
+      getStats: () => this.getActivePdfSession()?.aiGetStats() ?? { covers: 0, images: 0, pages: 0, strokes: 0, texts: 0, total: 0 },
+      groupElementsByPage: () => this.getActivePdfSession()?.aiGroupElementsByPage() ?? {},
+      jumpToPage: (pageIndex) => this.getActivePdfSession()?.jumpToPage(pageIndex) ?? false,
+      replaceNativeText: (text) => this.getActivePdfSession()?.aiReplaceNativeText(text) ?? null,
+      replaceElements: (elements) => this.getActivePdfSession()?.aiReplaceElements(elements) ?? false,
+      selectElements: (ids) => this.getActivePdfSession()?.aiSelectElements(ids) ?? 0,
+      insertObsidianLink: (input) => this.getActivePdfSession()?.insertObsidianLink(input) ?? Promise.resolve(null),
+      insertVaultImage: (input) => this.getActivePdfSession()?.insertVaultImage(input) ?? Promise.resolve(null),
+      setPageCrop: (pageIndex, crop) => this.getActivePdfSession()?.setPageCrop(pageIndex, crop) ?? false,
+      getPageCrops: () => this.getActivePdfSession()?.getPageCrops() ?? {},
+      updateElements: (elements) => this.getActivePdfSession()?.aiUpdateElements(elements) ?? 0
+    };
+    window.PdftionAI = api;
+    window.ObPdfInkXodoAI = api;
+    (window as unknown as Record<string, PdftionAiApi | undefined>)[PDFTION_AI_API_NAME] = api;
+    (window as unknown as Record<string, PdfEditAiApi | undefined>)[LEGACY_PDF_EDIT_AI_API_NAME] = api;
   }
 }
 
 class InkSession {
+  private cropByPage = new Map<number, { bottom: number; left: number; right: number; top: number }>();
   private button: HTMLElement | null = null;
+  private currentCover: InkCover | null = null;
   private currentStroke: InkStroke | null = null;
   private dirty = false;
   private enabled = false;
+  private imageCache = new Map<string, HTMLImageElement>();
+  private imageMenu: HTMLElement | null = null;
+  private shareMenu: HTMLElement | null = null;
   private mutationObserver: MutationObserver;
   private overlays = new Map<HTMLElement, PageOverlay>();
   private activeTouchId: number | null = null;
+  private annotationLoadToken = 0;
   private pendingSaveAfterCurrentSave = false;
   private palette: HTMLElement | null = null;
+  private penColor = "#d9480f";
   private penOpacity = 1;
+  private penWidth = 3;
+  private nativeTextEditor: HTMLTextAreaElement | null = null;
+  private nativeTextEditorCover: InkCover | null = null;
+  private eraserWidth = 14;
+  private textColor = "#000000";
+  private textFontFamily = "sans-serif";
+  private textFontSize = 18;
+  private textOpacity = 1;
+  private coverHistory: InkCover[] = [];
+  private loadedAnnotationState = false;
+  private redoStack: InkElement[] = [];
   private saveTimer: number | null = null;
   private scanTimer: number | null = null;
-  private selectedStrokeId: string | null = null;
+  private healthTimer: number | null = null;
+  private selectionDrag: SelectionDragState | null = null;
+  private nativeSelection: PdfNativeObject | null = null;
+  private pendingImageCrop: PdfNativeObject | null = null;
+  private pageNavigator: HTMLElement | null = null;
+  private selectedPageIndexes = new Set<number>();
+  private selectedStrokeIds = new Set<string>();
   private saving = false;
   private strokeHistory: InkStroke[] = [];
+  private textHistory: InkText[] = [];
+  private imageHistory: InkImage[] = [];
   private toolbar: HTMLElement | null = null;
+  private toolbarHost: HTMLElement | null = null;
   private tool: ToolMode = "pen";
+  private lastTap: { pageIndex: number; point: InkPoint; time: number } | null = null;
+  private savedInkIsBurnedIntoPdf = false;
+  private savedTextIsBurnedIntoPdf = false;
   private touchScroll: TouchScrollState | null = null;
-  private color = "#d9480f";
+  private highlightColor = "#fab005";
   private highlightOpacity = 0.36;
-  private width = 3;
+  private highlightWidth = 9;
 
   constructor(
-    private plugin: ObPdfInkXodoPlugin,
+    private plugin: PdftionPlugin,
     private leaf: WorkspaceLeaf,
     private file: TFile,
     private rootEl: HTMLElement
   ) {
     this.rootEl.classList.add("xodo-pdf-ink-root");
     this.injectButton();
+    void this.loadEditableAnnotations();
     this.scanPages();
 
     this.mutationObserver = new MutationObserver((mutations) => {
@@ -284,18 +890,28 @@ class InkSession {
   }
 
   destroy(): void {
+    this.flushSoon();
     this.clearAutoSaveTimer();
     this.clearScanTimer();
+    this.stopOverlayHealthCheck();
     this.mutationObserver.disconnect();
     this.button?.remove();
+    this.closeNativeTextEditor(false);
     this.palette?.remove();
+    this.pageNavigator?.remove();
+    this.imageMenu?.remove();
+    this.shareMenu?.remove();
     this.toolbar?.remove();
+    this.toolbarHost?.remove();
+    this.rootEl.querySelector<HTMLElement>(".xodo-pdf-ink-inline-actions")?.remove();
+    this.toolbarHost = null;
     for (const overlay of this.overlays.values()) {
       overlay.abort.abort();
       overlay.canvas.remove();
       overlay.pageEl.classList.remove("xodo-pdf-ink-page");
     }
     this.overlays.clear();
+    this.pendingImageCrop = null;
     this.rootEl.classList.remove("xodo-pdf-ink-enabled", "xodo-pdf-ink-root", "xodo-pdf-ink-selecting");
   }
 
@@ -304,12 +920,52 @@ class InkSession {
       return;
     }
 
+    this.flushSoon();
+    this.closeNativeTextEditor(false);
     this.file = file;
     this.clearAutoSaveTimer();
     this.currentStroke = null;
     this.dirty = false;
-    this.selectedStrokeId = null;
+    this.redoStack = [];
+    this.selectionDrag = null;
+    this.selectedStrokeIds.clear();
+    this.nativeSelection = null;
+    this.pendingImageCrop = null;
     this.strokeHistory = [];
+    this.textHistory = [];
+    this.coverHistory = [];
+    this.imageHistory = [];
+    this.loadedAnnotationState = false;
+    this.annotationLoadToken += 1;
+    void this.loadEditableAnnotations();
+    this.redrawAll();
+  }
+
+  private async loadEditableAnnotations(): Promise<void> {
+    if (this.loadedAnnotationState) {
+      return;
+    }
+    this.loadedAnnotationState = true;
+    const filePath = this.file.path;
+    const loadToken = ++this.annotationLoadToken;
+    const state = await this.plugin.loadAnnotationState(this.file);
+    if (loadToken !== this.annotationLoadToken || this.file.path !== filePath) {
+      return;
+    }
+    if (!state) {
+      return;
+    }
+    const elements = state.elements.map(markElementSaved);
+    this.strokeHistory = elements.filter((element): element is InkStroke => element.kind === "stroke");
+    this.textHistory = elements.filter((element): element is InkText => element.kind === "text");
+    this.coverHistory = elements.filter((element): element is InkCover => element.kind === "cover");
+    this.imageHistory = elements.filter((element): element is InkImage => element.kind === "image");
+    this.savedInkIsBurnedIntoPdf = !state.overlayAnnotationsOnly && this.strokeHistory.length > 0;
+    this.savedTextIsBurnedIntoPdf = !state.overlayAnnotationsOnly && !state.overlayTextOnly && this.textHistory.length > 0;
+    if (this.savedInkIsBurnedIntoPdf || this.savedTextIsBurnedIntoPdf) {
+      this.dirty = true;
+      this.scheduleAutoSave(250);
+    }
     this.redrawAll();
   }
 
@@ -331,10 +987,12 @@ class InkSession {
     for (let i = 0; i < pageEls.length; i += 1) {
       this.ensureOverlay(pageEls[i], i);
     }
+
+    this.redrawAll();
   }
 
   scheduleQuietScan(): void {
-    this.scheduleScanPages(this.enabled ? 650 : 180);
+    this.scheduleScanPages(this.enabled ? 320 : 120);
   }
 
   private scheduleScanPages(delay = 250): void {
@@ -372,27 +1030,32 @@ class InkSession {
     if (node.closest(".xodo-pdf-ink-root") && node.classList.contains("xodo-pdf-ink-canvas")) {
       return false;
     }
-    if (node.closest(".xodo-pdf-ink-toolbar, .xodo-pdf-ink-palette-panel, .xodo-pdf-ink-embed-actions")) {
+    if (node.closest(".xodo-pdf-ink-toolbar-host, .xodo-pdf-ink-toolbar, .xodo-pdf-ink-palette-panel, .xodo-pdf-ink-image-menu, .xodo-pdf-ink-share-menu, .xodo-pdf-ink-embed-actions, .xodo-pdf-ink-inline-actions")) {
       return false;
     }
-    if (node.classList.contains("page") || node.matches("canvas, .pdfViewer, .pdf-viewer, .pdf-container")) {
+    if (
+      node.classList.contains("page") ||
+      node.matches("canvas, .pdfViewer, .pdf-viewer, .pdf-container, .view-actions, .view-header, .file-embed-title, .embed-title")
+    ) {
       return true;
     }
-    return node.querySelector(".page, canvas, .pdfViewer, .pdf-viewer, .pdf-container") !== null;
+    return node.querySelector(".page, canvas, .pdfViewer, .pdf-viewer, .pdf-container, .view-actions, .view-header, .file-embed-title, .embed-title") !== null;
   }
 
   private isInteracting(): boolean {
-    return this.currentStroke !== null || this.activeTouchId !== null || this.touchScroll !== null;
+    return this.currentStroke !== null || this.activeTouchId !== null || this.selectionDrag !== null || this.touchScroll !== null;
   }
 
   private injectButton(): void {
     if (this.button?.isConnected) {
+      this.moveButtonIntoHostIfAvailable(this.button);
       return;
     }
 
     const existing = this.rootEl.querySelector<HTMLElement>(".xodo-pdf-ink-button");
     if (existing) {
       this.button = existing;
+      this.moveButtonIntoHostIfAvailable(existing);
       return;
     }
 
@@ -406,27 +1069,151 @@ class InkSession {
 
     const actions = this.findButtonHost();
     if (actions) {
-      actions.prepend(button);
+      this.placeButtonInHost(actions, button);
     } else {
-      const floatingHost = document.createElement("div");
-      floatingHost.className = "xodo-pdf-ink-embed-actions";
-      floatingHost.appendChild(button);
-      this.rootEl.appendChild(floatingHost);
+      (this.ensureInlineEmbedHost() ?? this.rootEl).appendChild(button);
     }
 
     this.button = button;
     this.updateButtonState();
   }
 
+  private moveButtonIntoHostIfAvailable(button: HTMLElement): void {
+    const actions = this.findButtonHost();
+    if (!actions) {
+      return;
+    }
+
+    const oldHost = button.closest<HTMLElement>(".xodo-pdf-ink-embed-actions");
+    this.placeButtonInHost(actions, button);
+    if (oldHost && oldHost.childElementCount === 0) {
+      oldHost.remove();
+    }
+  }
+
+  private placeButtonInHost(host: HTMLElement, button: HTMLElement): void {
+    if (button.parentElement === host && host.firstElementChild === button) {
+      return;
+    }
+
+    const zoomOut = this.findZoomOutButton(host);
+    if (zoomOut?.parentElement === host) {
+      host.insertBefore(button, zoomOut);
+      return;
+    }
+
+    host.prepend(button);
+  }
+
+  private findZoomOutButton(host: HTMLElement): HTMLElement | null {
+    for (const item of Array.from(host.querySelectorAll<HTMLElement>("button, .clickable-icon, [aria-label], [title]"))) {
+      if (item.classList.contains("xodo-pdf-ink-button")) {
+        continue;
+      }
+      const label = `${item.getAttribute("aria-label") ?? ""} ${item.getAttribute("title") ?? ""} ${item.textContent ?? ""}`.toLowerCase();
+      if (
+        label.includes("zoom out") ||
+        label.includes("缩小") ||
+        label.includes("放小") ||
+        label.includes("zoom-out")
+      ) {
+        return item;
+      }
+    }
+    return null;
+  }
+
   private findButtonHost(): HTMLElement | null {
-    return (
-      this.rootEl.querySelector<HTMLElement>(".view-actions") ??
+    const view = this.leaf.view as unknown as PdfViewLike;
+    const leafContent = this.rootEl.closest<HTMLElement>(".workspace-leaf-content") ?? view.containerEl ?? view.contentEl ?? this.rootEl;
+    const leafEl = this.rootEl.closest<HTMLElement>(".workspace-leaf") ?? leafContent;
+
+    const pdfHost =
+      this.rootEl.querySelector<HTMLElement>(".pdf-toolbar-actions") ??
+      this.rootEl.querySelector<HTMLElement>(".pdf-toolbar-items") ??
+      this.rootEl.querySelector<HTMLElement>(".pdf-viewer-toolbar") ??
       this.rootEl.querySelector<HTMLElement>(".pdf-toolbar") ??
       this.rootEl.querySelector<HTMLElement>(".pdf-toolbar-container") ??
       this.rootEl.querySelector<HTMLElement>(".pdf-embed-toolbar") ??
-      this.rootEl.querySelector<HTMLElement>(".file-embed-title") ??
-      this.rootEl.querySelector<HTMLElement>(".embed-title")
+      leafContent.querySelector<HTMLElement>(".pdf-toolbar-actions") ??
+      leafContent.querySelector<HTMLElement>(".pdf-toolbar-items") ??
+      leafContent.querySelector<HTMLElement>(".pdf-viewer-toolbar") ??
+      leafContent.querySelector<HTMLElement>(".pdf-toolbar") ??
+      leafContent.querySelector<HTMLElement>(".pdf-toolbar-container") ??
+      leafContent.querySelector<HTMLElement>(".pdf-embed-toolbar") ??
+      leafEl.querySelector<HTMLElement>(".pdf-toolbar-actions") ??
+      leafEl.querySelector<HTMLElement>(".pdf-toolbar-items") ??
+      leafEl.querySelector<HTMLElement>(".pdf-viewer-toolbar") ??
+      leafEl.querySelector<HTMLElement>(".pdf-toolbar") ??
+      leafEl.querySelector<HTMLElement>(".pdf-toolbar-container") ??
+      leafEl.querySelector<HTMLElement>(".pdf-embed-toolbar");
+    if (pdfHost) {
+      return pdfHost;
+    }
+
+    const officialHost =
+      this.rootEl.querySelector<HTMLElement>(".view-actions") ??
+      leafContent.querySelector<HTMLElement>(".view-actions") ??
+      leafEl.querySelector<HTMLElement>(".view-actions");
+    if (officialHost) {
+      return officialHost;
+    }
+
+    if (this.isEmbeddedPdfSurface()) {
+      return (
+        this.rootEl.querySelector<HTMLElement>(".file-embed-title .file-embed-title-inner") ??
+        this.rootEl.querySelector<HTMLElement>(".file-embed-title") ??
+        this.rootEl.querySelector<HTMLElement>(".embed-title .embed-title-inner") ??
+        this.rootEl.querySelector<HTMLElement>(".embed-title") ??
+        this.findSpacedRepetitionHost() ??
+        this.ensureInlineEmbedHost()
+      );
+    }
+
+    return null;
+  }
+
+  private isEmbeddedPdfSurface(): boolean {
+    return (
+      this.rootEl.matches(".internal-embed, .media-embed, .file-embed, .markdown-embed") ||
+      this.rootEl.closest(".internal-embed, .media-embed, .file-embed, .markdown-embed") !== null ||
+      this.rootEl.closest(".sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card") !== null
     );
+  }
+
+  private findSpacedRepetitionHost(): HTMLElement | null {
+    const srRoot = this.rootEl.closest<HTMLElement>(".sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card");
+    if (!srRoot) {
+      return null;
+    }
+    return (
+      srRoot.querySelector<HTMLElement>(".file-embed-title .file-embed-title-inner") ??
+      srRoot.querySelector<HTMLElement>(".file-embed-title") ??
+      srRoot.querySelector<HTMLElement>(".embed-title .embed-title-inner") ??
+      srRoot.querySelector<HTMLElement>(".embed-title") ??
+      this.ensureInlineEmbedHost()
+    );
+  }
+
+  private ensureInlineEmbedHost(create = true): HTMLElement | null {
+    const existing = this.rootEl.querySelector<HTMLElement>(".xodo-pdf-ink-inline-actions");
+    if (existing || !create) {
+      return existing;
+    }
+
+    const host = document.createElement("div");
+    host.className = "xodo-pdf-ink-inline-actions";
+
+    const title =
+      this.rootEl.querySelector<HTMLElement>(".file-embed-title, .embed-title, .markdown-embed-title") ??
+      this.rootEl.firstElementChild;
+    if (title?.parentElement) {
+      title.insertAdjacentElement("afterend", host);
+    } else {
+      this.rootEl.prepend(host);
+    }
+
+    return host;
   }
 
   private findPageElements(): HTMLElement[] {
@@ -466,6 +1253,7 @@ class InkSession {
       };
 
       canvas.addEventListener("pointerdown", (event) => this.onPointerDown(event, newOverlay), { signal: abort.signal });
+      canvas.addEventListener("dblclick", (event) => this.onDoubleClick(event, newOverlay), { signal: abort.signal });
       canvas.addEventListener("pointermove", (event) => this.onPointerMove(event, newOverlay), { signal: abort.signal });
       canvas.addEventListener("pointerup", (event) => this.onPointerUp(event, newOverlay), { signal: abort.signal });
       canvas.addEventListener("pointercancel", (event) => this.onPointerUp(event, newOverlay), { signal: abort.signal });
@@ -498,12 +1286,15 @@ class InkSession {
   }
 
   private resizeOverlay(overlay: PageOverlay): void {
-    const rect = overlay.pageEl.getBoundingClientRect();
+    this.ensureOverlayCanvasMounted(overlay);
+    const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.xodo-pdf-ink-canvas)");
+    const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
     const cssWidth = Math.round(rect.width);
     const cssHeight = Math.round(rect.height);
     const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
 
     if (cssWidth <= 0 || cssHeight <= 0) {
+      this.scheduleScanPages(260);
       return;
     }
 
@@ -514,6 +1305,14 @@ class InkSession {
     overlay.cssWidth = cssWidth;
     overlay.cssHeight = cssHeight;
     overlay.dpr = dpr;
+    if (visibleCanvas) {
+      const pageRect = overlay.pageEl.getBoundingClientRect();
+      overlay.canvas.style.left = `${Math.max(0, Math.round(rect.left - pageRect.left))}px`;
+      overlay.canvas.style.top = `${Math.max(0, Math.round(rect.top - pageRect.top))}px`;
+    } else {
+      overlay.canvas.style.left = "0";
+      overlay.canvas.style.top = "0";
+    }
     overlay.canvas.style.width = `${cssWidth}px`;
     overlay.canvas.style.height = `${cssHeight}px`;
     overlay.canvas.width = Math.max(1, Math.round(cssWidth * dpr));
@@ -521,25 +1320,88 @@ class InkSession {
     this.redrawOverlay(overlay);
   }
 
+  private ensureOverlayCanvasMounted(overlay: PageOverlay): boolean {
+    if (!this.rootEl.contains(overlay.pageEl)) {
+      return false;
+    }
+
+    overlay.pageEl.classList.add("xodo-pdf-ink-page");
+    if (overlay.canvas.parentElement !== overlay.pageEl || overlay.pageEl.lastElementChild !== overlay.canvas) {
+      overlay.pageEl.appendChild(overlay.canvas);
+      return true;
+    }
+    return false;
+  }
+
+  private startOverlayHealthCheck(): void {
+    if (this.healthTimer !== null) {
+      return;
+    }
+    this.healthTimer = window.setInterval(() => this.repairActiveOverlays(), OVERLAY_HEALTH_CHECK_MS);
+  }
+
+  private stopOverlayHealthCheck(): void {
+    if (this.healthTimer !== null) {
+      window.clearInterval(this.healthTimer);
+      this.healthTimer = null;
+    }
+  }
+
+  private repairActiveOverlays(): void {
+    if (!this.enabled || this.isInteracting()) {
+      return;
+    }
+
+    let repaired = false;
+    this.cleanupDetachedOverlays();
+    for (const overlay of this.overlays.values()) {
+      const wasMounted = this.ensureOverlayCanvasMounted(overlay);
+      const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.xodo-pdf-ink-canvas)");
+      const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
+      const cssWidth = Math.round(rect.width);
+      const cssHeight = Math.round(rect.height);
+      if (wasMounted || cssWidth <= 0 || cssHeight <= 0 || overlay.cssWidth !== cssWidth || overlay.cssHeight !== cssHeight) {
+        this.resizeOverlay(overlay);
+        repaired = true;
+      }
+    }
+
+    if (repaired) {
+      this.redrawAll();
+      return;
+    }
+
+    this.scheduleScanPages(0);
+  }
+
   private setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     this.rootEl.classList.toggle("xodo-pdf-ink-enabled", this.enabled);
-    this.rootEl.classList.toggle("xodo-pdf-ink-selecting", this.enabled && this.tool === "select");
+    this.rootEl.classList.toggle("xodo-pdf-ink-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
     this.updateButtonState();
 
     if (this.enabled) {
       this.showToolbar();
       this.scanPages();
+      this.startOverlayHealthCheck();
       new Notice("PDF ink enabled.");
     } else {
+      this.stopOverlayHealthCheck();
       this.currentStroke = null;
-      this.selectedStrokeId = null;
+      this.selectionDrag = null;
+      this.nativeSelection = null;
+      this.pendingImageCrop = null;
+      this.selectedStrokeIds.clear();
       this.palette?.remove();
       this.palette = null;
+      this.imageMenu?.remove();
+      this.imageMenu = null;
+      this.shareMenu?.remove();
+      this.shareMenu = null;
       this.toolbar?.remove();
       this.toolbar = null;
       if (this.dirty) {
-        this.scheduleAutoSave(150);
+        this.scheduleAutoSave(AUTO_SAVE_CLOSE_DELAY_MS);
       }
       this.redrawAll();
     }
@@ -558,6 +1420,11 @@ class InkSession {
     const toolbar = document.createElement("div");
     toolbar.className = "xodo-pdf-ink-toolbar";
 
+    const dragHandle = createIconButton("grip-horizontal", "拖动工具栏");
+    dragHandle.classList.add("xodo-pdf-ink-drag-handle");
+    this.attachToolbarDragHandle(dragHandle);
+    toolbar.appendChild(dragHandle);
+
     const select = createIconButton("mouse-pointer-2", "Select");
     select.dataset.tool = "select";
     select.addEventListener("click", () => this.setTool("select"));
@@ -573,12 +1440,27 @@ class InkSession {
     highlighter.addEventListener("click", () => this.setTool("highlight"));
     toolbar.appendChild(highlighter);
 
+    const text = createIconButton("type", "PDF文字");
+    text.dataset.tool = "text";
+    text.addEventListener("click", () => this.setTool("text"));
+    toolbar.appendChild(text);
+
+    const image = createIconButton("image", "图片工具");
+    image.classList.add("xodo-pdf-ink-image-button");
+    image.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.toggleImageMenu();
+    });
+    toolbar.appendChild(image);
+
     const eraser = createIconButton("eraser", "Eraser");
     eraser.dataset.tool = "eraser";
     eraser.addEventListener("click", () => this.setTool("eraser"));
     toolbar.appendChild(eraser);
 
     const palette = createIconButton("palette", "调色板");
+    palette.classList.add("xodo-pdf-ink-palette-button");
     palette.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -590,13 +1472,138 @@ class InkSession {
     undo.addEventListener("click", () => this.undo());
     toolbar.appendChild(undo);
 
-    const clear = createIconButton("trash-2", "Clear unsaved ink");
+    const redo = createIconButton("redo-2", "Redo");
+    redo.addEventListener("click", () => this.redo());
+    toolbar.appendChild(redo);
+
+    const exportPdf = createIconButton("share-2", "分享/导出");
+    exportPdf.classList.add("xodo-pdf-ink-share-button");
+    exportPdf.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.toggleShareMenu();
+    });
+    toolbar.appendChild(exportPdf);
+
+    const navigator = createIconButton("list", "页面/标注导航");
+    navigator.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.showPageNavigator();
+    });
+    toolbar.appendChild(navigator);
+
+    const clear = createIconButton("trash-2", "删除选中/清空插件标注");
     clear.addEventListener("click", () => this.clearUnsavedInk());
     toolbar.appendChild(clear);
 
-    this.rootEl.appendChild(toolbar);
+    (this.ensureToolbarHost() ?? document.body).appendChild(toolbar);
     this.toolbar = toolbar;
     this.updateToolbarState();
+  }
+
+  private ensureToolbarHost(): HTMLElement | null {
+    const placement = this.getToolbarHostPlacement();
+    const existingHosts = Array.from(
+      placement.container.querySelectorAll<HTMLElement>(":scope > .xodo-pdf-ink-toolbar-host")
+    );
+    let host =
+      this.toolbarHost?.isConnected && this.toolbarHost.parentElement === placement.container
+        ? this.toolbarHost
+        : existingHosts[0] ?? null;
+
+    if (!host) {
+      host = document.createElement("div");
+      host.className = "xodo-pdf-ink-toolbar-host";
+    }
+
+    if (
+      placement.before !== host &&
+      (host.parentElement !== placement.container || host.nextElementSibling !== placement.before)
+    ) {
+      placement.container.insertBefore(host, placement.before);
+    }
+
+    for (const duplicate of existingHosts) {
+      if (duplicate !== host) {
+        duplicate.remove();
+      }
+    }
+
+    this.toolbarHost = host;
+    return host;
+  }
+
+  private attachToolbarDragHandle(handle: HTMLElement): void {
+    handle.addEventListener("pointerdown", (event) => {
+      if (!this.toolbarHost) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const startRect = (this.toolbar ?? this.toolbarHost).getBoundingClientRect();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const host = this.toolbarHost;
+      handle.setPointerCapture?.(event.pointerId);
+      host.classList.add("is-floating");
+      host.classList.add("is-dragging");
+      host.style.left = `${startRect.left}px`;
+      host.style.top = `${startRect.top}px`;
+      host.style.width = `${startRect.width}px`;
+      host.style.height = `${startRect.height}px`;
+      host.style.transform = "translate3d(0, 0, 0)";
+      let dragX = 0;
+      let dragY = 0;
+      let frame = 0;
+
+      const applyTransform = (): void => {
+        frame = 0;
+        host.style.transform = `translate3d(${dragX}px, ${dragY}px, 0)`;
+      };
+
+      const move = (moveEvent: PointerEvent): void => {
+        const maxLeft = Math.max(0, window.innerWidth - host.offsetWidth);
+        const maxTop = Math.max(0, window.innerHeight - host.offsetHeight);
+        dragX = clamp(startRect.left + moveEvent.clientX - startX, 0, maxLeft) - startRect.left;
+        dragY = clamp(startRect.top + moveEvent.clientY - startY, 0, maxTop) - startRect.top;
+        if (frame === 0) {
+          frame = window.requestAnimationFrame(applyTransform);
+        }
+      };
+      const up = (): void => {
+        if (frame !== 0) {
+          window.cancelAnimationFrame(frame);
+          frame = 0;
+        }
+        host.style.left = `${startRect.left + dragX}px`;
+        host.style.top = `${startRect.top + dragY}px`;
+        host.style.transform = "";
+        host.classList.remove("is-dragging");
+        handle.releasePointerCapture?.(event.pointerId);
+        window.removeEventListener("pointermove", move, true);
+        window.removeEventListener("pointerup", up, true);
+        window.removeEventListener("pointercancel", up, true);
+      };
+      window.addEventListener("pointermove", move, true);
+      window.addEventListener("pointerup", up, true);
+      window.addEventListener("pointercancel", up, true);
+    });
+  }
+
+  private getToolbarHostPlacement(): { container: HTMLElement; before: HTMLElement | null } {
+    const viewer = this.rootEl.querySelector<HTMLElement>(".pdf-viewer, .pdfViewer, .pdf-container");
+    if (viewer?.parentElement) {
+      return { container: viewer.parentElement, before: viewer };
+    }
+
+    const firstChild = this.rootEl.firstElementChild as HTMLElement | null;
+    return {
+      container: this.rootEl,
+      before: firstChild?.classList.contains("xodo-pdf-ink-toolbar-host")
+        ? (firstChild.nextElementSibling as HTMLElement | null)
+        : firstChild
+    };
   }
 
   private updateToolbarState(): void {
@@ -607,9 +1614,12 @@ class InkSession {
     for (const button of this.toolbar.querySelectorAll<HTMLElement>("[data-tool]")) {
       button.classList.toggle("is-active", button.dataset.tool === this.tool);
     }
+    this.toolbar.querySelector<HTMLElement>(".xodo-pdf-ink-image-button")?.classList.toggle("is-active", this.tool === "image-crop");
 
-    for (const colorButton of this.rootEl.querySelectorAll<HTMLElement>(".xodo-pdf-ink-color")) {
-      colorButton.classList.toggle("is-active", colorButton.title === this.color);
+    for (const colorButton of this.palette?.querySelectorAll<HTMLElement>(".xodo-pdf-ink-color") ?? []) {
+      const target = colorButton.dataset.target;
+      const activeColor = target === "highlight" ? this.highlightColor : target === "text" ? this.getTextPaletteColor() : this.penColor;
+      colorButton.classList.toggle("is-active", colorButton.title === activeColor);
     }
 
     this.updatePaletteState();
@@ -617,15 +1627,126 @@ class InkSession {
 
   private setTool(tool: ToolMode): void {
     this.tool = tool;
-    this.rootEl.classList.toggle("xodo-pdf-ink-selecting", this.enabled && this.tool === "select");
-    if (tool === "highlight") {
-      this.width = Math.max(this.width, 9);
-    }
-    if (tool !== "select") {
-      this.selectedStrokeId = null;
+    this.rootEl.classList.toggle("xodo-pdf-ink-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
+    if (tool !== "select" && tool !== "image-crop") {
+      this.selectionDrag = null;
+      this.nativeSelection = null;
+      this.pendingImageCrop = null;
+      this.selectedStrokeIds.clear();
       this.redrawAll();
     }
+    if (tool === "select" || tool === "image-crop") {
+      this.palette?.remove();
+      this.palette = null;
+      if (tool === "image-crop") {
+        new Notice("拖拽框选 PDF 区域以截取为可编辑图片。");
+      }
+      this.updateToolbarState();
+      return;
+    }
+    this.imageMenu?.remove();
+    this.imageMenu = null;
+    this.shareMenu?.remove();
+    this.shareMenu = null;
+    if (this.palette?.isConnected) {
+      this.showPalette();
+    }
     this.updateToolbarState();
+  }
+
+  private toggleImageMenu(): void {
+    if (this.imageMenu?.isConnected) {
+      this.imageMenu.remove();
+      this.imageMenu = null;
+      return;
+    }
+    this.shareMenu?.remove();
+    this.shareMenu = null;
+    this.showImageMenu();
+  }
+
+  private showImageMenu(): void {
+    this.imageMenu?.remove();
+    const button = this.toolbar?.querySelector<HTMLElement>(".xodo-pdf-ink-image-button");
+    const panel = document.createElement("div");
+    panel.className = "xodo-pdf-ink-image-menu";
+
+    const capture = createIconButton("scan-line", "截取图片编辑");
+    capture.classList.add("xodo-pdf-ink-image-menu-button");
+    capture.addEventListener("click", () => {
+      panel.remove();
+      this.imageMenu = null;
+      this.setTool("image-crop");
+    });
+    panel.appendChild(capture);
+
+    const insert = createIconButton("image-plus", "从文件插入图片");
+    insert.classList.add("xodo-pdf-ink-image-menu-button");
+    insert.addEventListener("click", () => {
+      panel.remove();
+      this.imageMenu = null;
+      void this.pickAndInsertImageFile();
+    });
+    panel.appendChild(insert);
+
+    document.body.appendChild(panel);
+    const rect = button?.getBoundingClientRect();
+    const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + 6);
+    panel.style.top = `${Math.min(window.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`;
+    panel.style.left = `${Math.min(window.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`;
+    this.imageMenu = panel;
+  }
+
+  private toggleShareMenu(): void {
+    if (this.shareMenu?.isConnected) {
+      this.shareMenu.remove();
+      this.shareMenu = null;
+      return;
+    }
+    this.imageMenu?.remove();
+    this.imageMenu = null;
+    this.showShareMenu();
+  }
+
+  private showShareMenu(): void {
+    this.shareMenu?.remove();
+    const button = this.toolbar?.querySelector<HTMLElement>(".xodo-pdf-ink-share-button");
+    const panel = document.createElement("div");
+    panel.className = "xodo-pdf-ink-share-menu";
+
+    const pdf = createIconButton("file-output", "导出烧录 PDF");
+    pdf.classList.add("xodo-pdf-ink-share-menu-button");
+    pdf.addEventListener("click", () => {
+      panel.remove();
+      this.shareMenu = null;
+      void this.exportAnnotatedPdf();
+    });
+    panel.appendChild(pdf);
+
+    const docx = createIconButton("file-type-2", "转换 DOCX 文档");
+    docx.classList.add("xodo-pdf-ink-share-menu-button");
+    docx.addEventListener("click", () => {
+      panel.remove();
+      this.shareMenu = null;
+      void this.exportConvertedDocx();
+    });
+    panel.appendChild(docx);
+
+    const md = createIconButton("file-text", "转换 MD 文件");
+    md.classList.add("xodo-pdf-ink-share-menu-button");
+    md.addEventListener("click", () => {
+      panel.remove();
+      this.shareMenu = null;
+      void this.exportConvertedMarkdown();
+    });
+    panel.appendChild(md);
+
+    document.body.appendChild(panel);
+    const rect = button?.getBoundingClientRect();
+    const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + 6);
+    panel.style.top = `${Math.min(window.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`;
+    panel.style.left = `${Math.min(window.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`;
+    this.shareMenu = panel;
   }
 
   private onPointerDown(event: PointerEvent, overlay: PageOverlay): void {
@@ -638,17 +1759,105 @@ class InkSession {
 
     event.preventDefault();
     event.stopPropagation();
+    if (event.detail >= 2 && this.openEditorAtPoint(getNormalizedPoint(event, overlay.canvas), overlay)) {
+      return;
+    }
     overlay.canvas.setPointerCapture(event.pointerId);
     this.beginInkInteraction(getNormalizedPoint(event, overlay.canvas), overlay);
   }
 
+  private onDoubleClick(event: MouseEvent, overlay: PageOverlay): void {
+    if (!this.enabled) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.openEditorAtPoint(getNormalizedClientPoint(event.clientX, event.clientY, overlay.canvas), overlay);
+  }
+
+  private openEditorAtPoint(point: InkPoint, overlay: PageOverlay): boolean {
+    const element = this.findTextElementAt(overlay, point) ?? this.findElementAt(overlay, point);
+    if (element?.kind === "text") {
+      this.currentStroke = null;
+      this.currentCover = null;
+      this.selectionDrag = null;
+      this.selectedStrokeIds.clear();
+      this.selectedStrokeIds.add(element.id);
+      this.nativeSelection = null;
+      this.openExistingTextEditor(element, overlay);
+      this.redrawAll();
+      return true;
+    }
+    if (this.findCoverElementAt(overlay, point)) {
+      return false;
+    }
+    const native = this.findNativeObjectAt(overlay, point);
+    if (native?.kind === "text") {
+      this.currentStroke = null;
+      this.currentCover = null;
+      this.selectionDrag = null;
+      this.selectedStrokeIds.clear();
+      this.nativeSelection = null;
+      this.openNativeTextEditor(native, overlay);
+      this.redrawAll();
+      return true;
+    }
+    return false;
+  }
+
   private beginInkInteraction(point: InkPoint, overlay: PageOverlay): void {
+    const hitElement = this.findElementAt(overlay, point);
+    if (this.tool === "image-crop") {
+      if (this.pendingImageCrop?.pageIndex === overlay.pageIndex && nativeRegionContainsPoint(this.pendingImageCrop, point)) {
+        const region = this.pendingImageCrop;
+        this.pendingImageCrop = null;
+        this.nativeSelection = null;
+        if (this.convertNativeRegionToImage(region, overlay)) {
+          this.selectionDrag = {
+            current: point,
+            mode: "move",
+            moved: false,
+            pageIndex: overlay.pageIndex,
+            start: point
+          };
+          this.redrawAll();
+        } else {
+          this.selectionDrag = null;
+        }
+        return;
+      }
+      this.selectedStrokeIds.clear();
+      this.nativeSelection = null;
+      this.pendingImageCrop = null;
+      this.selectionDrag = {
+        current: point,
+        mode: "marquee",
+        moved: false,
+        pageIndex: overlay.pageIndex,
+        start: point
+      };
+      this.redrawAll();
+      return;
+    }
+
     const tool = this.tool;
+    const drawingTool = tool === "pen" || tool === "highlight";
+    if (
+      !drawingTool &&
+      this.hasEditableSelection(overlay.pageIndex) &&
+      (this.findSelectionHandleAt(overlay, point) || this.selectionBoxContainsPoint(overlay, point))
+    ) {
+      this.beginSelectionInteraction(point, overlay);
+      return;
+    }
+
+    if (hitElement && !drawingTool && tool !== "eraser" && tool !== "cover") {
+      this.beginSelectionInteraction(point, overlay);
+      return;
+    }
 
     if (tool === "select") {
-      const selected = this.findStrokeAt(overlay, point);
-      this.selectedStrokeId = selected?.id ?? null;
-      this.redrawAll();
+      this.beginSelectionInteraction(point, overlay);
       return;
     }
 
@@ -657,18 +1866,396 @@ class InkSession {
       return;
     }
 
+    if (tool === "text") {
+      this.addTextAnnotation(point, overlay);
+      return;
+    }
+
+    if (tool === "cover") {
+      this.currentCover = {
+        color: "#ffffff",
+        height: 0.001,
+        id: makeStrokeId(),
+        kind: "cover",
+        opacity: 1,
+        pageCssHeight: overlay.cssHeight,
+        pageCssWidth: overlay.cssWidth,
+        pageIndex: overlay.pageIndex,
+        saved: false,
+        width: 0.001,
+        x: point.x,
+        y: point.y
+      };
+      return;
+    }
+
     this.currentStroke = {
-      color: this.color,
+      color: this.getToolColor(tool),
       id: makeStrokeId(),
-      opacity: tool === "highlight" ? this.highlightOpacity : this.penOpacity,
+      kind: "stroke",
+      opacity: this.getToolOpacity(tool),
       pageCssHeight: overlay.cssHeight,
       pageCssWidth: overlay.cssWidth,
       pageIndex: overlay.pageIndex,
       points: [point],
       saved: false,
       tool,
-      width: tool === "highlight" ? Math.max(9, this.width) : this.width
+      width: this.getToolWidth(tool)
     };
+  }
+
+  private addTextAnnotation(point: InkPoint, overlay: PageOverlay): void {
+    const textElement: InkText = {
+      color: this.textColor,
+      fontFamily: this.textFontFamily,
+      fontSize: this.textFontSize,
+      id: makeStrokeId(),
+      kind: "text",
+      opacity: this.textOpacity,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: overlay.pageIndex,
+      saved: false,
+      text: "",
+      x: point.x,
+      y: point.y
+    };
+
+    this.textHistory.push(textElement);
+    this.redoStack = [];
+    this.selectedStrokeIds.clear();
+    this.selectedStrokeIds.add(textElement.id);
+    this.nativeSelection = null;
+    this.markDirty();
+    this.redrawOverlay(overlay);
+    this.openExistingTextEditor(textElement, overlay);
+  }
+
+  private openNativeTextEditor(selection: PdfNativeObject, overlay: PageOverlay): void {
+    this.closeNativeTextEditor(false);
+    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const editor = document.createElement("textarea");
+    editor.className = "xodo-pdf-ink-native-editor";
+    editor.classList.add("is-native-text-editor");
+    editor.value = selection.text ?? "";
+    const sampledBackground = this.samplePdfBackgroundColor(overlay, selection);
+    this.nativeTextEditorCover = this.createNativeTextCover(selection, overlay, sampledBackground, false);
+    this.redrawOverlay(overlay);
+    editor.dataset.coverColor = sampledBackground;
+    editor.style.backgroundColor = "rgba(255, 255, 255, 0.02)";
+    editor.style.borderColor = "#1c7ed6";
+    editor.style.color = readableTextColor(sampledBackground);
+    editor.style.fontSize = `${Math.max(8, selection.height * overlay.cssHeight * 0.82)}px`;
+    editor.style.height = `${Math.max(24, selection.height * overlay.cssHeight)}px`;
+    editor.style.left = `${pageRect.left + selection.x * overlay.cssWidth}px`;
+    editor.style.lineHeight = "1.15";
+    editor.style.top = `${pageRect.top + selection.y * overlay.cssHeight}px`;
+    editor.style.width = `${Math.max(32, selection.width * overlay.cssWidth)}px`;
+
+    const commit = (): void => {
+      if (this.nativeTextEditor !== editor) {
+        return;
+      }
+      const value = editor.value.trim();
+      this.closeNativeTextEditor(false);
+      if (!value || value === (selection.text ?? "").trim()) {
+        return;
+      }
+      this.replaceNativeSelectionWithText(selection, overlay, value, editor.dataset.coverColor ?? sampledBackground);
+    };
+
+    editor.addEventListener("blur", commit);
+    editor.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeNativeTextEditor(false);
+      } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        commit();
+      }
+    });
+    editor.addEventListener("input", () => {
+      // Keep the native text editor locked to the selected text box.
+    });
+
+    document.body.appendChild(editor);
+    this.nativeTextEditor = editor;
+    focusTextEditor(editor);
+  }
+
+  private openExistingTextEditor(textElement: InkText, overlay: PageOverlay): void {
+    this.closeNativeTextEditor(false);
+    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const bounds = textBounds(textElement, overlay.cssWidth, overlay.cssHeight);
+    const editor = document.createElement("textarea");
+    editor.className = "xodo-pdf-ink-native-editor";
+    editor.value = textElement.text;
+    editor.style.backgroundColor = "rgba(255, 255, 255, 0.92)";
+    editor.style.color = textElement.color;
+    editor.style.fontFamily = textElement.fontFamily ?? "sans-serif";
+    editor.style.fontSize = `${textElement.fontSize}px`;
+    editor.style.height = `${Math.max(24, bounds.maxY - bounds.minY + 8)}px`;
+    editor.style.left = `${pageRect.left + bounds.minX}px`;
+    editor.style.lineHeight = "1.15";
+    editor.style.top = `${pageRect.top + bounds.minY}px`;
+    const estimatedWidth = estimateTextEditorWidth(editor.value, textElement.fontSize, bounds.maxX - bounds.minX);
+    editor.style.width = `${Math.min(Math.max(48, estimatedWidth + 24), Math.max(80, window.innerWidth - (pageRect.left + bounds.minX) - 12))}px`;
+
+    const commit = (): void => {
+      if (this.nativeTextEditor !== editor) {
+        return;
+      }
+      const value = editor.value.trim();
+      this.closeNativeTextEditor(false);
+      if (!value) {
+        this.removeElementById(textElement.id);
+        this.selectedStrokeIds.delete(textElement.id);
+        this.markDirty();
+        this.redrawOverlay(overlay);
+        this.scheduleAutoSave();
+        return;
+      }
+      if (value === textElement.text.trim()) {
+        return;
+      }
+      textElement.text = value;
+      textElement.saved = false;
+      this.markDirty();
+      this.redrawOverlay(overlay);
+      this.scheduleAutoSave();
+    };
+
+    editor.addEventListener("blur", commit);
+    editor.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeNativeTextEditor(false);
+      } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        commit();
+      }
+    });
+    editor.addEventListener("input", () => {
+      editor.style.height = `${Math.max(24, editor.scrollHeight)}px`;
+    });
+
+    document.body.appendChild(editor);
+    this.nativeTextEditor = editor;
+    focusTextEditor(editor);
+  }
+
+  private closeNativeTextEditor(commit: boolean): void {
+    const editor = this.nativeTextEditor;
+    if (!editor) {
+      return;
+    }
+    this.nativeTextEditor = null;
+    const tempCover = this.nativeTextEditorCover;
+    this.nativeTextEditorCover = null;
+    if (commit) {
+      editor.blur();
+      return;
+    }
+    editor.remove();
+    if (tempCover) {
+      const overlay = this.findOverlayByPageIndex(tempCover.pageIndex);
+      if (overlay) {
+        this.redrawOverlay(overlay);
+      }
+    }
+  }
+
+  commitNativeTextEditor(): void {
+    const editor = this.nativeTextEditor;
+    if (!editor) {
+      return;
+    }
+    editor.blur();
+  }
+
+  private replaceNativeSelectionWithText(selection: PdfNativeObject, overlay: PageOverlay, text: string, backgroundColor: string): void {
+    const cover = this.createNativeTextCover(selection, overlay, backgroundColor, false);
+    const textElement: InkText = {
+      color: readableTextColor(backgroundColor),
+      fontSize: Math.max(6, selection.height * overlay.cssHeight * 0.82),
+      id: makeStrokeId(),
+      kind: "text",
+      opacity: this.textOpacity,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: selection.pageIndex,
+      saved: false,
+      text,
+      x: selection.x,
+      y: selection.y
+    };
+    this.coverHistory.push(cover);
+    this.textHistory.push(textElement);
+    this.nativeSelection = null;
+    this.redoStack = [];
+    this.selectedStrokeIds.clear();
+    this.markDirty();
+    this.redrawOverlay(overlay);
+    this.scheduleAutoSave();
+  }
+
+  private createNativeTextCover(selection: PdfNativeObject, overlay: PageOverlay, backgroundColor: string, saved: boolean): InkCover {
+    return expandCoverToHideNativeText({
+      color: cssColorToHex(backgroundColor) ?? "#ffffff",
+      height: selection.height,
+      id: makeStrokeId(),
+      kind: "cover",
+      opacity: 1,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: selection.pageIndex,
+      saved,
+      source: "native-text",
+      width: selection.width,
+      x: selection.x,
+      y: selection.y
+    }, overlay);
+  }
+
+  private samplePdfBackgroundColor(overlay: PageOverlay, selection: PdfNativeObject): string {
+    const pdfCanvas = this.getPdfCanvas(overlay);
+    if (!pdfCanvas) {
+      return "#ffffff";
+    }
+
+    try {
+      const ctx = pdfCanvas.getContext("2d");
+      if (!ctx) {
+        return "#ffffff";
+      }
+      const samples = [
+        { x: selection.x + selection.width * 0.08, y: selection.y + selection.height * 0.12 },
+        { x: selection.x + selection.width * 0.92, y: selection.y + selection.height * 0.12 },
+        { x: selection.x + selection.width * 0.08, y: selection.y + selection.height * 0.88 },
+        { x: selection.x + selection.width * 0.92, y: selection.y + selection.height * 0.88 },
+        { x: selection.x + selection.width * 0.5, y: selection.y + selection.height * 0.08 },
+        { x: selection.x + selection.width * 0.5, y: selection.y + selection.height * 0.92 },
+        { x: selection.x + selection.width * 0.02, y: selection.y + selection.height * 0.5 },
+        { x: selection.x + selection.width * 0.98, y: selection.y + selection.height * 0.5 }
+      ];
+      const colors = samples.map((sample) => {
+        const x = clamp(sample.x * pdfCanvas.width, 0, Math.max(0, pdfCanvas.width - 1));
+        const y = clamp(sample.y * pdfCanvas.height, 0, Math.max(0, pdfCanvas.height - 1));
+        const data = ctx.getImageData(Math.round(x), Math.round(y), 1, 1).data;
+        return { b: data[2], g: data[1], luminance: 0.299 * data[0] + 0.587 * data[1] + 0.114 * data[2], r: data[0] };
+      });
+      const candidate = colors.some((color) => color.luminance > 220)
+        ? colors.filter((color) => color.luminance > 220).sort((a, b) => b.luminance - a.luminance)[0]
+        : colors.some((color) => color.luminance < 35)
+          ? colors.filter((color) => color.luminance < 35).sort((a, b) => a.luminance - b.luminance)[0]
+          : colors.sort((a, b) => a.luminance - b.luminance)[Math.floor(colors.length / 2)];
+      return rgbToHex(candidate.r, candidate.g, candidate.b);
+    } catch {
+      return "#ffffff";
+    }
+  }
+
+  private getPdfCanvas(overlay: PageOverlay): HTMLCanvasElement | null {
+    return (
+      overlay.pageEl.querySelector<HTMLCanvasElement>(".canvasWrapper canvas") ??
+      Array.from(overlay.pageEl.querySelectorAll<HTMLCanvasElement>("canvas")).find((canvas) => canvas !== overlay.canvas) ??
+      null
+    );
+  }
+
+  private beginSelectionInteraction(point: InkPoint, overlay: PageOverlay): void {
+    const handle = this.findSelectionHandleAt(overlay, point);
+    if (handle) {
+      const selected = this.getSelectedEditableElements(overlay.pageIndex);
+      const bounds = normalizedElementsBounds(selected);
+      if (selected.length > 0 && bounds) {
+        this.selectionDrag = {
+          current: point,
+          handle,
+          mode: "resize",
+          moved: false,
+          originalBounds: bounds,
+          originalElements: selected.map(cloneElement),
+          pageIndex: overlay.pageIndex,
+          start: point
+        };
+        this.redrawAll();
+        return;
+      }
+    }
+
+    const selected = this.findElementAt(overlay, point);
+    if (selected) {
+      if (!this.selectedStrokeIds.has(selected.id)) {
+        this.selectedStrokeIds.clear();
+        this.selectedStrokeIds.add(selected.id);
+      }
+      this.nativeSelection = null;
+      this.selectionDrag = {
+        current: point,
+        mode: "move",
+        moved: false,
+        pageIndex: overlay.pageIndex,
+        start: point
+      };
+      this.redrawAll();
+      return;
+    }
+
+    if (this.hasEditableSelection(overlay.pageIndex) && this.selectionBoxContainsPoint(overlay, point)) {
+      this.nativeSelection = null;
+      this.selectionDrag = {
+        current: point,
+        mode: "move",
+        moved: false,
+        pageIndex: overlay.pageIndex,
+        start: point
+      };
+      this.redrawAll();
+      return;
+    }
+
+    if (!selected) {
+      const blockingCover = this.findCoverElementAt(overlay, point, true);
+      if (blockingCover?.source === "native-text") {
+        this.selectedStrokeIds.clear();
+        this.nativeSelection = null;
+        this.selectionDrag = null;
+        this.redrawAll();
+        return;
+      }
+      const native = this.findNativeObjectAt(overlay, point);
+      if (native) {
+        this.selectedStrokeIds.clear();
+        this.nativeSelection = native;
+        this.selectionDrag = null;
+        this.redrawAll();
+        return;
+      }
+      if (this.selectionBoxContainsPoint(overlay, point)) {
+        this.selectionDrag = {
+          current: point,
+          mode: "move",
+          moved: false,
+          pageIndex: overlay.pageIndex,
+          start: point
+        };
+      } else {
+        this.selectedStrokeIds.clear();
+        this.nativeSelection = null;
+        this.selectionDrag = {
+          current: point,
+          mode: "marquee",
+          moved: false,
+          pageIndex: overlay.pageIndex,
+          start: point
+        };
+      }
+    } else {
+      this.selectionDrag = null;
+    }
+
+    this.redrawAll();
   }
 
   private togglePalette(): void {
@@ -689,51 +2276,173 @@ class InkSession {
     panel.addEventListener("pointerdown", (event) => event.stopPropagation());
     panel.addEventListener("click", (event) => event.stopPropagation());
 
+    if (this.tool === "eraser") {
+      panel.appendChild(
+        this.createPaletteRange("橡皮大小", "xodo-pdf-ink-width-eraser", 2, 120, 1, this.eraserWidth, (value) => {
+          this.eraserWidth = value;
+        })
+      );
+    } else if (this.tool === "highlight") {
+      panel.appendChild(this.createPaletteToolGroup("highlight", "水彩"));
+    } else if (this.hasSelectedText()) {
+      panel.appendChild(this.createPaletteTextGroup());
+    } else if (this.tool === "text") {
+      panel.appendChild(this.createPaletteTextGroup());
+    } else {
+      panel.appendChild(this.createPaletteToolGroup("pen", "笔"));
+    }
+    document.body.appendChild(panel);
+    this.palette = panel;
+    this.positionPalettePanel(panel);
+    this.updateToolbarState();
+  }
+
+  private positionPalettePanel(panel: HTMLElement): void {
+    const button = this.toolbar?.querySelector<HTMLElement>(".xodo-pdf-ink-palette-button");
+    const gap = 8;
+    const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + gap);
+
+    panel.style.top = `${fallbackTop}px`;
+    panel.style.right = `${Math.max(8, window.innerWidth - (button?.getBoundingClientRect().right ?? window.innerWidth - 12))}px`;
+
+    window.requestAnimationFrame(() => {
+      const rect = panel.getBoundingClientRect();
+      const buttonRect = button?.getBoundingClientRect();
+      let left = buttonRect ? buttonRect.right - rect.width : window.innerWidth - rect.width - 12;
+      let top = buttonRect ? buttonRect.bottom + gap : fallbackTop;
+
+      left = clamp(left, 8, Math.max(8, window.innerWidth - rect.width - 8));
+      if (buttonRect && top + rect.height > window.innerHeight - 8) {
+        top = buttonRect.top - rect.height - gap;
+      }
+      top = clamp(top, 8, Math.max(8, window.innerHeight - rect.height - 8));
+
+      panel.style.left = `${left}px`;
+      panel.style.right = "auto";
+      panel.style.top = `${top}px`;
+    });
+  }
+
+  private createPaletteToolGroup(tool: "pen" | "highlight", title: string): HTMLElement {
+    const group = document.createElement("div");
+    group.className = "xodo-pdf-ink-palette-group";
+
+    const heading = document.createElement("div");
+    heading.className = "xodo-pdf-ink-palette-heading";
+    heading.textContent = title;
+    group.appendChild(heading);
+
     const colorRow = document.createElement("div");
     colorRow.className = "xodo-pdf-ink-palette-colors";
     for (const swatch of INK_COLORS) {
       const colorButton = document.createElement("button");
       colorButton.className = "xodo-pdf-ink-color";
+      colorButton.dataset.target = tool;
       colorButton.style.backgroundColor = swatch;
       colorButton.title = swatch;
       colorButton.type = "button";
       colorButton.addEventListener("click", () => {
-        this.color = swatch;
+        this.setToolColor(tool, swatch);
         this.updateToolbarState();
       });
       colorRow.appendChild(colorButton);
     }
-    panel.appendChild(colorRow);
+    colorRow.appendChild(this.createAdvancedColorInput(tool, this.getToolColor(tool), (color) => this.setToolColor(tool, color)));
+    group.appendChild(colorRow);
 
-    panel.appendChild(
-      this.createPaletteRange("大小", "xodo-pdf-ink-width", 1, 18, 1, this.width, (value) => {
-        this.width = value;
+    group.appendChild(
+      this.createPaletteRange(`${title}大小`, `xodo-pdf-ink-width-${tool}`, tool === "highlight" ? 2 : 0.5, tool === "highlight" ? 96 : 72, 0.5, this.getToolWidth(tool), (value) => {
+        this.setToolWidth(tool, value);
       })
     );
 
-    panel.appendChild(
-      this.createPaletteRange("钢笔透明度", "xodo-pdf-ink-opacity-pen", 0.05, 1, 0.05, this.penOpacity, (value) => {
-        this.penOpacity = value;
+    group.appendChild(
+      this.createPaletteRange(`${title}透明度`, `xodo-pdf-ink-opacity-${tool}`, 0.05, 1, 0.05, this.getToolOpacity(tool), (value) => {
+        this.setToolOpacity(tool, value);
       })
     );
 
-    panel.appendChild(
-      this.createPaletteRange(
-        "高亮透明度",
-        "xodo-pdf-ink-opacity-highlight",
-        0.05,
-        1,
-        0.05,
-        this.highlightOpacity,
-        (value) => {
-          this.highlightOpacity = value;
-        }
-      )
+    return group;
+  }
+
+  private createPaletteTextGroup(): HTMLElement {
+    const group = document.createElement("div");
+    group.className = "xodo-pdf-ink-palette-group";
+
+    const heading = document.createElement("div");
+    heading.className = "xodo-pdf-ink-palette-heading";
+    heading.textContent = "文字";
+    group.appendChild(heading);
+
+    const colorRow = document.createElement("div");
+    colorRow.className = "xodo-pdf-ink-palette-colors";
+    for (const swatch of INK_COLORS) {
+      const colorButton = document.createElement("button");
+      colorButton.className = "xodo-pdf-ink-color";
+      colorButton.dataset.target = "text";
+      colorButton.style.backgroundColor = swatch;
+      colorButton.title = swatch;
+      colorButton.type = "button";
+      colorButton.addEventListener("click", () => {
+        this.setTextPaletteColor(swatch);
+        this.updateToolbarState();
+      });
+      colorRow.appendChild(colorButton);
+    }
+    colorRow.appendChild(this.createAdvancedColorInput("text", this.getTextPaletteColor(), (color) => this.setTextPaletteColor(color)));
+    group.appendChild(colorRow);
+
+    const fontRow = document.createElement("label");
+    fontRow.className = "xodo-pdf-ink-palette-range";
+    fontRow.title = "字体";
+    const fontLabel = document.createElement("span");
+    fontLabel.textContent = "字体";
+    fontRow.appendChild(fontLabel);
+    const select = document.createElement("select");
+    select.className = "xodo-pdf-ink-font-family";
+    for (const font of TEXT_FONTS) {
+      const option = document.createElement("option");
+      option.value = font.value;
+      option.textContent = font.label;
+      select.appendChild(option);
+    }
+    select.value = this.getTextPaletteFontFamily();
+    select.addEventListener("change", () => this.setTextPaletteFontFamily(select.value));
+    fontRow.appendChild(select);
+    group.appendChild(fontRow);
+
+    group.appendChild(
+      this.createPaletteRange("文字大小", "xodo-pdf-ink-size-text", 6, 120, 1, this.getTextPaletteFontSize(), (value) => this.setTextPaletteFontSize(value))
     );
 
-    this.rootEl.appendChild(panel);
-    this.palette = panel;
-    this.updateToolbarState();
+    group.appendChild(
+      this.createPaletteRange("文字透明度", "xodo-pdf-ink-opacity-text", 0.05, 1, 0.05, this.getTextPaletteOpacity(), (value) => this.setTextPaletteOpacity(value))
+    );
+
+    return group;
+  }
+
+  private createAdvancedColorInput(target: "pen" | "highlight" | "text", value: string, onInput: (color: string) => void): HTMLElement {
+    const row = document.createElement("button");
+    row.className = "xodo-pdf-ink-color xodo-pdf-ink-color-advanced";
+    row.title = "自定义颜色";
+    row.type = "button";
+
+    const input = document.createElement("input");
+    input.dataset.target = target;
+    input.type = "color";
+    input.value = normalizeHexColor(value);
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("input", () => {
+      onInput(input.value);
+      this.updateToolbarState();
+    });
+    row.addEventListener("click", () => {
+      input.click();
+    });
+    row.appendChild(input);
+
+    return row;
   }
 
   private createPaletteRange(
@@ -771,19 +2480,499 @@ class InkSession {
       return;
     }
 
-    const widthInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-width");
-    if (widthInput) {
-      widthInput.value = String(this.width);
+    for (const tool of ["pen", "highlight"] as const) {
+      const widthInput = this.palette.querySelector<HTMLInputElement>(`.xodo-pdf-ink-width-${tool}`);
+      if (widthInput) {
+        widthInput.value = String(this.getToolWidth(tool));
+      }
+
+      const opacityInput = this.palette.querySelector<HTMLInputElement>(`.xodo-pdf-ink-opacity-${tool}`);
+      if (opacityInput) {
+        opacityInput.value = String(this.getToolOpacity(tool));
+      }
     }
 
-    const penOpacityInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-opacity-pen");
-    if (penOpacityInput) {
-      penOpacityInput.value = String(this.penOpacity);
+    const eraserInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-width-eraser");
+    if (eraserInput) {
+      eraserInput.value = String(this.eraserWidth);
     }
 
-    const highlightOpacityInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-opacity-highlight");
-    if (highlightOpacityInput) {
-      highlightOpacityInput.value = String(this.highlightOpacity);
+    const textSizeInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-size-text");
+    if (textSizeInput) {
+      textSizeInput.value = String(this.getTextPaletteFontSize());
+    }
+
+    const textOpacityInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-opacity-text");
+    if (textOpacityInput) {
+      textOpacityInput.value = String(this.getTextPaletteOpacity());
+    }
+
+    const textFontInput = this.palette.querySelector<HTMLSelectElement>(".xodo-pdf-ink-font-family");
+    if (textFontInput) {
+      textFontInput.value = this.getTextPaletteFontFamily();
+    }
+  }
+
+  private hasSelectedText(): boolean {
+    return this.getSelectedTextElements().length > 0;
+  }
+
+  private getSelectedTextElements(): InkText[] {
+    return this.textHistory.filter((text) => this.selectedStrokeIds.has(text.id));
+  }
+
+  private getTextPaletteColor(): string {
+    return this.getSelectedTextElements()[0]?.color ?? this.textColor;
+  }
+
+  private getTextPaletteFontSize(): number {
+    return this.getSelectedTextElements()[0]?.fontSize ?? this.textFontSize;
+  }
+
+  private getTextPaletteFontFamily(): string {
+    return this.getSelectedTextElements()[0]?.fontFamily ?? this.textFontFamily;
+  }
+
+  private getTextPaletteOpacity(): number {
+    return this.getSelectedTextElements()[0]?.opacity ?? this.textOpacity;
+  }
+
+  private setTextPaletteColor(color: string): void {
+    this.textColor = color;
+    this.updateSelectedTextElements((text) => {
+      text.color = color;
+    });
+  }
+
+  private setTextPaletteFontSize(fontSize: number): void {
+    this.textFontSize = fontSize;
+    this.updateSelectedTextElements((text) => {
+      text.fontSize = fontSize;
+    });
+  }
+
+  private setTextPaletteFontFamily(fontFamily: string): void {
+    this.textFontFamily = fontFamily;
+    this.updateSelectedTextElements((text) => {
+      text.fontFamily = fontFamily;
+    });
+  }
+
+  private setTextPaletteOpacity(opacity: number): void {
+    this.textOpacity = opacity;
+    this.updateSelectedTextElements((text) => {
+      text.opacity = opacity;
+    });
+  }
+
+  private updateSelectedTextElements(update: (text: InkText) => void): void {
+    const selected = this.getSelectedTextElements();
+    if (selected.length === 0) {
+      return;
+    }
+    for (const text of selected) {
+      update(text);
+      text.saved = false;
+    }
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
+  }
+
+  showPageNavigator(): void {
+    if (this.pageNavigator?.isConnected) {
+      this.pageNavigator.remove();
+      this.pageNavigator = null;
+      return;
+    }
+
+    const panel = document.createElement("div");
+    panel.className = "pdftion-panel pdftion-page-navigator";
+    panel.addEventListener("pointerdown", (event) => event.stopPropagation());
+    panel.addEventListener("click", (event) => event.stopPropagation());
+
+    const header = document.createElement("div");
+    header.className = "pdftion-panel-header";
+    header.textContent = "pdftion";
+    const close = createIconButton("x", "关闭");
+    close.addEventListener("click", () => {
+      panel.remove();
+      this.pageNavigator = null;
+    });
+    header.appendChild(close);
+    panel.appendChild(header);
+
+    const stats = this.aiGetStats();
+    const summary = document.createElement("div");
+    summary.className = "pdftion-panel-summary";
+    summary.textContent = `读取页面... | 笔迹 ${stats.strokes} | 文字 ${stats.texts} | 图片 ${stats.images} | 遮挡 ${stats.covers}`;
+    panel.appendChild(summary);
+
+    const list = document.createElement("div");
+    list.className = "pdftion-page-list";
+    list.textContent = "读取页面...";
+    panel.appendChild(list);
+
+    const actions = document.createElement("div");
+    actions.className = "pdftion-panel-actions";
+
+    const up = document.createElement("button");
+    up.type = "button";
+    up.textContent = "上移";
+    up.addEventListener("click", () => void this.moveSelectedPages(-1));
+    actions.appendChild(up);
+
+    const down = document.createElement("button");
+    down.type = "button";
+    down.textContent = "下移";
+    down.addEventListener("click", () => void this.moveSelectedPages(1));
+    actions.appendChild(down);
+
+    const reorder = document.createElement("button");
+    reorder.type = "button";
+    reorder.textContent = "重排";
+    reorder.addEventListener("click", () => void this.reorderPagesByPrompt());
+    actions.appendChild(reorder);
+
+    const rotate = document.createElement("button");
+    rotate.type = "button";
+    rotate.textContent = "旋转";
+    rotate.addEventListener("click", () => void this.rotateSelectedPagesClockwise());
+    actions.appendChild(rotate);
+
+    const crop = document.createElement("button");
+    crop.type = "button";
+    crop.textContent = "裁切";
+    crop.addEventListener("click", () => void this.cropSelectedPagesByPrompt());
+    actions.appendChild(crop);
+
+    const deletePages = document.createElement("button");
+    deletePages.type = "button";
+    deletePages.textContent = "删页";
+    deletePages.addEventListener("click", () => void this.deleteSelectedPages());
+    actions.appendChild(deletePages);
+
+    const importPdf = document.createElement("button");
+    importPdf.type = "button";
+    importPdf.textContent = "导入PDF";
+    importPdf.addEventListener("click", () => void this.importPdfByPrompt());
+    actions.appendChild(importPdf);
+
+    const exportMd = document.createElement("button");
+    exportMd.type = "button";
+    exportMd.textContent = "导出 MD";
+    exportMd.addEventListener("click", () => void this.exportAnnotationsMarkdown());
+    actions.appendChild(exportMd);
+    const insertLink = document.createElement("button");
+    insertLink.type = "button";
+    insertLink.textContent = "OB链接";
+    insertLink.addEventListener("click", () => void this.insertObsidianLinkInteractive());
+    actions.appendChild(insertLink);
+    const convert = document.createElement("button");
+    convert.type = "button";
+    convert.textContent = "MD/DOCX";
+    convert.addEventListener("click", () => void this.exportMarkdownDocxBridge());
+    actions.appendChild(convert);
+    panel.appendChild(actions);
+
+    document.body.appendChild(panel);
+    this.pageNavigator = panel;
+    void this.populatePageNavigatorList(list, summary);
+    const anchor = this.toolbarHost?.getBoundingClientRect();
+    panel.style.top = `${Math.max(8, anchor ? anchor.bottom + 8 : 80)}px`;
+    panel.style.right = "12px";
+  }
+
+  private async populatePageNavigatorList(list: HTMLElement, summary: HTMLElement): Promise<void> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const stats = this.aiGetStats();
+    summary.textContent = `页 ${pageCount} | 笔迹 ${stats.strokes} | 文字 ${stats.texts} | 图片 ${stats.images} | 遮挡 ${stats.covers}`;
+    list.textContent = "";
+
+    if (this.selectedPageIndexes.size === 0) {
+      this.selectedPageIndexes.add(clamp(Math.floor(this.getVisibleOverlay()?.pageIndex ?? 0), 0, Math.max(0, pageCount - 1)));
+    }
+
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+      const row = document.createElement("div");
+      row.className = "pdftion-page-row";
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = this.selectedPageIndexes.has(pageIndex);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) {
+          this.selectedPageIndexes.add(pageIndex);
+        } else {
+          this.selectedPageIndexes.delete(pageIndex);
+        }
+      });
+      row.appendChild(checkbox);
+
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "pdftion-page-item";
+      const count = this.getEditableElements().filter((element) => element.pageIndex === pageIndex).length;
+      item.textContent = `第 ${pageIndex + 1} 页 (${count})`;
+      item.addEventListener("click", () => {
+        checkbox.checked = true;
+        this.selectedPageIndexes.add(pageIndex);
+        this.jumpToPage(pageIndex);
+      });
+      row.appendChild(item);
+
+      list.appendChild(row);
+    }
+  }
+
+  private async getCurrentPdfPageCount(): Promise<number> {
+    const binary = await this.plugin.app.vault.readBinary(this.file);
+    const pdf = await PDFDocument.load(binary, { ignoreEncryption: true });
+    return pdf.getPageCount();
+  }
+
+  private getSelectedPageIndexes(pageCount: number): number[] {
+    const selected = Array.from(this.selectedPageIndexes)
+      .map((pageIndex) => Math.floor(pageIndex))
+      .filter((pageIndex) => pageIndex >= 0 && pageIndex < pageCount)
+      .sort((a, b) => a - b);
+    if (selected.length > 0) {
+      return selected;
+    }
+    return [clamp(Math.floor(this.getVisibleOverlay()?.pageIndex ?? 0), 0, Math.max(0, pageCount - 1))];
+  }
+
+  private refreshPageNavigator(): void {
+    const panel = this.pageNavigator;
+    if (!panel?.isConnected) {
+      return;
+    }
+    const list = panel.querySelector<HTMLElement>(".pdftion-page-list");
+    const summary = panel.querySelector<HTMLElement>(".pdftion-panel-summary");
+    if (list && summary) {
+      void this.populatePageNavigatorList(list, summary);
+    }
+  }
+
+  private async moveSelectedPages(delta: -1 | 1): Promise<void> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const selected = new Set(this.getSelectedPageIndexes(pageCount));
+    const order = Array.from({ length: pageCount }, (_, index) => index);
+    if (delta < 0) {
+      for (let i = 1; i < order.length; i += 1) {
+        if (selected.has(order[i]) && !selected.has(order[i - 1])) {
+          [order[i - 1], order[i]] = [order[i], order[i - 1]];
+        }
+      }
+    } else {
+      for (let i = order.length - 2; i >= 0; i -= 1) {
+        if (selected.has(order[i]) && !selected.has(order[i + 1])) {
+          [order[i + 1], order[i]] = [order[i], order[i + 1]];
+        }
+      }
+    }
+    await this.rewritePdfWithPageOrder(order, "页码已移动");
+  }
+
+  private async reorderPagesByPrompt(): Promise<void> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const raw = window.prompt(`输入新的页码顺序，例如 3,1,2 或 1-3,5。当前共 ${pageCount} 页。`);
+    if (!raw) {
+      return;
+    }
+    const order = parsePageOrder(raw, pageCount);
+    if (!order) {
+      new Notice("页码顺序无效。");
+      return;
+    }
+    await this.rewritePdfWithPageOrder(order, "页码已重组");
+  }
+
+  private async deleteSelectedPages(): Promise<void> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const selected = new Set(this.getSelectedPageIndexes(pageCount));
+    if (selected.size >= pageCount) {
+      new Notice("不能删除全部页面。");
+      return;
+    }
+    if (!window.confirm(`删除 ${selected.size} 页？此操作会修改当前 PDF。`)) {
+      return;
+    }
+    const order = Array.from({ length: pageCount }, (_, index) => index).filter((pageIndex) => !selected.has(pageIndex));
+    await this.rewritePdfWithPageOrder(order, "已删除页面");
+  }
+
+  private async rotateSelectedPagesClockwise(): Promise<void> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const selected = this.getSelectedPageIndexes(pageCount);
+    const binary = await this.plugin.app.vault.readBinary(this.file);
+    const pdf = await PDFDocument.load(binary, { ignoreEncryption: true });
+    for (const pageIndex of selected) {
+      const page = pdf.getPage(pageIndex);
+      const angle = page.getRotation().angle;
+      page.setRotation(degrees((angle + 90) % 360));
+    }
+    const rotated = this.getEditableElements().map((element) => selected.includes(element.pageIndex) ? rotateElementClockwise(element) : cloneElement(element));
+    const saved = await pdf.save({ useObjectStreams: true });
+    await this.persistPdfRewrite(saved, rotated, "已旋转选中页面");
+  }
+
+  private async cropSelectedPagesByPrompt(): Promise<void> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const selected = this.getSelectedPageIndexes(pageCount);
+    const raw = window.prompt("输入裁切比例：左,上,右,下。可填 0.05 或 5%，例如 0.03,0.04,0.03,0.04");
+    if (!raw) {
+      return;
+    }
+    const crop = parseCropInput(raw);
+    if (!crop) {
+      new Notice("裁切参数无效。");
+      return;
+    }
+    const binary = await this.plugin.app.vault.readBinary(this.file);
+    const pdf = await PDFDocument.load(binary, { ignoreEncryption: true });
+    for (const pageIndex of selected) {
+      const page = pdf.getPage(pageIndex);
+      const size = page.getSize();
+      const width = size.width * Math.max(0.01, 1 - crop.left - crop.right);
+      const height = size.height * Math.max(0.01, 1 - crop.top - crop.bottom);
+      page.setCropBox(crop.left * size.width, crop.bottom * size.height, width, height);
+    }
+    const cropped = this.getEditableElements().map((element) => selected.includes(element.pageIndex) ? cropElement(element, crop) : cloneElement(element));
+    const saved = await pdf.save({ useObjectStreams: true });
+    await this.persistPdfRewrite(saved, cropped, "已裁切选中页面");
+  }
+
+  private async importPdfByPrompt(): Promise<void> {
+    const file = await pickPdfFile();
+    if (!file) {
+      return;
+    }
+    const pageCount = await this.getCurrentPdfPageCount();
+    const defaultInsert = this.getSelectedPageIndexes(pageCount).at(-1) ?? pageCount - 1;
+    const raw = window.prompt("插入到第几页之后？填 0 表示插到最前，留空表示插到选中页之后。", String(defaultInsert + 1));
+    const insertAfter = raw?.trim() ? Math.max(0, Math.floor(Number(raw)) || 0) : defaultInsert + 1;
+    const insertIndex = clamp(insertAfter, 0, pageCount);
+
+    const currentBytes = await this.plugin.app.vault.readBinary(this.file);
+    const incomingBytes = await file.arrayBuffer();
+    const currentPdf = await PDFDocument.load(currentBytes, { ignoreEncryption: true });
+    const incomingPdf = await PDFDocument.load(incomingBytes, { ignoreEncryption: true });
+    const output = await PDFDocument.create();
+    const before = await output.copyPages(currentPdf, Array.from({ length: insertIndex }, (_, index) => index));
+    for (const page of before) {
+      output.addPage(page);
+    }
+    const imported = await output.copyPages(incomingPdf, Array.from({ length: incomingPdf.getPageCount() }, (_, index) => index));
+    for (const page of imported) {
+      output.addPage(page);
+    }
+    const after = await output.copyPages(currentPdf, Array.from({ length: pageCount - insertIndex }, (_, index) => insertIndex + index));
+    for (const page of after) {
+      output.addPage(page);
+    }
+
+    const shifted = this.getEditableElements().map((element) => {
+      const clone = cloneElement(element);
+      if (clone.pageIndex >= insertIndex) {
+        clone.pageIndex += incomingPdf.getPageCount();
+      }
+      return clone;
+    });
+    const saved = await output.save({ useObjectStreams: true });
+    await this.persistPdfRewrite(saved, shifted, `已导入并合并 ${file.name}`);
+  }
+
+  private async rewritePdfWithPageOrder(order: number[], message: string): Promise<void> {
+    const binary = await this.plugin.app.vault.readBinary(this.file);
+    const source = await PDFDocument.load(binary, { ignoreEncryption: true });
+    if (order.length === 0 || order.some((pageIndex) => pageIndex < 0 || pageIndex >= source.getPageCount())) {
+      new Notice("页码顺序无效。");
+      return;
+    }
+    const output = await PDFDocument.create();
+    const pages = await output.copyPages(source, order);
+    for (const page of pages) {
+      output.addPage(page);
+    }
+
+    const indexMap = new Map<number, number>();
+    order.forEach((oldIndex, newIndex) => indexMap.set(oldIndex, newIndex));
+    const remapped = this.getEditableElements()
+      .filter((element) => indexMap.has(element.pageIndex))
+      .map((element) => {
+        const clone = cloneElement(element);
+        clone.pageIndex = indexMap.get(element.pageIndex) ?? clone.pageIndex;
+        return clone;
+      });
+    const selected = this.getSelectedPageIndexes(source.getPageCount())
+      .map((pageIndex) => indexMap.get(pageIndex))
+      .filter((pageIndex): pageIndex is number => typeof pageIndex === "number");
+    this.selectedPageIndexes = new Set(selected);
+    const saved = await output.save({ useObjectStreams: true });
+    await this.persistPdfRewrite(saved, remapped, message);
+  }
+
+  private async persistPdfRewrite(saved: Uint8Array, elements: InkElement[], message: string): Promise<void> {
+    const buffer = new ArrayBuffer(saved.byteLength);
+    new Uint8Array(buffer).set(saved);
+    await this.plugin.app.vault.modifyBinary(this.file, buffer);
+    const basePdf = await this.plugin.ensureBasePdfBytes(this.file, buffer);
+    const marked = elements.map((element) => markElementSaved(cloneElement(element)));
+    await this.plugin.saveAnnotationState(this.file, marked, basePdf.fingerprint, buffer);
+    this.applyLocalElementsAfterPdfRewrite(marked);
+    new Notice(message);
+  }
+
+  private applyLocalElementsAfterPdfRewrite(elements: InkElement[]): void {
+    this.strokeHistory = elements.filter((element): element is InkStroke => element.kind === "stroke");
+    this.textHistory = elements.filter((element): element is InkText => element.kind === "text");
+    this.coverHistory = elements.filter((element): element is InkCover => element.kind === "cover");
+    this.imageHistory = elements.filter((element): element is InkImage => element.kind === "image");
+    this.currentStroke = null;
+    this.currentCover = null;
+    this.redoStack = [];
+    this.selectedStrokeIds.clear();
+    this.nativeSelection = null;
+    this.dirty = false;
+    this.redrawAll();
+    this.refreshPageNavigator();
+    this.scheduleQuietScan();
+  }
+
+  private getToolColor(tool: "pen" | "highlight"): string {
+    return tool === "highlight" ? this.highlightColor : this.penColor;
+  }
+
+  private setToolColor(tool: "pen" | "highlight", color: string): void {
+    if (tool === "highlight") {
+      this.highlightColor = color;
+    } else {
+      this.penColor = color;
+    }
+  }
+
+  private getToolOpacity(tool: "pen" | "highlight"): number {
+    return tool === "highlight" ? this.highlightOpacity : this.penOpacity;
+  }
+
+  private setToolOpacity(tool: "pen" | "highlight", opacity: number): void {
+    if (tool === "highlight") {
+      this.highlightOpacity = opacity;
+    } else {
+      this.penOpacity = opacity;
+    }
+  }
+
+  private getToolWidth(tool: "pen" | "highlight"): number {
+    return tool === "highlight" ? this.highlightWidth : this.penWidth;
+  }
+
+  private setToolWidth(tool: "pen" | "highlight", width: number): void {
+    if (tool === "highlight") {
+      this.highlightWidth = width;
+    } else {
+      this.penWidth = width;
     }
   }
 
@@ -797,13 +2986,27 @@ class InkSession {
 
     event.preventDefault();
     event.stopPropagation();
-    this.moveInkInteraction(getNormalizedPoint(event, overlay.canvas), overlay);
+    const events = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [event];
+    for (const pointerEvent of events) {
+      this.moveInkInteraction(getNormalizedPoint(pointerEvent, overlay.canvas), overlay);
+    }
   }
 
   private moveInkInteraction(point: InkPoint, overlay: PageOverlay): void {
+    if (this.selectionDrag) {
+      this.moveSelectionInteraction(point, overlay);
+      return;
+    }
+
+    if (this.currentCover && this.currentCover.pageIndex === overlay.pageIndex) {
+      this.updateCurrentCover(point, overlay);
+      return;
+    }
+
     const tool = this.tool;
 
     if (tool === "select") {
+      this.moveSelectionInteraction(point, overlay);
       return;
     }
 
@@ -817,13 +3020,93 @@ class InkSession {
       return;
     }
 
+    this.appendPointToCurrentStroke(stroke, point, overlay);
+  }
+
+  private updateCurrentCover(point: InkPoint, overlay: PageOverlay): void {
+    const cover = this.currentCover;
+    if (!cover) {
+      return;
+    }
+    const x1 = cover.x;
+    const y1 = cover.y;
+    cover.x = Math.min(x1, point.x);
+    cover.y = Math.min(y1, point.y);
+    cover.width = Math.max(0.001, Math.abs(point.x - x1));
+    cover.height = Math.max(0.001, Math.abs(point.y - y1));
+    this.redrawOverlay(overlay);
+  }
+
+  private appendPointToCurrentStroke(stroke: InkStroke, point: InkPoint, overlay: PageOverlay): void {
     const last = stroke.points[stroke.points.length - 1];
-    if (last && normalizedDistance(last, point, overlay.cssWidth, overlay.cssHeight) < 1.5) {
+    if (!last) {
+      stroke.points.push(point);
+      this.redrawOverlay(overlay, stroke);
       return;
     }
 
-    stroke.points.push(point);
+    const distance = normalizedDistance(last, point, overlay.cssWidth, overlay.cssHeight);
+    if (distance < 0.8) {
+      return;
+    }
+
+    const steps = Math.max(1, Math.ceil(distance / 1.2));
+    for (let i = 1; i <= steps; i += 1) {
+      const ratio = i / steps;
+      stroke.points.push({
+        x: last.x + (point.x - last.x) * ratio,
+        y: last.y + (point.y - last.y) * ratio
+      });
+    }
+
     this.redrawOverlay(overlay, stroke);
+  }
+
+  private moveSelectionInteraction(point: InkPoint, overlay: PageOverlay): void {
+    const drag = this.selectionDrag;
+    if (!drag || drag.pageIndex !== overlay.pageIndex) {
+      return;
+    }
+
+    const dx = point.x - drag.current.x;
+    const dy = point.y - drag.current.y;
+    const moved = normalizedDistance(drag.current, point, overlay.cssWidth, overlay.cssHeight) > 0.45;
+
+    if (drag.mode === "move") {
+      const selected = this.getSelectedEditableElements(overlay.pageIndex);
+      if (selected.length === 0 || !moved) {
+        return;
+      }
+
+      for (const element of selected) {
+        translateElement(element, dx, dy);
+        element.saved = false;
+      }
+      this.markDirty();
+      this.redoStack = [];
+      drag.moved = true;
+      drag.current = point;
+      this.redrawAll();
+      return;
+    }
+
+    if (drag.mode === "resize") {
+      if (!drag.handle || !drag.originalBounds || !drag.originalElements || !moved) {
+        return;
+      }
+
+      this.resizeSelectedElements(drag, point);
+      this.markDirty();
+      this.redoStack = [];
+      drag.moved = true;
+      drag.current = point;
+      this.redrawAll();
+      return;
+    }
+
+    drag.current = point;
+    drag.moved = drag.moved || moved;
+    this.redrawOverlay(overlay);
   }
 
   private onPointerUp(event: PointerEvent, overlay: PageOverlay): void {
@@ -845,9 +3128,39 @@ class InkSession {
   }
 
   private endInkInteraction(overlay: PageOverlay): void {
+    if (this.selectionDrag) {
+      this.endSelectionInteraction(overlay);
+      return;
+    }
+
+    if (this.currentCover) {
+      this.endCoverInteraction(overlay);
+      return;
+    }
+
     const stroke = this.currentStroke;
     if (!stroke) {
       return;
+    }
+
+    if (isTapStroke(stroke, overlay.cssWidth, overlay.cssHeight)) {
+      const selected = this.findElementAt(overlay, stroke.points[0]);
+      if (selected) {
+        this.selectedStrokeIds.clear();
+        this.selectedStrokeIds.add(selected.id);
+        this.currentStroke = null;
+        this.redrawAll();
+        this.updateToolbarState();
+        return;
+      }
+      if (this.hasEditableSelection(overlay.pageIndex) || this.nativeSelection?.pageIndex === overlay.pageIndex) {
+        this.selectedStrokeIds.clear();
+        this.nativeSelection = null;
+        this.currentStroke = null;
+        this.redrawAll();
+        this.updateToolbarState();
+        return;
+      }
     }
 
     if (stroke.points.length === 1) {
@@ -859,11 +3172,79 @@ class InkSession {
     }
 
     this.strokeHistory.push(stroke);
-    this.selectedStrokeId = null;
+    this.redoStack = [];
+    this.selectedStrokeIds.clear();
+    this.nativeSelection = null;
     this.currentStroke = null;
-    this.dirty = true;
+      this.markDirty();
     this.redrawOverlay(overlay);
     this.scheduleAutoSave();
+  }
+
+  private endCoverInteraction(overlay: PageOverlay): void {
+    const cover = this.currentCover;
+    if (!cover) {
+      return;
+    }
+    this.currentCover = null;
+    if (cover.width * overlay.cssWidth < 6 || cover.height * overlay.cssHeight < 6) {
+      this.redrawOverlay(overlay);
+      return;
+    }
+    this.coverHistory.push(cover);
+    this.redoStack = [];
+    this.selectedStrokeIds.clear();
+    this.nativeSelection = null;
+    this.markDirty();
+    this.redrawOverlay(overlay);
+    this.scheduleAutoSave();
+  }
+
+  private endSelectionInteraction(overlay: PageOverlay): void {
+    const drag = this.selectionDrag;
+    if (!drag) {
+      return;
+    }
+
+    this.selectionDrag = null;
+
+    if (drag.mode === "move") {
+      if (drag.moved) {
+        this.redrawAll();
+        this.scheduleAutoSave();
+      }
+      this.updateToolbarState();
+      return;
+    }
+
+    if (drag.mode === "resize") {
+      if (drag.moved) {
+        this.redrawAll();
+        this.scheduleAutoSave();
+      }
+      this.updateToolbarState();
+      return;
+    }
+
+    if (drag.moved) {
+      if (this.tool === "image-crop") {
+        const region = this.createNativeImageRegionFromSelection(overlay, drag.start, drag.current);
+        if (region) {
+          this.pendingImageCrop = region;
+          this.nativeSelection = region;
+          this.redrawAll();
+        }
+        this.updateToolbarState();
+        return;
+      }
+
+      const selectedElements = this.findElementsInSelection(overlay, drag.start, drag.current);
+      this.setSelectedElements(selectedElements);
+      const native = selectedElements.length === 0 ? this.createNativeRegionFromSelection(overlay, drag.start, drag.current) : null;
+      this.nativeSelection = native?.kind === "text" ? native : null;
+      this.redrawAll();
+    }
+    this.updateToolbarState();
   }
 
   private onTouchStart(event: TouchEvent, overlay: PageOverlay): void {
@@ -877,9 +3258,19 @@ class InkSession {
       this.currentStroke = null;
       this.activeTouchId = null;
       this.redrawAll();
+      const center = getTouchCenter(event.touches);
+      const centerPoint = getNormalizedClientPoint(center.x, center.y, overlay.canvas);
+      const selected = this.getSelectedEditableElements(overlay.pageIndex);
+      const bounds = normalizedElementsBounds(selected);
+      const resizeSelection = selected.length > 0 && bounds !== null && this.selectionBoxContainsPoint(overlay, centerPoint);
       this.touchScroll = {
-        lastY: getTouchCenterY(event.touches),
-        scrollEl: findScrollableAncestor(this.rootEl)
+        initialDistance: getTouchDistance(event.touches),
+        initialBounds: resizeSelection ? bounds : undefined,
+        initialElements: resizeSelection ? selected.map(cloneElement) : undefined,
+        lastX: center.x,
+        lastY: center.y,
+        mode: resizeSelection ? "resize-selection" : "scroll",
+        scrollEl: findScrollableAncestor(overlay.pageEl)
       };
       return;
     }
@@ -893,7 +3284,20 @@ class InkSession {
     this.activeTouchId = touch.identifier;
     event.preventDefault();
     event.stopPropagation();
-    this.beginInkInteraction(getNormalizedClientPoint(touch.clientX, touch.clientY, overlay.canvas), overlay);
+    const point = getNormalizedClientPoint(touch.clientX, touch.clientY, overlay.canvas);
+    const now = Date.now();
+    const previousTap = this.lastTap;
+    const isDoubleTap =
+      previousTap !== null &&
+      previousTap.pageIndex === overlay.pageIndex &&
+      now - previousTap.time < 420 &&
+      normalizedDistance(previousTap.point, point, overlay.cssWidth, overlay.cssHeight) < 18;
+    this.lastTap = { pageIndex: overlay.pageIndex, point, time: now };
+    if (isDoubleTap && this.openEditorAtPoint(point, overlay)) {
+      this.activeTouchId = null;
+      return;
+    }
+    this.beginInkInteraction(point, overlay);
   }
 
   private onTouchMove(event: TouchEvent, overlay: PageOverlay): void {
@@ -904,17 +3308,44 @@ class InkSession {
     if (event.touches.length >= 2) {
       event.preventDefault();
       event.stopPropagation();
-      const centerY = getTouchCenterY(event.touches);
+      const center = getTouchCenter(event.touches);
       if (!this.touchScroll) {
         this.touchScroll = {
-          lastY: centerY,
-          scrollEl: findScrollableAncestor(this.rootEl)
+          initialDistance: getTouchDistance(event.touches),
+          lastX: center.x,
+          lastY: center.y,
+          mode: "scroll",
+          scrollEl: findScrollableAncestor(overlay.pageEl)
         };
         return;
       }
 
-      this.touchScroll.scrollEl.scrollTop += this.touchScroll.lastY - centerY;
-      this.touchScroll.lastY = centerY;
+      const distance = getTouchDistance(event.touches);
+      const zoomDelta = distance - this.touchScroll.initialDistance;
+
+      if (this.touchScroll.mode === "resize-selection") {
+        if (this.touchScroll.initialBounds && this.touchScroll.initialElements && Math.abs(zoomDelta) > 4) {
+          this.resizeSelectedElementsFromPinch(this.touchScroll, distance);
+          this.markDirty();
+          this.redoStack = [];
+          this.redrawAll();
+        }
+        this.touchScroll.lastX = center.x;
+        this.touchScroll.lastY = center.y;
+        return;
+      }
+
+      const moveY = Math.abs(center.y - this.touchScroll.lastY);
+      const moveX = Math.abs(center.x - this.touchScroll.lastX);
+      if (Math.abs(zoomDelta) > 26 && Math.abs(zoomDelta) > Math.max(moveY, moveX) * 1.8) {
+        dispatchPdfZoomGesture(this.rootEl, zoomDelta);
+        this.touchScroll.initialDistance = distance;
+      }
+
+      this.touchScroll.scrollEl.scrollTop += this.touchScroll.lastY - center.y;
+      this.touchScroll.scrollEl.scrollLeft += this.touchScroll.lastX - center.x;
+      this.touchScroll.lastX = center.x;
+      this.touchScroll.lastY = center.y;
       return;
     }
 
@@ -942,6 +3373,9 @@ class InkSession {
     }
 
     if (event.touches.length === 1 && this.touchScroll) {
+      if (this.touchScroll.mode === "resize-selection" && this.dirty) {
+        this.scheduleAutoSave();
+      }
       this.touchScroll = null;
       return;
     }
@@ -967,52 +3401,93 @@ class InkSession {
       if (stroke.pageIndex !== overlay.pageIndex) {
         return true;
       }
-      if (stroke.saved) {
-        return true;
-      }
-      return !strokeContainsPoint(stroke, point, overlay.cssWidth, overlay.cssHeight);
+      return !strokeContainsPoint(stroke, point, overlay.cssWidth, overlay.cssHeight, this.eraserWidth);
     });
 
     if (this.strokeHistory.length !== before) {
-      if (this.selectedStrokeId && !this.strokeHistory.some((stroke) => stroke.id === this.selectedStrokeId)) {
-        this.selectedStrokeId = null;
-      }
-      this.dirty = this.hasUnsavedStrokes();
+      this.redoStack = [];
+      this.pruneSelection();
+      this.markDirty();
       this.redrawOverlay(overlay);
       this.scheduleAutoSave();
     }
   }
 
   private undo(): void {
-    const index = findLastIndex(this.strokeHistory, (stroke) => !stroke.saved);
-    if (index === -1) {
+    const element = this.getEditableElements().at(-1);
+    if (!element) {
+      return;
+    }
+    this.removeElementById(element.id);
+    this.redoStack.push(element);
+    if (this.selectedStrokeIds.has(element.id)) {
+      this.selectedStrokeIds.delete(element.id);
+    }
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
+  }
+
+  private redo(): void {
+    const element = this.redoStack.pop();
+    if (!element) {
       return;
     }
 
-    const [stroke] = this.strokeHistory.splice(index, 1);
-    if (this.selectedStrokeId === stroke?.id) {
-      this.selectedStrokeId = null;
-    }
-    this.dirty = this.hasUnsavedStrokes();
+    element.saved = false;
+    this.addElement(element);
+    this.selectedStrokeIds.clear();
+    this.markDirty();
     this.redrawAll();
     this.scheduleAutoSave();
   }
 
   private clearUnsavedInk(): void {
-    if (!this.hasUnsavedStrokes()) {
+    if (this.selectedStrokeIds.size > 0) {
+      const selected = new Set(this.selectedStrokeIds);
+      const before = this.getEditableElements().length;
+      this.strokeHistory = this.strokeHistory.filter((stroke) => !selected.has(stroke.id));
+      this.textHistory = this.textHistory.filter((text) => !selected.has(text.id));
+      this.coverHistory = this.coverHistory.filter((cover) => !selected.has(cover.id));
+      this.imageHistory = this.imageHistory.filter((image) => !selected.has(image.id));
+      if (this.getEditableElements().length !== before) {
+        this.currentStroke = null;
+        this.currentCover = null;
+        this.selectedStrokeIds.clear();
+        this.redoStack = [];
+        this.markDirty();
+        this.redrawAll();
+        this.scheduleAutoSave();
+        return;
+      }
+    }
+
+    if (this.nativeSelection) {
+      const covered = this.aiCoverNativeSelection();
+      if (covered) {
+        this.nativeSelection = null;
+        this.redrawAll();
+      }
       return;
     }
 
-    if (!window.confirm("Clear all ink that has not been auto-saved yet?")) {
+    if (this.getEditableElements().length === 0) {
+      return;
+    }
+
+    if (!window.confirm("清空本插件可编辑标注？不会直接删除原 PDF 内容，但会移除覆盖层和本插件标注。")) {
       return;
     }
 
     this.currentStroke = null;
-    this.strokeHistory = this.strokeHistory.filter((stroke) => stroke.saved);
-    if (this.selectedStrokeId && !this.strokeHistory.some((stroke) => stroke.id === this.selectedStrokeId)) {
-      this.selectedStrokeId = null;
-    }
-    this.dirty = this.hasUnsavedStrokes();
+    this.currentCover = null;
+      this.strokeHistory = [];
+      this.textHistory = [];
+      this.coverHistory = [];
+    this.imageHistory = [];
+    this.redoStack = [];
+    this.pruneSelection();
+    this.markDirty();
     this.redrawAll();
     this.scheduleAutoSave();
   }
@@ -1031,21 +3506,86 @@ class InkSession {
 
     ctx.setTransform(overlay.dpr, 0, 0, overlay.dpr, 0, 0);
     ctx.clearRect(0, 0, overlay.cssWidth, overlay.cssHeight);
+    const editingText = this.nativeTextEditor !== null;
+
+    for (const cover of this.coverHistory) {
+      if (cover.pageIndex === overlay.pageIndex) {
+        drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(cover.id));
+      }
+    }
+
+    if (this.currentCover && this.currentCover.pageIndex === overlay.pageIndex) {
+      drawCoverElement(ctx, this.currentCover, overlay.cssWidth, overlay.cssHeight, false);
+    }
+
+    if (this.nativeTextEditorCover && this.nativeTextEditorCover.pageIndex === overlay.pageIndex) {
+      drawCoverElement(ctx, this.nativeTextEditorCover, overlay.cssWidth, overlay.cssHeight, false);
+    }
+
+    for (const image of this.imageHistory) {
+      if (image.pageIndex === overlay.pageIndex) {
+        this.drawImageElement(ctx, image, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(image.id));
+      }
+    }
 
     for (const stroke of this.strokeHistory) {
-      if (stroke.pageIndex === overlay.pageIndex) {
-        drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, stroke.id === this.selectedStrokeId);
+      if (stroke.pageIndex === overlay.pageIndex && (!stroke.saved || !this.savedInkIsBurnedIntoPdf)) {
+        drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(stroke.id));
       }
     }
 
     if (previewStroke && previewStroke.pageIndex === overlay.pageIndex) {
-      drawStroke(ctx, previewStroke, overlay.cssWidth, overlay.cssHeight, previewStroke.id === this.selectedStrokeId);
+      drawStroke(ctx, previewStroke, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(previewStroke.id));
+    }
+
+    for (const text of this.textHistory) {
+      if (text.pageIndex === overlay.pageIndex && (!text.saved || !this.savedTextIsBurnedIntoPdf)) {
+        drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(text.id));
+      }
+    }
+
+    if (!editingText && this.selectionDrag?.mode === "marquee" && this.selectionDrag.pageIndex === overlay.pageIndex) {
+      drawMarqueeBox(ctx, this.selectionDrag.start, this.selectionDrag.current, overlay.cssWidth, overlay.cssHeight);
+    }
+
+    const selected = this.getSelectedEditableElements(overlay.pageIndex);
+    if (!editingText && selected.length > 0) {
+      drawSelectionGroup(ctx, selected, overlay.cssWidth, overlay.cssHeight);
+    }
+
+    if (!editingText && this.nativeSelection?.pageIndex === overlay.pageIndex) {
+      drawNativeSelection(ctx, this.nativeSelection, overlay.cssWidth, overlay.cssHeight);
     }
   }
 
+  private drawImageElement(ctx: CanvasRenderingContext2D, image: InkImage, cssWidth: number, cssHeight: number, selected = false): void {
+    let bitmap = this.imageCache.get(image.dataUrl);
+    if (!bitmap) {
+      bitmap = new Image();
+      bitmap.onload = () => this.redrawAll();
+      bitmap.src = image.dataUrl;
+      this.imageCache.set(image.dataUrl, bitmap);
+    }
+    if (!bitmap.complete || bitmap.naturalWidth === 0) {
+      return;
+    }
+
+    ctx.save();
+    ctx.globalAlpha = selected ? Math.max(0.2, image.opacity * 0.55) : image.opacity;
+    ctx.drawImage(bitmap, image.x * cssWidth, image.y * cssHeight, image.width * cssWidth, image.height * cssHeight);
+    ctx.restore();
+  }
+
   private async saveIntoPdf(auto = false): Promise<void> {
-    const strokesToSave = this.strokeHistory.filter((stroke) => !stroke.saved);
-    if (strokesToSave.length === 0) {
+    if (auto) {
+      await this.saveEditableState();
+      return;
+    }
+
+    const elements = this.getEditableElements();
+    const targetFile = this.file;
+    const targetPath = targetFile.path;
+    if (!this.dirty && elements.every((element) => element.saved)) {
       if (!auto) {
         new Notice("No new ink to save.");
       }
@@ -1061,52 +3601,33 @@ class InkSession {
     this.saving = true;
 
     try {
-      const binary = await this.plugin.app.vault.readBinary(this.file);
-      const pdf = await PDFDocument.load(binary, { ignoreEncryption: true });
-      const pages = pdf.getPages();
+      const binary = await this.plugin.app.vault.readBinary(targetFile);
+      const basePdf = await this.plugin.ensureBasePdfBytes(targetFile, binary);
+      const pdf = await PDFDocument.load(basePdf.bytes, { ignoreEncryption: true });
+      await drawInkElementsOnPdf(pdf, elements);
 
-      for (const stroke of strokesToSave) {
-        const page = pages[stroke.pageIndex];
-        if (!page || stroke.points.length < 2) {
-          continue;
-        }
-
-        const size = page.getSize();
-        const color = hexToRgb(stroke.color);
-        const thickness = Math.max(0.5, stroke.width * (size.width / Math.max(1, stroke.pageCssWidth)));
-
-        for (let i = 1; i < stroke.points.length; i += 1) {
-          const start = stroke.points[i - 1];
-          const end = stroke.points[i];
-          page.drawLine({
-            color: rgb(color.r, color.g, color.b),
-            end: {
-              x: end.x * size.width,
-              y: size.height - end.y * size.height
-            },
-            opacity: stroke.opacity,
-            start: {
-              x: start.x * size.width,
-              y: size.height - start.y * size.height
-            },
-            thickness
-          });
-        }
-      }
-
-      const saved = await pdf.save({ useObjectStreams: false });
+      const saved = await pdf.save({ useObjectStreams: true });
       const buffer = new ArrayBuffer(saved.byteLength);
       new Uint8Array(buffer).set(saved);
-      await this.plugin.app.vault.modifyBinary(this.file, buffer);
+      await this.plugin.app.vault.modifyBinary(targetFile, buffer);
+      await this.plugin.saveAnnotationState(targetFile, elements.map(markElementSaved), basePdf.fingerprint, buffer);
+
+      if (this.file.path !== targetPath) {
+        return;
+      }
 
       this.currentStroke = null;
-      for (const stroke of strokesToSave) {
-        stroke.saved = true;
+      this.currentCover = null;
+      this.savedInkIsBurnedIntoPdf = false;
+      this.savedTextIsBurnedIntoPdf = false;
+      for (const element of elements) {
+        element.saved = true;
       }
-      this.dirty = this.hasUnsavedStrokes();
+      this.pruneSelection();
+      this.dirty = false;
       this.redrawAll();
       if (!auto) {
-        new Notice(`Saved ink into ${this.file.name}.`);
+        new Notice(`Saved ink into ${targetFile.name}.`);
       }
     } catch (error) {
       console.error(error);
@@ -1115,12 +3636,479 @@ class InkSession {
       this.saving = false;
       if (this.pendingSaveAfterCurrentSave) {
         this.pendingSaveAfterCurrentSave = false;
-        this.scheduleAutoSave(150);
+        this.scheduleAutoSave(AUTO_SAVE_IDLE_DELAY_MS);
       }
     }
   }
 
-  private findStrokeAt(overlay: PageOverlay, point: InkPoint): InkStroke | null {
+  private async saveEditableState(): Promise<void> {
+    const elements = this.getEditableElements();
+    const targetFile = this.file;
+    const targetPath = targetFile.path;
+    if (!this.dirty && elements.every((element) => element.saved)) {
+      return;
+    }
+
+    if (this.saving) {
+      this.pendingSaveAfterCurrentSave = true;
+      return;
+    }
+
+    this.clearAutoSaveTimer();
+    this.saving = true;
+
+    try {
+      const binary = await this.plugin.app.vault.readBinary(targetFile);
+      const basePdf = await this.plugin.ensureBasePdfBytes(targetFile, binary);
+      await this.plugin.saveAnnotationState(targetFile, elements.map(markElementSaved), basePdf.fingerprint, binary);
+
+      if (this.file.path !== targetPath) {
+        return;
+      }
+
+      this.savedInkIsBurnedIntoPdf = false;
+      this.savedTextIsBurnedIntoPdf = false;
+      for (const element of elements) {
+        element.saved = true;
+      }
+      this.dirty = false;
+    } catch (error) {
+      console.error(error);
+      new Notice("Could not save pdftion editable annotations. Check the console for details.");
+    } finally {
+      this.saving = false;
+      if (this.pendingSaveAfterCurrentSave) {
+        this.pendingSaveAfterCurrentSave = false;
+        this.scheduleAutoSave(AUTO_SAVE_IDLE_DELAY_MS);
+      }
+    }
+  }
+
+  async exportAnnotationsMarkdown(): Promise<string | null> {
+    this.commitNativeTextEditor();
+    const targetFile = this.file;
+    const base = targetFile.path.replace(/\.pdf$/i, "");
+    let targetPath = `${base}-pdftion-content.md`;
+    let index = 2;
+    while (await this.plugin.app.vault.adapter.exists(targetPath)) {
+      targetPath = `${base}-pdftion-content-${index}.md`;
+      index += 1;
+    }
+
+    const markdown = await this.getPdfContentMarkdown();
+    await this.plugin.app.vault.adapter.write(targetPath, markdown);
+    new Notice(`已导出 PDF 内容 Markdown：${targetPath}`);
+    return targetPath;
+  }
+
+  async exportAnnotationsDocx(): Promise<string | null> {
+    this.commitNativeTextEditor();
+    const targetFile = this.file;
+    const base = targetFile.path.replace(/\.pdf$/i, "");
+    let targetPath = `${base}-pdftion-content.docx`;
+    let index = 2;
+    while (await this.plugin.app.vault.adapter.exists(targetPath)) {
+      targetPath = `${base}-pdftion-content-${index}.docx`;
+      index += 1;
+    }
+
+    const docx = buildDocxFromParagraphs(markdownToDocxParagraphs(await this.getPdfContentMarkdown()), targetFile.basename);
+    const buffer = docx.buffer.slice(docx.byteOffset, docx.byteOffset + docx.byteLength) as ArrayBuffer;
+    await this.plugin.app.vault.adapter.writeBinary(targetPath, buffer);
+    new Notice(`已导出 PDF 内容 DOCX：${targetPath}`);
+    return targetPath;
+  }
+
+  private async getPdfContentMarkdown(): Promise<string> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const lines = [
+      `# ${this.file.basename} PDF content`,
+      "",
+      `PDF: [[${this.file.path}]]`,
+      `Exported: ${new Date().toISOString()}`,
+      ""
+    ];
+    let extractedPages = 0;
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+      const overlay = this.findOverlayByPageIndex(pageIndex);
+      const text = overlay ? this.extractNativeTextInRegion(overlay, 0, 0, 1, 1) : "";
+      if (!text) {
+        continue;
+      }
+      extractedPages += 1;
+      lines.push(`## Page ${pageIndex + 1}`, "", text, "");
+    }
+    if (extractedPages === 0) {
+      lines.push("> 当前 PDF 页面尚未渲染文字层；请先滚动到需要导出的页面后再导出，或后续接入完整 PDF 文本解析引擎。", "");
+    } else if (extractedPages < pageCount) {
+      lines.push(`> 已导出当前渲染到文字层的 ${extractedPages}/${pageCount} 页；未渲染页请滚动到对应页面后再次导出。`, "");
+    }
+    return lines.join("\n");
+  }
+
+  async exportMarkdownDocxBridge(): Promise<string | null> {
+    const mdPath = await this.exportConvertedMarkdown({ notice: false });
+    const docxPath = await this.exportConvertedDocx({ notice: false });
+    if (mdPath || docxPath) {
+      new Notice(`已导出转换文档：${[mdPath, docxPath].filter(Boolean).join(", ")}`);
+    }
+    return mdPath ?? docxPath;
+  }
+
+  private async prepareExportSnapshot(): Promise<void> {
+    this.commitNativeTextEditor();
+    await sleepMs(0);
+    this.redrawAll();
+    await waitForNextFrame();
+  }
+
+  async exportConvertedMarkdown(options: { notice?: boolean } = {}): Promise<string | null> {
+    try {
+      await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages();
+      const folderPath = await this.writeVisualConversionImages(pages);
+      const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "md");
+      const markdown = buildVisualConversionMarkdown(this.file, pages, folderPath);
+      await this.plugin.app.vault.adapter.write(targetPath, markdown);
+      if (options.notice !== false) {
+        new Notice(`已转换 MD：${targetPath}`);
+      }
+      return targetPath;
+    } catch (error) {
+      console.error(error);
+      new Notice("转换 MD 失败，查看控制台。");
+      return null;
+    }
+  }
+
+  async exportConvertedDocx(options: { notice?: boolean } = {}): Promise<string | null> {
+    try {
+      await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages();
+      const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "docx");
+      const docx = buildDocxFromPageImages(pages, this.file.basename);
+      const buffer = docx.buffer.slice(docx.byteOffset, docx.byteOffset + docx.byteLength) as ArrayBuffer;
+      await this.plugin.app.vault.adapter.writeBinary(targetPath, buffer);
+      if (options.notice !== false) {
+        new Notice(`已转换 DOCX：${targetPath}`);
+      }
+      return targetPath;
+    } catch (error) {
+      console.error(error);
+      new Notice("转换 DOCX 失败，查看控制台。");
+      return null;
+    }
+  }
+
+  private async captureVisualConversionPages(): Promise<VisualConversionPage[]> {
+    const overlays = Array.from(this.overlays.values()).sort((a, b) => a.pageIndex - b.pageIndex);
+    const pages: VisualConversionPage[] = [];
+    for (const overlay of overlays) {
+      const captured = await this.captureVisualPageImage(overlay);
+      if (captured) {
+        pages.push(captured);
+      }
+    }
+    if (pages.length === 0) {
+      throw new Error("No rendered PDF pages are available for conversion.");
+    }
+    return pages;
+  }
+
+  private async captureVisualPageImage(overlay: PageOverlay): Promise<VisualConversionPage | null> {
+    const pdfCanvas = this.getPdfCanvas(overlay);
+    if (!pdfCanvas) {
+      return null;
+    }
+
+    const sourceWidth = Math.max(1, pdfCanvas.width);
+    const sourceHeight = Math.max(1, pdfCanvas.height);
+    const maxSize = 1800;
+    const scale = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight));
+    const outputWidth = Math.max(1, Math.round(sourceWidth * scale));
+    const outputHeight = Math.max(1, Math.round(sourceHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return null;
+    }
+
+    ctx.drawImage(pdfCanvas, 0, 0, sourceWidth, sourceHeight, 0, 0, outputWidth, outputHeight);
+    ctx.save();
+    ctx.scale(outputWidth / Math.max(1, overlay.cssWidth), outputHeight / Math.max(1, overlay.cssHeight));
+    const elements = this.getEditableElements();
+    for (const cover of elements.filter((element): element is InkCover => element.kind === "cover" && element.pageIndex === overlay.pageIndex && !element.saved)) {
+      drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, false);
+    }
+    for (const image of elements.filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
+      await this.drawImageElementForExport(ctx, image, overlay.cssWidth, overlay.cssHeight);
+    }
+    for (const stroke of elements.filter((element): element is InkStroke => element.kind === "stroke" && element.pageIndex === overlay.pageIndex && (!element.saved || !this.savedInkIsBurnedIntoPdf))) {
+      drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, false);
+    }
+    for (const text of elements.filter((element): element is InkText => element.kind === "text" && element.pageIndex === overlay.pageIndex && (!element.saved || !this.savedTextIsBurnedIntoPdf))) {
+      drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, false);
+    }
+    ctx.restore();
+
+    const dataUrl = canvas.toDataURL("image/png");
+    return {
+      bytes: dataUrlToBytes(dataUrl),
+      height: outputHeight,
+      pageIndex: overlay.pageIndex,
+      width: outputWidth
+    };
+  }
+
+  private async drawImageElementForExport(ctx: CanvasRenderingContext2D, image: InkImage, cssWidth: number, cssHeight: number): Promise<void> {
+    const bitmap = await loadDataUrlImage(image.dataUrl);
+    ctx.save();
+    ctx.globalAlpha = image.opacity;
+    ctx.drawImage(bitmap, image.x * cssWidth, image.y * cssHeight, image.width * cssWidth, image.height * cssHeight);
+    ctx.restore();
+  }
+
+  private async writeVisualConversionImages(pages: VisualConversionPage[]): Promise<string> {
+    const targetFile = this.file;
+    const base = targetFile.path.replace(/\.pdf$/i, "");
+    let folderPath = `${base}-pdftion-pages`;
+    let index = 2;
+    while (await this.plugin.app.vault.adapter.exists(folderPath)) {
+      folderPath = `${base}-pdftion-pages-${index}`;
+      index += 1;
+    }
+
+    await this.ensureVaultFolder(folderPath);
+    for (const page of pages) {
+      const pageName = `page-${String(page.pageIndex + 1).padStart(3, "0")}.png`;
+      page.path = `${folderPath}/${pageName}`;
+      const buffer = page.bytes.buffer.slice(page.bytes.byteOffset, page.bytes.byteOffset + page.bytes.byteLength) as ArrayBuffer;
+      await this.plugin.app.vault.adapter.writeBinary(page.path, buffer);
+    }
+    return folderPath;
+  }
+
+  private async getUniqueConvertedPath(suffix: string, extension: string): Promise<string> {
+    const base = this.file.path.replace(/\.pdf$/i, "");
+    let target = `${base}-${suffix}.${extension}`;
+    let index = 2;
+    while (await this.plugin.app.vault.adapter.exists(target)) {
+      target = `${base}-${suffix}-${index}.${extension}`;
+      index += 1;
+    }
+    return target;
+  }
+
+  private async ensureVaultFolder(path: string): Promise<void> {
+    if (!path) {
+      return;
+    }
+    const parts = path.split("/").filter(Boolean);
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (!(await this.plugin.app.vault.adapter.exists(current))) {
+        await this.plugin.app.vault.adapter.mkdir(current);
+      }
+    }
+  }
+
+  async exportAnnotatedPdf(options: { notice?: boolean; share?: boolean } = {}): Promise<string | null> {
+    try {
+      if (options.notice !== false) {
+        new Notice("正在导出烧录 PDF...");
+      }
+      this.commitNativeTextEditor();
+      this.redrawAll();
+
+      const elements = this.getEditableElements().map(cloneElement);
+      const targetFile = this.file;
+      const targetPath = await this.getUniqueAnnotatedPdfPath(targetFile);
+      const binary = await this.plugin.app.vault.readBinary(targetFile);
+      const basePdf = await this.plugin.ensureBasePdfBytes(targetFile, binary);
+      const pdf = await PDFDocument.load(basePdf.bytes, { ignoreEncryption: true });
+      const fontBytes = elements.some((element) => element.kind === "text") ? await this.plugin.loadAnnotationFontBytes() : null;
+      await drawVisibleInkElementsOnPdf(pdf, elements, fontBytes);
+
+      const saved = await pdf.save({ useObjectStreams: true });
+      const buffer = new ArrayBuffer(saved.byteLength);
+      new Uint8Array(buffer).set(saved);
+      if (options.notice !== false) {
+        new Notice(`正在写入烧录 PDF：${targetPath}`);
+      }
+      await this.plugin.app.vault.adapter.writeBinary(targetPath, buffer);
+
+      const shared = options.share === false ? false : await trySharePdf(targetPath.split("/").pop() ?? targetFile.name, saved);
+      if (options.notice !== false) {
+        new Notice(shared ? `已生成并分享 ${targetPath}` : `已生成烧录 PDF：${targetPath}`);
+      }
+      return targetPath;
+    } catch (error) {
+      console.error(error);
+      const message = error instanceof Error ? error.message : String(error);
+      new Notice(`导出烧录 PDF 失败：${message}`);
+      return null;
+    }
+  }
+
+  private async redactCoveredPagesIntoCurrentPdf(): Promise<void> {
+    this.commitNativeTextEditor();
+    const elements = this.getEditableElements().map(cloneElement);
+    if (!elements.some((element) => element.kind === "cover")) {
+      new Notice("没有遮挡区域可固化。");
+      return;
+    }
+    if (!window.confirm("固化遮挡会修改当前 PDF：有遮挡的已渲染页面会重建为图片页，从而删除底层被遮挡文字/图片对象。继续？")) {
+      return;
+    }
+
+    const binary = await this.plugin.app.vault.readBinary(this.file);
+    const { flattenedPages, pdf } = await this.buildPdfWithFlattenedCoveredPages(binary, elements, "covers-only");
+    if (flattenedPages.size === 0) {
+      new Notice("当前没有可固化的已渲染遮挡页。请先滚到有遮挡的页面再试。");
+      return;
+    }
+    const saved = await pdf.save({ useObjectStreams: true });
+    await this.persistPdfRewrite(saved, elements, `已固化 ${flattenedPages.size} 页遮挡`);
+  }
+
+  private async buildPdfWithFlattenedCoveredPages(
+    sourceBytes: ArrayBuffer,
+    elements: InkElement[],
+    mode: "all" | "covers-only"
+  ): Promise<{ flattenedPages: Set<number>; pdf: PDFDocument }> {
+    const source = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
+    const output = await PDFDocument.create();
+    const flattenedPages = new Set<number>();
+    const pageCount = source.getPageCount();
+    const coverPages = new Set(elements.filter((element): element is InkCover => element.kind === "cover").map((cover) => cover.pageIndex));
+
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+      const page = source.getPage(pageIndex);
+      const overlay = coverPages.has(pageIndex) ? this.findOverlayByPageIndex(pageIndex) : null;
+      const pageElements = elements.filter((element) => element.pageIndex === pageIndex);
+      const dataUrl = overlay ? await this.renderFlattenedPageDataUrl(overlay, pageElements, mode) : null;
+      if (dataUrl) {
+        const size = page.getSize();
+        const outPage = output.addPage([size.width, size.height]);
+        const image = await output.embedPng(dataUrlToBytes(dataUrl));
+        outPage.drawImage(image, { height: size.height, width: size.width, x: 0, y: 0 });
+        flattenedPages.add(pageIndex);
+        continue;
+      }
+
+      const [copied] = await output.copyPages(source, [pageIndex]);
+      output.addPage(copied);
+    }
+
+    return { flattenedPages, pdf: output };
+  }
+
+  private async renderFlattenedPageDataUrl(overlay: PageOverlay, elements: InkElement[], mode: "all" | "covers-only"): Promise<string | null> {
+    const pdfCanvas = this.getPdfCanvas(overlay);
+    if (!pdfCanvas || pdfCanvas.width <= 0 || pdfCanvas.height <= 0) {
+      return null;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = pdfCanvas.width;
+    canvas.height = pdfCanvas.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return null;
+    }
+    ctx.drawImage(pdfCanvas, 0, 0, canvas.width, canvas.height);
+    const scaleX = canvas.width / Math.max(1, overlay.cssWidth);
+    const scaleY = canvas.height / Math.max(1, overlay.cssHeight);
+    ctx.save();
+    ctx.scale(scaleX, scaleY);
+
+    for (const cover of elements.filter((element): element is InkCover => element.kind === "cover")) {
+      drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, false);
+    }
+    if (mode === "all") {
+      for (const image of elements.filter((element): element is InkImage => element.kind === "image")) {
+        await drawImageDataUrl(ctx, image, overlay.cssWidth, overlay.cssHeight);
+      }
+      for (const stroke of elements.filter((element): element is InkStroke => element.kind === "stroke")) {
+        drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, false);
+      }
+      for (const text of elements.filter((element): element is InkText => element.kind === "text")) {
+        drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, false);
+      }
+    }
+
+    ctx.restore();
+    return canvas.toDataURL("image/png");
+  }
+
+  private async getUniqueAnnotatedPdfPath(file: TFile): Promise<string> {
+    const base = file.path.replace(/\.pdf$/i, "");
+    let target = `${base}-annotated.pdf`;
+    let index = 2;
+    while (await this.plugin.app.vault.adapter.exists(target)) {
+      target = `${base}-annotated-${index}.pdf`;
+      index += 1;
+    }
+    return target;
+  }
+
+  jumpToPage(pageIndex: number): boolean {
+    const overlay = this.findOverlayByPageIndex(pageIndex);
+    if (!overlay) {
+      return false;
+    }
+    overlay.pageEl.scrollIntoView({ block: "start", behavior: "smooth" });
+    return true;
+  }
+
+  private findElementAt(overlay: PageOverlay, point: InkPoint): InkElement | null {
+    const text = this.findTextElementAt(overlay, point);
+    if (text) {
+      return text;
+    }
+
+    const image = this.findImageElementAt(overlay, point);
+    if (image) {
+      return image;
+    }
+
+    return this.findStrokeElementAt(overlay, point);
+  }
+
+  private findCoverElementAt(overlay: PageOverlay, point: InkPoint, includeNativeTextCover = true): InkCover | null {
+    for (let i = this.coverHistory.length - 1; i >= 0; i -= 1) {
+      const cover = this.coverHistory[i];
+      if (cover.pageIndex !== overlay.pageIndex) {
+        continue;
+      }
+      if (!includeNativeTextCover && cover.source === "native-text") {
+        continue;
+      }
+      if (coverBoxContainsPoint(cover, point)) {
+        return cover;
+      }
+    }
+
+    return null;
+  }
+
+  private findTextElementAt(overlay: PageOverlay, point: InkPoint): InkText | null {
+    for (let i = this.textHistory.length - 1; i >= 0; i -= 1) {
+      const text = this.textHistory[i];
+      if (text.pageIndex !== overlay.pageIndex) {
+        continue;
+      }
+      if (textBoxContainsPoint(text, point, overlay.cssWidth, overlay.cssHeight)) {
+        return text;
+      }
+    }
+
+    return null;
+  }
+
+  private findStrokeElementAt(overlay: PageOverlay, point: InkPoint): InkStroke | null {
     for (let i = this.strokeHistory.length - 1; i >= 0; i -= 1) {
       const stroke = this.strokeHistory[i];
       if (stroke.pageIndex !== overlay.pageIndex) {
@@ -1133,12 +4121,1152 @@ class InkSession {
     return null;
   }
 
-  private hasUnsavedStrokes(): boolean {
-    return this.strokeHistory.some((stroke) => !stroke.saved);
+  private findImageElementAt(overlay: PageOverlay, point: InkPoint): InkImage | null {
+    for (let i = this.imageHistory.length - 1; i >= 0; i -= 1) {
+      const image = this.imageHistory[i];
+      if (image.pageIndex !== overlay.pageIndex) {
+        continue;
+      }
+      if (imageBoxContainsPoint(image, point)) {
+        return image;
+      }
+    }
+    return null;
   }
 
-  private scheduleAutoSave(delay = 800): void {
-    if (!this.hasUnsavedStrokes()) {
+  private findElementsInSelection(overlay: PageOverlay, start: InkPoint, end: InkPoint): InkElement[] {
+    const strokes = this.strokeHistory.filter((stroke) => {
+      if (stroke.pageIndex !== overlay.pageIndex) {
+        return false;
+      }
+      return strokeIntersectsSelection(stroke, start, end, overlay.cssWidth, overlay.cssHeight);
+    });
+
+    const texts = this.textHistory.filter((text) => {
+      if (text.pageIndex !== overlay.pageIndex) {
+        return false;
+      }
+      return textIntersectsSelection(text, start, end, overlay.cssWidth, overlay.cssHeight);
+    });
+
+    const images = this.imageHistory.filter((image) => {
+      if (image.pageIndex !== overlay.pageIndex) {
+        return false;
+      }
+      return imageIntersectsSelection(image, start, end);
+    });
+
+    return [...strokes, ...texts, ...images];
+  }
+
+  private findNativeObjectAt(overlay: PageOverlay, point: InkPoint): PdfNativeObject | null {
+    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const clientX = pageRect.left + point.x * overlay.cssWidth;
+    const clientY = pageRect.top + point.y * overlay.cssHeight;
+    const textSpans = Array.from(
+      overlay.pageEl.querySelectorAll<HTMLElement>(".textLayer span, .textLayer .markedContent, [data-canvas-width]")
+    );
+
+    for (let i = textSpans.length - 1; i >= 0; i -= 1) {
+      const span = textSpans[i];
+      const text = span.textContent?.trim();
+      if (!text) {
+        continue;
+      }
+      const rect = span.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) {
+        continue;
+      }
+      if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+        return {
+          height: clamp(rect.height / Math.max(1, overlay.cssHeight), 0.001, 1),
+          id: `native-text-${overlay.pageIndex}-${i}`,
+          kind: "text",
+          pageIndex: overlay.pageIndex,
+          text,
+          width: clamp(rect.width / Math.max(1, overlay.cssWidth), 0.001, 1),
+          x: clamp((rect.left - pageRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+          y: clamp((rect.top - pageRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
+        };
+      }
+    }
+
+    return null;
+  }
+
+  private createNativeRegionFromSelection(overlay: PageOverlay, start: InkPoint, end: InkPoint): PdfNativeObject | null {
+    const minX = Math.min(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const width = Math.abs(start.x - end.x);
+    const height = Math.abs(start.y - end.y);
+    if (width * overlay.cssWidth < 5 || height * overlay.cssHeight < 5) {
+      return null;
+    }
+
+    const text = this.extractNativeTextInRegion(overlay, minX, minY, width, height);
+    return {
+      height,
+      id: `native-region-${overlay.pageIndex}-${Date.now().toString(36)}`,
+      kind: text ? "text" : "region",
+      pageIndex: overlay.pageIndex,
+      text: text || undefined,
+      width,
+      x: minX,
+      y: minY
+    };
+  }
+
+  private createNativeImageRegionFromSelection(overlay: PageOverlay, start: InkPoint, end: InkPoint): PdfNativeObject | null {
+    const minX = Math.min(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const width = Math.abs(start.x - end.x);
+    const height = Math.abs(start.y - end.y);
+    if (width * overlay.cssWidth < 5 || height * overlay.cssHeight < 5) {
+      return null;
+    }
+    return {
+      height,
+      id: `native-image-region-${overlay.pageIndex}-${Date.now().toString(36)}`,
+      kind: "region",
+      pageIndex: overlay.pageIndex,
+      width,
+      x: minX,
+      y: minY
+    };
+  }
+
+  private convertNativeRegionToImage(selection: PdfNativeObject, overlay: PageOverlay): boolean {
+    const dataUrl = this.captureNativeRegionImage(selection, overlay);
+    if (!dataUrl) {
+      return false;
+    }
+
+    const cover: InkCover = {
+      color: this.sampleOuterBackgroundColor(overlay, selection),
+      height: selection.height,
+      id: makeStrokeId(),
+      kind: "cover",
+      opacity: 1,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: selection.pageIndex,
+      saved: false,
+      source: "native-region",
+      width: selection.width,
+      x: selection.x,
+      y: selection.y
+    };
+    const image: InkImage = {
+      dataUrl,
+      height: selection.height,
+      id: makeStrokeId(),
+      kind: "image",
+      opacity: 1,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: selection.pageIndex,
+      saved: false,
+      width: selection.width,
+      x: selection.x,
+      y: selection.y
+    };
+
+    this.coverHistory.push(cover);
+    this.imageHistory.push(image);
+    this.selectedStrokeIds.clear();
+    this.selectedStrokeIds.add(image.id);
+    this.redoStack = [];
+    this.markDirty();
+    this.scheduleAutoSave();
+    return true;
+  }
+
+  private captureNativeRegionImage(selection: PdfNativeObject, overlay: PageOverlay): string | null {
+    const pdfCanvas = this.getPdfCanvas(overlay);
+    if (!pdfCanvas) {
+      return null;
+    }
+
+    const sourceX = clamp(Math.round(selection.x * pdfCanvas.width), 0, Math.max(0, pdfCanvas.width - 1));
+    const sourceY = clamp(Math.round(selection.y * pdfCanvas.height), 0, Math.max(0, pdfCanvas.height - 1));
+    const sourceWidth = clamp(Math.round(selection.width * pdfCanvas.width), 1, Math.max(1, pdfCanvas.width - sourceX));
+    const sourceHeight = clamp(Math.round(selection.height * pdfCanvas.height), 1, Math.max(1, pdfCanvas.height - sourceY));
+    const maxSize = 1600;
+    const scale = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight));
+    const outputWidth = Math.max(1, Math.round(sourceWidth * scale));
+    const outputHeight = Math.max(1, Math.round(sourceHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return null;
+    }
+    ctx.drawImage(pdfCanvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, outputWidth, outputHeight);
+    return canvas.toDataURL("image/png");
+  }
+
+  private async pickAndInsertImageFile(): Promise<void> {
+    const file = await pickImageFile();
+    if (!file) {
+      return;
+    }
+    const dataUrl = await readFileAsDataUrl(file);
+    const size = await getImageDataUrlSize(dataUrl);
+    const overlay = this.getVisibleOverlay() ?? Array.from(this.overlays.values())[0];
+    if (!overlay) {
+      new Notice("没有可插入图片的 PDF 页面。");
+      return;
+    }
+    const maxWidth = 0.42;
+    const maxHeight = 0.42;
+    const ratio = size.width / Math.max(1, size.height);
+    let width = maxWidth;
+    let height = width / ratio * (overlay.cssWidth / Math.max(1, overlay.cssHeight));
+    if (height > maxHeight) {
+      height = maxHeight;
+      width = height * ratio * (overlay.cssHeight / Math.max(1, overlay.cssWidth));
+    }
+    const image: InkImage = {
+      dataUrl,
+      height: clamp(height, 0.03, 0.9),
+      id: makeStrokeId(),
+      kind: "image",
+      opacity: 1,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: overlay.pageIndex,
+      saved: false,
+      width: clamp(width, 0.03, 0.9),
+      x: 0.5 - clamp(width, 0.03, 0.9) / 2,
+      y: 0.5 - clamp(height, 0.03, 0.9) / 2
+    };
+    this.imageHistory.push(image);
+    this.selectedStrokeIds.clear();
+    this.selectedStrokeIds.add(image.id);
+    this.nativeSelection = null;
+    this.redoStack = [];
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
+  }
+
+  private async insertObsidianLinkInteractive(): Promise<void> {
+    const raw = window.prompt("输入 OB 链接或笔记名，例如 [[笔记]] / ![[图片.png]]");
+    if (!raw) {
+      return;
+    }
+    await this.insertObsidianLink({ link: raw });
+  }
+
+  async insertObsidianLink(input: PdftionObsidianLinkInput): Promise<string | null> {
+    const link = normalizeObsidianLink(input.link);
+    if (!link) {
+      return null;
+    }
+    if (link.embed) {
+      const inserted = await this.insertVaultImage({
+        path: link.target,
+        pageIndex: input.pageIndex,
+        x: input.x,
+        y: input.y
+      });
+      if (inserted) {
+        return inserted;
+      }
+    }
+
+    const overlay = this.resolveTargetOverlay(input.pageIndex);
+    if (!overlay) {
+      new Notice("没有可插入 OB 链接的 PDF 页面。");
+      return null;
+    }
+    return this.aiAddText({
+      color: normalizeHexColor(input.color ?? this.textColor),
+      fontFamily: this.textFontFamily,
+      fontSize: input.fontSize ?? this.textFontSize,
+      opacity: this.textOpacity,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: overlay.pageIndex,
+      text: input.label?.trim() || link.wikilink,
+      x: input.x ?? 0.08,
+      y: input.y ?? 0.08
+    });
+  }
+
+  async insertVaultImage(input: PdftionVaultImageInput): Promise<string | null> {
+    const file = this.resolveVaultFile(input.path);
+    if (!(file instanceof TFile) || !isImageExtension(file.extension)) {
+      new Notice("未找到可插入的 Vault 图片。");
+      return null;
+    }
+
+    const binary = await this.plugin.app.vault.readBinary(file);
+    const dataUrl = arrayBufferToDataUrl(binary, imageMimeFromExtension(file.extension));
+    const size = await getImageDataUrlSize(dataUrl);
+    const overlay = this.resolveTargetOverlay(input.pageIndex);
+    if (!overlay) {
+      new Notice("没有可插入图片的 PDF 页面。");
+      return null;
+    }
+    const dimensions = fitImageToOverlay(size, overlay, input.width, input.height);
+    return this.aiAddImage({
+      dataUrl,
+      height: dimensions.height,
+      opacity: input.opacity ?? 1,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: overlay.pageIndex,
+      width: dimensions.width,
+      x: input.x ?? 0.5 - dimensions.width / 2,
+      y: input.y ?? 0.5 - dimensions.height / 2
+    });
+  }
+
+  private resolveVaultFile(path: string): TFile | null {
+    const cleaned = stripObsidianLinkSyntax(path);
+    const linked = this.plugin.app.metadataCache.getFirstLinkpathDest(cleaned, this.file.path);
+    if (linked instanceof TFile) {
+      return linked;
+    }
+    const direct = this.plugin.app.vault.getAbstractFileByPath(cleaned);
+    return direct instanceof TFile ? direct : null;
+  }
+
+  private resolveTargetOverlay(pageIndex?: number): PageOverlay | null {
+    if (typeof pageIndex === "number") {
+      const overlay = this.findOverlayByPageIndex(Math.max(0, Math.floor(pageIndex)));
+      if (overlay) {
+        return overlay;
+      }
+    }
+    return this.getVisibleOverlay() ?? Array.from(this.overlays.values())[0] ?? null;
+  }
+
+  private sampleOuterBackgroundColor(overlay: PageOverlay, selection: PdfNativeObject): string {
+    const pdfCanvas = this.getPdfCanvas(overlay);
+    if (!pdfCanvas) {
+      return "#ffffff";
+    }
+
+    try {
+      const ctx = pdfCanvas.getContext("2d");
+      if (!ctx) {
+        return "#ffffff";
+      }
+      const padX = Math.max(2 / Math.max(1, overlay.cssWidth), selection.width * 0.08);
+      const padY = Math.max(2 / Math.max(1, overlay.cssHeight), selection.height * 0.08);
+      const samples = [
+        { x: selection.x - padX, y: selection.y + selection.height * 0.5 },
+        { x: selection.x + selection.width + padX, y: selection.y + selection.height * 0.5 },
+        { x: selection.x + selection.width * 0.5, y: selection.y - padY },
+        { x: selection.x + selection.width * 0.5, y: selection.y + selection.height + padY },
+        { x: selection.x - padX, y: selection.y - padY },
+        { x: selection.x + selection.width + padX, y: selection.y - padY },
+        { x: selection.x - padX, y: selection.y + selection.height + padY },
+        { x: selection.x + selection.width + padX, y: selection.y + selection.height + padY }
+      ];
+      const colors = samples.map((sample) => {
+        const x = clamp(sample.x * pdfCanvas.width, 0, Math.max(0, pdfCanvas.width - 1));
+        const y = clamp(sample.y * pdfCanvas.height, 0, Math.max(0, pdfCanvas.height - 1));
+        const data = ctx.getImageData(Math.round(x), Math.round(y), 1, 1).data;
+        return { b: data[2], g: data[1], luminance: 0.299 * data[0] + 0.587 * data[1] + 0.114 * data[2], r: data[0] };
+      });
+      const candidate = colors.sort((a, b) => b.luminance - a.luminance)[Math.floor(colors.length / 2)] ?? colors[0];
+      return candidate ? rgbToHex(candidate.r, candidate.g, candidate.b) : "#ffffff";
+    } catch {
+      return "#ffffff";
+    }
+  }
+
+  private extractNativeTextInRegion(overlay: PageOverlay, x: number, y: number, width: number, height: number): string {
+    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const region = {
+      bottom: pageRect.top + (y + height) * overlay.cssHeight,
+      left: pageRect.left + x * overlay.cssWidth,
+      right: pageRect.left + (x + width) * overlay.cssWidth,
+      top: pageRect.top + y * overlay.cssHeight
+    };
+    const parts: string[] = [];
+    for (const span of Array.from(overlay.pageEl.querySelectorAll<HTMLElement>(".textLayer span, .textLayer .markedContent, [data-canvas-width]"))) {
+      const text = span.textContent?.trim();
+      if (!text) {
+        continue;
+      }
+      const rect = span.getBoundingClientRect();
+      if (rect.right >= region.left && rect.left <= region.right && rect.bottom >= region.top && rect.top <= region.bottom) {
+        parts.push(text);
+      }
+    }
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  convertNativeSelectionToEditable(): ConversionResult {
+    const selection = this.nativeSelection;
+    if (!selection) {
+      return { covers: 0, skipped: 0, texts: 0 };
+    }
+
+    const overlay = this.findOverlayByPageIndex(selection.pageIndex);
+    if (!overlay) {
+      return { covers: 0, skipped: 0, texts: 0 };
+    }
+
+    const result = selection.kind === "text"
+      ? this.convertNativeTextBlocksToEditable(overlay, selection)
+      : this.convertNativeRegionToCover(selection, overlay);
+    this.nativeSelection = null;
+    this.selectedStrokeIds.clear();
+    this.redrawAll();
+    return result;
+  }
+
+  convertCurrentPageToEditable(): ConversionResult {
+    const overlay = this.getVisibleOverlay() ?? Array.from(this.overlays.values())[0];
+    return overlay ? this.convertNativePageToEditable(overlay.pageIndex) : { covers: 0, skipped: 0, texts: 0 };
+  }
+
+  convertNativePageToEditable(pageIndex?: number): ConversionResult {
+    const overlay = pageIndex === undefined ? this.getVisibleOverlay() : this.findOverlayByPageIndex(pageIndex);
+    if (!overlay) {
+      return { covers: 0, skipped: 0, texts: 0 };
+    }
+    return this.convertNativeTextBlocksToEditable(overlay);
+  }
+
+  convertNativeDocumentToEditable(): ConversionResult {
+    const total: ConversionResult = { covers: 0, pages: 0, skipped: 0, texts: 0 };
+    for (const overlay of this.overlays.values()) {
+      const result = this.convertNativeTextBlocksToEditable(overlay);
+      total.covers += result.covers;
+      total.skipped = (total.skipped ?? 0) + (result.skipped ?? 0);
+      total.texts += result.texts;
+      if (result.covers > 0 || result.texts > 0) {
+        total.pages = (total.pages ?? 0) + 1;
+      }
+    }
+    return total;
+  }
+
+  private convertNativeTextBlocksToEditable(overlay: PageOverlay, region?: PdfNativeObject): ConversionResult {
+    const blocks = this.collectNativeTextBlocks(overlay, region);
+    let converted = 0;
+    let skipped = 0;
+    for (const block of blocks) {
+      if (this.hasConvertedNativeBlock(block)) {
+        skipped += 1;
+        continue;
+      }
+      const cover = expandCoverToHideNativeText({
+        color: this.samplePdfBackgroundColor(overlay, block),
+        height: block.height,
+        id: makeStrokeId(),
+        kind: "cover",
+        opacity: 1,
+        pageCssHeight: overlay.cssHeight,
+        pageCssWidth: overlay.cssWidth,
+        pageIndex: overlay.pageIndex,
+        saved: false,
+        width: block.width,
+        x: block.x,
+        y: block.y
+      }, overlay);
+      const text: InkText = {
+        color: this.penColor,
+        fontSize: clamp(block.fontSize, 4, 200),
+        id: makeStrokeId(),
+        kind: "text" as const,
+        opacity: this.textOpacity,
+        pageCssHeight: overlay.cssHeight,
+        pageCssWidth: overlay.cssWidth,
+        pageIndex: overlay.pageIndex,
+        saved: false,
+        text: block.text,
+        x: block.x,
+        y: block.y
+      };
+      this.coverHistory.push(cover);
+      this.textHistory.push(text);
+      converted += 1;
+    }
+
+    if (converted > 0) {
+      this.redoStack = [];
+      this.markDirty();
+      this.scheduleAutoSave();
+      this.redrawOverlay(overlay);
+    }
+    return { covers: converted, skipped, texts: converted };
+  }
+
+  private convertNativeRegionToCover(selection: PdfNativeObject, overlay: PageOverlay): ConversionResult {
+    if (this.hasConvertedNativeBlock(selection)) {
+      return { covers: 0, skipped: 1, texts: 0 };
+    }
+    const cover: InkCover = {
+      color: this.samplePdfBackgroundColor(overlay, selection),
+      height: selection.height,
+      id: makeStrokeId(),
+      kind: "cover",
+      opacity: 1,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: selection.pageIndex,
+      saved: false,
+      source: "native-region",
+      width: selection.width,
+      x: selection.x,
+      y: selection.y
+    };
+    this.coverHistory.push(cover);
+    this.redoStack = [];
+    this.markDirty();
+    this.scheduleAutoSave();
+    this.redrawOverlay(overlay);
+    return { covers: 1, skipped: 0, texts: 0 };
+  }
+
+  private collectNativeTextBlocks(overlay: PageOverlay, region?: PdfNativeObject): Array<PdfNativeObject & { fontSize: number; text: string }> {
+    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const regionPx = region
+      ? {
+          bottom: pageRect.top + (region.y + region.height) * overlay.cssHeight,
+          left: pageRect.left + region.x * overlay.cssWidth,
+          right: pageRect.left + (region.x + region.width) * overlay.cssWidth,
+          top: pageRect.top + region.y * overlay.cssHeight
+        }
+      : null;
+    const fragments: Array<{ bottom: number; fontSize: number; index: number; left: number; right: number; text: string; top: number }> = [];
+    for (const [index, span] of Array.from(overlay.pageEl.querySelectorAll<HTMLElement>(".textLayer span, .textLayer .markedContent, [data-canvas-width]")).entries()) {
+      const text = span.textContent?.trim();
+      if (!text) {
+        continue;
+      }
+      const rect = span.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) {
+        continue;
+      }
+      if (regionPx && !(rect.right >= regionPx.left && rect.left <= regionPx.right && rect.bottom >= regionPx.top && rect.top <= regionPx.bottom)) {
+        continue;
+      }
+      const style = window.getComputedStyle(span);
+      const fontSize = Number.parseFloat(style.fontSize || "") || Math.max(4, rect.height * 0.82);
+      fragments.push({
+        bottom: rect.bottom,
+        fontSize,
+        index,
+        left: rect.left,
+        right: rect.right,
+        text,
+        top: rect.top
+      });
+    }
+    return mergeNativeTextFragmentsIntoLines(fragments, overlay, pageRect);
+  }
+
+  private hasConvertedNativeBlock(block: PdfNativeObject): boolean {
+    const tolerance = 0.003;
+    return this.coverHistory.some((cover) => (
+      cover.pageIndex === block.pageIndex &&
+      Math.abs(cover.x - block.x) <= tolerance &&
+      Math.abs(cover.y - block.y) <= tolerance &&
+      Math.abs(cover.width - block.width) <= tolerance &&
+      Math.abs(cover.height - block.height) <= tolerance
+    ));
+  }
+
+  private findOverlayByPageIndex(pageIndex: number): PageOverlay | null {
+    for (const overlay of this.overlays.values()) {
+      if (overlay.pageIndex === pageIndex) {
+        return overlay;
+      }
+    }
+    return null;
+  }
+
+  private getVisibleOverlay(): PageOverlay | null {
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 1;
+    let best: { distance: number; overlay: PageOverlay } | null = null;
+    for (const overlay of this.overlays.values()) {
+      const rect = overlay.pageEl.getBoundingClientRect();
+      if (rect.bottom < 0 || rect.top > viewportHeight) {
+        continue;
+      }
+      const distance = Math.abs(rect.top + rect.height / 2 - viewportHeight / 2);
+      if (!best || distance < best.distance) {
+        best = { distance, overlay };
+      }
+    }
+    return best?.overlay ?? null;
+  }
+
+  private setSelectedElements(elements: InkElement[]): void {
+    this.selectedStrokeIds.clear();
+    this.nativeSelection = null;
+    for (const element of elements) {
+      this.selectedStrokeIds.add(element.id);
+    }
+  }
+
+  private pruneSelection(): void {
+    for (const id of Array.from(this.selectedStrokeIds)) {
+      const element = this.findElementById(id);
+      if (!element) {
+        this.selectedStrokeIds.delete(id);
+      }
+    }
+  }
+
+  private getSelectedEditableElements(pageIndex?: number): InkElement[] {
+    return this.getEditableElements().filter((element) => {
+      if (!this.selectedStrokeIds.has(element.id)) {
+        return false;
+      }
+      return pageIndex === undefined || element.pageIndex === pageIndex;
+    });
+  }
+
+  private hasEditableSelection(pageIndex?: number): boolean {
+    return this.getSelectedEditableElements(pageIndex).length > 0;
+  }
+
+  private selectionBoxContainsPoint(overlay: PageOverlay, point: InkPoint): boolean {
+    const bounds = normalizedElementsBounds(this.getSelectedEditableElements(overlay.pageIndex));
+    if (!bounds) {
+      return false;
+    }
+
+    const padX = Math.max(8 / overlay.cssWidth, 0.01);
+    const padY = Math.max(8 / overlay.cssHeight, 0.01);
+    return (
+      point.x >= bounds.minX - padX &&
+      point.x <= bounds.maxX + padX &&
+      point.y >= bounds.minY - padY &&
+      point.y <= bounds.maxY + padY
+    );
+  }
+
+  private findSelectionHandleAt(overlay: PageOverlay, point: InkPoint): ResizeHandle | null {
+    const selected = this.getSelectedEditableElements(overlay.pageIndex);
+    const bounds = normalizedElementsBounds(selected);
+    if (!bounds) {
+      return null;
+    }
+
+    const textOnly = selected.length > 0 && selected.every((element) => element.kind === "text");
+    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, textOnly ? 16 : 8, textOnly ? 18 : 0);
+  }
+
+  private resizeSelectedElements(drag: SelectionDragState, point: InkPoint): void {
+    if (!drag.handle || !drag.originalBounds || !drag.originalElements) {
+      return;
+    }
+
+    this.applyResizedElements(resizeElementsFromHandle(drag.originalElements, drag.originalBounds, drag.handle, point));
+  }
+
+  private resizeSelectedElementsFromPinch(touch: TouchScrollState, distance: number): void {
+    if (!touch.initialBounds || !touch.initialElements || touch.initialDistance <= 0) {
+      return;
+    }
+
+    const factor = clamp(distance / touch.initialDistance, 0.18, 6);
+    this.applyResizedElements(scaleElementsAroundBoundsCenter(touch.initialElements, touch.initialBounds, factor));
+  }
+
+  private applyResizedElements(elements: InkElement[]): void {
+    for (const element of elements) {
+      const live = this.findElementById(element.id);
+      if (!live) {
+        continue;
+      }
+      live.saved = false;
+      if (live.kind === "stroke" && element.kind === "stroke") {
+        live.points = element.points;
+        live.width = element.width;
+      } else if (live.kind === "text" && element.kind === "text") {
+        live.x = element.x;
+        live.y = element.y;
+        live.fontSize = element.fontSize;
+      } else if (live.kind === "cover" && element.kind === "cover") {
+        live.x = element.x;
+        live.y = element.y;
+        live.width = element.width;
+        live.height = element.height;
+      } else if (live.kind === "image" && element.kind === "image") {
+        live.x = element.x;
+        live.y = element.y;
+        live.width = element.width;
+        live.height = element.height;
+      }
+    }
+  }
+
+  private getEditableElements(): InkElement[] {
+    return [...this.strokeHistory, ...this.textHistory, ...this.coverHistory, ...this.imageHistory];
+  }
+
+  private findElementById(id: string): InkElement | null {
+    return (
+      this.strokeHistory.find((stroke) => stroke.id === id) ??
+      this.textHistory.find((text) => text.id === id) ??
+      this.coverHistory.find((cover) => cover.id === id) ??
+      this.imageHistory.find((image) => image.id === id) ??
+      null
+    );
+  }
+
+  private addElement(element: InkElement): void {
+    if (element.kind === "stroke") {
+      this.strokeHistory.push(element);
+    } else if (element.kind === "text") {
+      this.textHistory.push(element);
+    } else if (element.kind === "image") {
+      this.imageHistory.push(element);
+    } else {
+      this.coverHistory.push(element);
+    }
+  }
+
+  private removeElementById(id: string): void {
+    this.strokeHistory = this.strokeHistory.filter((stroke) => stroke.id !== id);
+    this.textHistory = this.textHistory.filter((text) => text.id !== id);
+    this.coverHistory = this.coverHistory.filter((cover) => cover.id !== id);
+    this.imageHistory = this.imageHistory.filter((image) => image.id !== id);
+  }
+
+  private hasUnsavedStrokes(): boolean {
+    return this.getEditableElements().some((element) => !element.saved);
+  }
+
+  private hasPendingPdfWrite(): boolean {
+    return this.dirty || this.getEditableElements().some((element) => !element.saved);
+  }
+
+  private markDirty(): void {
+    this.dirty = true;
+  }
+
+  getFilePath(): string {
+    return this.file.path;
+  }
+
+  aiGetElements(): InkElement[] {
+    return this.getEditableElements().map(cloneElement);
+  }
+
+  aiGetSelectedElements(): InkElement[] {
+    return this.getSelectedEditableElements().map(cloneElement);
+  }
+
+  aiGetStats(): PdfElementStats {
+    const pages = new Set<number>();
+    for (const element of this.getEditableElements()) {
+      pages.add(element.pageIndex);
+    }
+    return {
+      covers: this.coverHistory.length,
+      images: this.imageHistory.length,
+      pages: pages.size,
+      strokes: this.strokeHistory.length,
+      texts: this.textHistory.length,
+      total: this.getEditableElements().length
+    };
+  }
+
+  aiGroupElementsByPage(): Record<string, InkElement[]> {
+    const grouped: Record<string, InkElement[]> = {};
+    for (const element of this.getEditableElements()) {
+      const key = String(element.pageIndex);
+      grouped[key] = grouped[key] ?? [];
+      grouped[key].push(cloneElement(element));
+    }
+    return grouped;
+  }
+
+  aiFindElements(query: PdftionElementQuery = {}): InkElement[] {
+    const ids = new Set(query.ids ?? []);
+    const color = query.color ? normalizeHexColor(query.color) : null;
+    const text = query.text?.trim().toLowerCase() ?? "";
+    return this.getEditableElements()
+      .filter((element) => {
+        if (ids.size > 0 && !ids.has(element.id)) {
+          return false;
+        }
+        if (query.kind && element.kind !== query.kind) {
+          return false;
+        }
+        if (typeof query.pageIndex === "number" && element.pageIndex !== Math.max(0, Math.floor(query.pageIndex))) {
+          return false;
+        }
+        if (color && "color" in element && normalizeHexColor(element.color) !== color) {
+          return false;
+        }
+        if (text && (element.kind !== "text" || !element.text.toLowerCase().includes(text))) {
+          return false;
+        }
+        return true;
+      })
+      .map(cloneElement);
+  }
+
+  getAnnotationsMarkdown(): string {
+    const elements = this.getEditableElements().map(cloneElement).sort((a, b) => (a.pageIndex - b.pageIndex) || a.id.localeCompare(b.id));
+    const lines = [
+      `# ${this.file.basename} pdftion annotations`,
+      "",
+      `PDF: [[${this.file.path}]]`,
+      `Exported: ${new Date().toISOString()}`,
+      "",
+      "## Summary",
+      "",
+      `- Total: ${elements.length}`,
+      `- Text: ${elements.filter((element) => element.kind === "text").length}`,
+      `- Stroke: ${elements.filter((element) => element.kind === "stroke").length}`,
+      `- Image: ${elements.filter((element) => element.kind === "image").length}`,
+      `- Cover: ${elements.filter((element) => element.kind === "cover").length}`,
+      ""
+    ];
+    let currentPage = -1;
+    for (const element of elements) {
+      if (element.pageIndex !== currentPage) {
+        currentPage = element.pageIndex;
+        lines.push("", `## Page ${currentPage + 1}`, "");
+      }
+      lines.push(`- ${formatElementForMarkdown(element)}`);
+    }
+    return lines.join("\n");
+  }
+
+  aiSelectElements(ids: string[]): number {
+    this.selectedStrokeIds.clear();
+    for (const id of ids) {
+      if (this.findElementById(id)) {
+        this.selectedStrokeIds.add(id);
+      }
+    }
+    this.nativeSelection = null;
+    this.redrawAll();
+    return this.selectedStrokeIds.size;
+  }
+
+  aiGetNativeSelection(): PdfNativeObject | null {
+    return this.nativeSelection ? { ...this.nativeSelection } : null;
+  }
+
+  aiReplaceElements(elements: InkElement[]): boolean {
+    if (!Array.isArray(elements) || !elements.every(isInkElement)) {
+      return false;
+    }
+
+    const cloned = elements.map((element) => markElementUnsaved(cloneElement(element)));
+    this.strokeHistory = cloned.filter((element): element is InkStroke => element.kind === "stroke");
+    this.textHistory = cloned.filter((element): element is InkText => element.kind === "text");
+    this.coverHistory = cloned.filter((element): element is InkCover => element.kind === "cover");
+    this.imageHistory = cloned.filter((element): element is InkImage => element.kind === "image");
+    this.selectedStrokeIds.clear();
+    this.redoStack = [];
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
+    return true;
+  }
+
+  aiUpdateElements(elements: InkElement[]): number {
+    let count = 0;
+    for (const element of elements) {
+      if (!isInkElement(element)) {
+        continue;
+      }
+      const live = this.findElementById(element.id);
+      if (!live || live.kind !== element.kind) {
+        continue;
+      }
+      this.removeElementById(live.id);
+      this.addElement(markElementUnsaved(cloneElement(element)));
+      count += 1;
+    }
+
+    if (count > 0) {
+      this.markDirty();
+      this.redrawAll();
+      this.scheduleAutoSave();
+    }
+    return count;
+  }
+
+  aiDeleteElements(ids: string[]): number {
+    const before = this.getEditableElements().length;
+    for (const id of ids) {
+      this.removeElementById(id);
+      this.selectedStrokeIds.delete(id);
+    }
+    const count = before - this.getEditableElements().length;
+    if (count > 0) {
+      this.markDirty();
+      this.redrawAll();
+      this.scheduleAutoSave();
+    }
+    return count;
+  }
+
+  async aiApplyPlan(operations: PdftionPlanOperation[]): Promise<PdftionPlanResult> {
+    const result: PdftionPlanResult = { added: [], deleted: 0, errors: [], exported: [], ok: true, selected: 0, updated: 0 };
+    if (!Array.isArray(operations)) {
+      return { ...result, errors: ["Plan must be an array."], ok: false };
+    }
+
+    for (const operation of operations) {
+      try {
+        if (operation.action === "addCover") {
+          const id = this.aiAddCover(operation.input);
+          if (id) {
+            result.added.push(id);
+          }
+        } else if (operation.action === "addImage") {
+          const id = this.aiAddImage(operation.input);
+          if (id) {
+            result.added.push(id);
+          }
+        } else if (operation.action === "addStroke") {
+          const id = this.aiAddStroke(operation.input);
+          if (id) {
+            result.added.push(id);
+          }
+        } else if (operation.action === "addText") {
+          const id = this.aiAddText(operation.input);
+          if (id) {
+            result.added.push(id);
+          }
+        } else if (operation.action === "deleteElements") {
+          result.deleted += this.aiDeleteElements(operation.ids);
+        } else if (operation.action === "exportAnnotatedPdf") {
+          const path = await this.exportAnnotatedPdf();
+          if (path) {
+            result.exported.push(path);
+          }
+        } else if (operation.action === "exportAnnotationsDocx") {
+          const path = await this.exportAnnotationsDocx();
+          if (path) {
+            result.exported.push(path);
+          }
+        } else if (operation.action === "exportAnnotationsMarkdown") {
+          const path = await this.exportAnnotationsMarkdown();
+          if (path) {
+            result.exported.push(path);
+          }
+        } else if (operation.action === "exportMarkdownDocxBridge") {
+          const path = await this.exportMarkdownDocxBridge();
+          if (path) {
+            result.exported.push(path);
+          }
+        } else if (operation.action === "insertObsidianLink") {
+          const id = await this.insertObsidianLink(operation.input);
+          if (id) {
+            result.added.push(id);
+          }
+        } else if (operation.action === "insertVaultImage") {
+          const id = await this.insertVaultImage(operation.input);
+          if (id) {
+            result.added.push(id);
+          }
+        } else if (operation.action === "replaceElements") {
+          if (!this.aiReplaceElements(operation.elements)) {
+            result.errors.push("replaceElements failed.");
+          }
+        } else if (operation.action === "selectElements") {
+          result.selected = this.aiSelectElements(operation.ids);
+        } else if (operation.action === "updateElements") {
+          result.updated += this.aiUpdateElements(operation.elements);
+        } else {
+          result.errors.push("Unknown operation.");
+        }
+      } catch (error) {
+        result.errors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    result.ok = result.errors.length === 0;
+    return result;
+  }
+
+  setPageCrop(pageIndex: number, crop: { bottom?: number; left?: number; right?: number; top?: number }): boolean {
+    this.cropByPage.set(pageIndex, {
+      bottom: clamp(Number(crop.bottom ?? 0), 0, 0.45),
+      left: clamp(Number(crop.left ?? 0), 0, 0.45),
+      right: clamp(Number(crop.right ?? 0), 0, 0.45),
+      top: clamp(Number(crop.top ?? 0), 0, 0.45)
+    });
+    new Notice("页面裁剪参数已记录；当前版本先开放给 AI/API，后续接入导出裁剪。");
+    return true;
+  }
+
+  getPageCrops(): Record<string, { bottom: number; left: number; right: number; top: number }> {
+    const result: Record<string, { bottom: number; left: number; right: number; top: number }> = {};
+    for (const [pageIndex, crop] of this.cropByPage.entries()) {
+      result[String(pageIndex)] = { ...crop };
+    }
+    return result;
+  }
+
+  aiCoverNativeSelection(): string | null {
+    const selection = this.nativeSelection;
+    if (!selection) {
+      return null;
+    }
+    return this.aiAddCover({
+      color: this.sampleNativeSelectionBackground(),
+      height: selection.height,
+      opacity: 1,
+      pageIndex: selection.pageIndex,
+      source: selection.kind === "text" ? "native-text" : "native-region",
+      width: selection.width,
+      x: selection.x,
+      y: selection.y
+    });
+  }
+
+  aiReplaceNativeText(text: string): { coverId: string | null; textId: string | null } | null {
+    const selection = this.nativeSelection;
+    const trimmed = text.trim();
+    if (!selection || !trimmed) {
+      return null;
+    }
+    const coverId = this.aiCoverNativeSelection();
+    const textId = this.aiAddText({
+      color: readableTextColor(this.sampleNativeSelectionBackground()),
+      fontSize: Math.max(6, selection.height * Math.max(1, this.findOverlayCssHeight(selection.pageIndex)) * 0.82),
+      pageIndex: selection.pageIndex,
+      text: trimmed,
+      x: selection.x,
+      y: selection.y
+    });
+    return { coverId, textId };
+  }
+
+  private sampleNativeSelectionBackground(): string {
+    const selection = this.nativeSelection;
+    if (!selection) {
+      return "#ffffff";
+    }
+    const overlay = this.findOverlayByPageIndex(selection.pageIndex);
+    return overlay ? this.samplePdfBackgroundColor(overlay, selection) : "#ffffff";
+  }
+
+  aiAddText(input: Partial<InkText> & Pick<InkText, "pageIndex" | "text" | "x" | "y">): string | null {
+    const text = String(input.text ?? "").trim();
+    if (!text) {
+      return null;
+    }
+    const element: InkText = {
+      color: normalizeHexColor(input.color ?? this.penColor),
+      fontFamily: input.fontFamily ?? this.textFontFamily,
+      fontSize: clamp(Number(input.fontSize ?? this.textFontSize), 4, 200),
+      id: input.id ?? makeStrokeId(),
+      kind: "text",
+      opacity: clamp(Number(input.opacity ?? this.textOpacity), 0.01, 1),
+      pageCssHeight: Number(input.pageCssHeight ?? 1),
+      pageCssWidth: Number(input.pageCssWidth ?? 1),
+      pageIndex: Math.max(0, Math.floor(Number(input.pageIndex))),
+      saved: false,
+      text,
+      x: clamp(Number(input.x), 0, 1),
+      y: clamp(Number(input.y), 0, 1)
+    };
+    return this.aiAddElement(element);
+  }
+
+  aiAddImage(input: Partial<InkImage> & Pick<InkImage, "dataUrl" | "pageIndex" | "x" | "y">): string | null {
+    if (!input.dataUrl?.startsWith("data:image/")) {
+      return null;
+    }
+    const element: InkImage = {
+      dataUrl: input.dataUrl,
+      height: clamp(Number(input.height ?? 0.18), 0.001, 1),
+      id: input.id ?? makeStrokeId(),
+      kind: "image",
+      opacity: clamp(Number(input.opacity ?? 1), 0.01, 1),
+      pageCssHeight: Number(input.pageCssHeight ?? 1),
+      pageCssWidth: Number(input.pageCssWidth ?? 1),
+      pageIndex: Math.max(0, Math.floor(Number(input.pageIndex))),
+      saved: false,
+      width: clamp(Number(input.width ?? 0.24), 0.001, 1),
+      x: clamp(Number(input.x), 0, 1),
+      y: clamp(Number(input.y), 0, 1)
+    };
+    return this.aiAddElement(element);
+  }
+
+  aiAddCover(input: Partial<InkCover> & Pick<InkCover, "height" | "pageIndex" | "width" | "x" | "y">): string | null {
+    const element: InkCover = {
+      color: normalizeHexColor(input.color ?? "#ffffff"),
+      height: clamp(Number(input.height), 0.001, 1),
+      id: input.id ?? makeStrokeId(),
+      kind: "cover",
+      opacity: clamp(Number(input.opacity ?? 1), 0.01, 1),
+      pageCssHeight: Number(input.pageCssHeight ?? 1),
+      pageCssWidth: Number(input.pageCssWidth ?? 1),
+      pageIndex: Math.max(0, Math.floor(Number(input.pageIndex))),
+      saved: false,
+      source: input.source,
+      width: clamp(Number(input.width), 0.001, 1),
+      x: clamp(Number(input.x), 0, 1),
+      y: clamp(Number(input.y), 0, 1)
+    };
+    return this.aiAddElement(element);
+  }
+
+  aiAddStroke(input: Partial<InkStroke> & Pick<InkStroke, "pageIndex" | "points">): string | null {
+    if (!Array.isArray(input.points) || input.points.length < 1) {
+      return null;
+    }
+    const points = input.points
+      .filter((point) => typeof point?.x === "number" && typeof point?.y === "number")
+      .map((point) => ({ x: clamp(point.x, 0, 1), y: clamp(point.y, 0, 1) }));
+    if (points.length < 1) {
+      return null;
+    }
+    if (points.length === 1) {
+      points.push({ x: clamp(points[0].x + 0.001, 0, 1), y: clamp(points[0].y + 0.001, 0, 1) });
+    }
+    const tool = input.tool === "highlight" ? "highlight" : "pen";
+    const element: InkStroke = {
+      color: normalizeHexColor(input.color ?? this.getToolColor(tool)),
+      id: input.id ?? makeStrokeId(),
+      kind: "stroke",
+      opacity: clamp(Number(input.opacity ?? this.getToolOpacity(tool)), 0.01, 1),
+      pageCssHeight: Number(input.pageCssHeight ?? 1),
+      pageCssWidth: Number(input.pageCssWidth ?? 1),
+      pageIndex: Math.max(0, Math.floor(Number(input.pageIndex))),
+      points,
+      saved: false,
+      tool,
+      width: clamp(Number(input.width ?? this.getToolWidth(tool)), 0.2, 200)
+    };
+    return this.aiAddElement(element);
+  }
+
+  private aiAddElement(element: InkElement): string {
+    this.addElement(element);
+    this.redoStack = [];
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
+    return element.id;
+  }
+
+  private findOverlayCssHeight(pageIndex: number): number {
+    for (const overlay of this.overlays.values()) {
+      if (overlay.pageIndex === pageIndex) {
+        return overlay.cssHeight;
+      }
+    }
+    return 1;
+  }
+
+  private scheduleAutoSave(delay = AUTO_SAVE_IDLE_DELAY_MS): void {
+    if (!this.hasPendingPdfWrite()) {
       return;
     }
     this.clearAutoSaveTimer();
@@ -1146,6 +5274,14 @@ class InkSession {
       this.saveTimer = null;
       void this.saveIntoPdf(true);
     }, delay);
+  }
+
+  flushSoon(): void {
+    if (!this.hasPendingPdfWrite()) {
+      return;
+    }
+    this.clearAutoSaveTimer();
+    void this.saveIntoPdf(true);
   }
 
   private clearAutoSaveTimer(): void {
@@ -1185,6 +5321,592 @@ function createIconButton(icon: string, title: string): HTMLElement {
   return button;
 }
 
+async function embedAnnotationFont(pdf: PDFDocument, fontBytes: Uint8Array) {
+  pdf.registerFontkit(resolvePdfFontkit(fontkitModule) as Parameters<PDFDocument["registerFontkit"]>[0]);
+  return pdf.embedFont(fontBytes, { subset: true });
+}
+
+async function drawInkElementsOnPdf(pdf: PDFDocument, elements: InkElement[]): Promise<void> {
+  const pages = pdf.getPages();
+  const orderedElements = elements.filter((element): element is InkCover => element.kind === "cover");
+
+  for (const element of orderedElements) {
+    const page = pages[element.pageIndex];
+    if (!page) {
+      continue;
+    }
+    const size = page.getSize();
+
+    if (element.kind === "cover") {
+      const color = hexToRgb(element.color);
+      page.drawRectangle({
+        color: rgb(color.r, color.g, color.b),
+        height: element.height * size.height,
+        opacity: element.opacity,
+        width: element.width * size.width,
+        x: element.x * size.width,
+        y: size.height - (element.y + element.height) * size.height
+      });
+    }
+  }
+}
+
+async function drawVisibleInkElementsOnPdf(pdf: PDFDocument, elements: InkElement[], fontBytes: Uint8Array | null): Promise<void> {
+  const pages = pdf.getPages();
+  const font = fontBytes ? await embedAnnotationFont(pdf, fontBytes) : null;
+  const orderedElements = [
+    ...elements.filter((element): element is InkCover => element.kind === "cover"),
+    ...elements.filter((element): element is InkImage => element.kind === "image"),
+    ...elements.filter((element): element is InkStroke => element.kind === "stroke"),
+    ...elements.filter((element): element is InkText => element.kind === "text")
+  ];
+
+  for (const element of orderedElements) {
+    const page = pages[element.pageIndex];
+    if (!page) {
+      continue;
+    }
+    const size = page.getSize();
+
+    if (element.kind === "cover") {
+      const color = hexToRgb(element.color);
+      page.drawRectangle({
+        color: rgb(color.r, color.g, color.b),
+        height: element.height * size.height,
+        opacity: element.opacity,
+        width: element.width * size.width,
+        x: element.x * size.width,
+        y: size.height - (element.y + element.height) * size.height
+      });
+      continue;
+    }
+
+    if (element.kind === "stroke") {
+      if (element.points.length < 2) {
+        continue;
+      }
+      const color = hexToRgb(element.color);
+      const thickness = Math.max(0.5, element.width * (size.width / Math.max(1, element.pageCssWidth)));
+      for (let i = 1; i < element.points.length; i += 1) {
+        const start = element.points[i - 1];
+        const end = element.points[i];
+        page.drawLine({
+          color: rgb(color.r, color.g, color.b),
+          end: { x: end.x * size.width, y: size.height - end.y * size.height },
+          opacity: element.opacity,
+          start: { x: start.x * size.width, y: size.height - start.y * size.height },
+          thickness
+        });
+      }
+      continue;
+    }
+
+    if (element.kind === "image") {
+      const bytes = dataUrlToBytes(element.dataUrl);
+      const embedded = element.dataUrl.startsWith("data:image/jpeg") || element.dataUrl.startsWith("data:image/jpg")
+        ? await pdf.embedJpg(bytes)
+        : await pdf.embedPng(bytes);
+      page.drawImage(embedded, {
+        height: element.height * size.height,
+        opacity: element.opacity,
+        width: element.width * size.width,
+        x: element.x * size.width,
+        y: size.height - (element.y + element.height) * size.height
+      });
+      continue;
+    }
+
+    if (!font) {
+      continue;
+    }
+
+    const color = hexToRgb(element.color);
+    const scale = size.width / Math.max(1, element.pageCssWidth);
+    const fontSize = Math.max(1, element.fontSize * scale);
+    const lineHeight = fontSize * 1.2;
+    let y = size.height - element.y * size.height - fontSize;
+    for (const line of element.text.split(/\r?\n/)) {
+      page.drawText(line || " ", {
+        color: rgb(color.r, color.g, color.b),
+        font,
+        opacity: element.opacity,
+        size: fontSize,
+        x: element.x * size.width,
+        y
+      });
+      y -= lineHeight;
+    }
+  }
+}
+
+async function trySharePdf(fileName: string, bytes: Uint8Array): Promise<boolean> {
+  if (typeof File === "undefined" || typeof navigator === "undefined") {
+    return false;
+  }
+
+  const fileBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const file = new File([fileBuffer], fileName, { type: "application/pdf" });
+  const shareData: ShareData & { files: File[] } = {
+    files: [file],
+    title: fileName
+  };
+  const shareNavigator = navigator as Navigator & {
+    canShare?: (data: ShareData & { files?: File[] }) => boolean;
+    share?: (data: ShareData & { files?: File[] }) => Promise<void>;
+  };
+
+  if (typeof shareNavigator.share !== "function") {
+    return false;
+  }
+  if (typeof shareNavigator.canShare === "function" && !shareNavigator.canShare(shareData)) {
+    return false;
+  }
+
+  try {
+    await shareNavigator.share(shareData);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function formatElementForMarkdown(element: InkElement): string {
+  if (element.kind === "text") {
+    return `Text (${element.id}): ${element.text.replace(/\s+/g, " ")}; x=${element.x.toFixed(3)}, y=${element.y.toFixed(3)}, size=${element.fontSize}`;
+  }
+  if (element.kind === "stroke") {
+    return `Stroke (${element.id}): ${element.points.length} points, color ${element.color}, width ${element.width}`;
+  }
+  if (element.kind === "image") {
+    return `Image (${element.id}): x=${element.x.toFixed(3)}, y=${element.y.toFixed(3)}, w=${element.width.toFixed(3)}, h=${element.height.toFixed(3)}`;
+  }
+  return `Cover (${element.id}): x=${element.x.toFixed(3)}, y=${element.y.toFixed(3)}, w=${element.width.toFixed(3)}, h=${element.height.toFixed(3)}`;
+}
+
+function normalizeObsidianLink(raw: string): { embed: boolean; target: string; wikilink: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const embed = trimmed.startsWith("![[");
+  const match = trimmed.match(/^!?\[\[([^\]]+)]]$/);
+  const target = (match?.[1] ?? trimmed).trim();
+  if (!target) {
+    return null;
+  }
+  return {
+    embed,
+    target,
+    wikilink: match ? trimmed : `[[${target}]]`
+  };
+}
+
+function stripObsidianLinkSyntax(value: string): string {
+  const normalized = normalizeObsidianLink(value);
+  return normalized?.target.split("#", 1)[0].split("|", 1)[0].trim() ?? value.trim();
+}
+
+function isImageExtension(extension: string): boolean {
+  return ["apng", "avif", "gif", "jpeg", "jpg", "png", "svg", "webp"].includes(extension.toLowerCase());
+}
+
+function imageMimeFromExtension(extension: string): string {
+  const ext = extension.toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") {
+    return "image/jpeg";
+  }
+  if (ext === "svg") {
+    return "image/svg+xml";
+  }
+  if (ext === "gif") {
+    return "image/gif";
+  }
+  if (ext === "webp") {
+    return "image/webp";
+  }
+  if (ext === "avif") {
+    return "image/avif";
+  }
+  if (ext === "apng") {
+    return "image/apng";
+  }
+  return "image/png";
+}
+
+function arrayBufferToDataUrl(buffer: ArrayBuffer, mime: string): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return `data:${mime};base64,${btoa(binary)}`;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function waitForNextFrame(): Promise<void> {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
+function loadDataUrlImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not load image data."));
+    image.src = dataUrl;
+  });
+}
+
+function fitImageToOverlay(
+  size: { height: number; width: number },
+  overlay: PageOverlay,
+  requestedWidth?: number,
+  requestedHeight?: number
+): { height: number; width: number } {
+  if (typeof requestedWidth === "number" && typeof requestedHeight === "number") {
+    return { height: clamp(requestedHeight, 0.001, 1), width: clamp(requestedWidth, 0.001, 1) };
+  }
+  const maxWidth = clamp(Number(requestedWidth ?? 0.42), 0.03, 0.95);
+  const maxHeight = clamp(Number(requestedHeight ?? 0.42), 0.03, 0.95);
+  const ratio = size.width / Math.max(1, size.height);
+  let width = maxWidth;
+  let height = width / ratio * (overlay.cssWidth / Math.max(1, overlay.cssHeight));
+  if (height > maxHeight) {
+    height = maxHeight;
+    width = height * ratio * (overlay.cssHeight / Math.max(1, overlay.cssWidth));
+  }
+  return {
+    height: clamp(height, 0.03, 0.95),
+    width: clamp(width, 0.03, 0.95)
+  };
+}
+
+function markdownToDocxParagraphs(markdown: string): string[] {
+  return markdown
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^#{1,6}\s+/, "").replace(/^-\s+/, "• ").trim())
+    .filter((line) => line.length > 0);
+}
+
+function buildDocxFromParagraphs(paragraphs: string[], title: string): Uint8Array {
+  const content = [
+    xmlEscape(title),
+    ...paragraphs.map(xmlEscape)
+  ];
+  const body = content.map((paragraph) => `<w:p><w:r><w:t xml:space="preserve">${paragraph}</w:t></w:r></w:p>`).join("");
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  return zipStoreFiles([
+    { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
+    { name: "_rels/.rels", data: utf8Bytes(rels) },
+    { name: "word/document.xml", data: utf8Bytes(documentXml) }
+  ]);
+}
+
+function buildVisualConversionMarkdown(file: TFile, pages: VisualConversionPage[], folderPath: string): string {
+  const lines = [
+    `# ${file.basename} pdftion conversion`,
+    "",
+    `PDF: [[${file.path}]]`,
+    `Images: ${folderPath}`,
+    `Exported: ${new Date().toISOString()}`,
+    ""
+  ];
+  for (const page of pages) {
+    const imagePath = `${folderPath}/page-${String(page.pageIndex + 1).padStart(3, "0")}.png`;
+    lines.push(`## Page ${page.pageIndex + 1}`, "", `![[${imagePath}]]`, "");
+  }
+  return lines.join("\n");
+}
+
+function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Uint8Array {
+  const mediaFiles: Array<{ data: Uint8Array; name: string }> = [];
+  const rels: string[] = [];
+  let relId = 1;
+  const body = [`<w:p><w:r><w:t xml:space="preserve">${xmlEscape(title)}</w:t></w:r></w:p>`];
+
+  for (const page of pages) {
+    const imageName = `image${page.pageIndex + 1}.png`;
+    mediaFiles.push({ name: `word/media/${imageName}`, data: page.bytes });
+    const imageRelId = `rId${relId}`;
+    relId += 1;
+    rels.push(`<Relationship Id="${imageRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${imageName}"/>`);
+
+    const widthPx = Math.max(1, page.width);
+    const heightPx = Math.max(1, page.height);
+    const rawWidthEmu = Math.max(914400, Math.round(widthPx * 9525));
+    const rawHeightEmu = Math.max(914400, Math.round(heightPx * 9525));
+    const scale = Math.min(1, 6600000 / rawWidthEmu);
+    const widthEmu = Math.round(rawWidthEmu * scale);
+    const heightEmu = Math.round(rawHeightEmu * scale);
+
+    body.push(
+      `<w:p><w:r><w:t xml:space="preserve">Page ${page.pageIndex + 1}</w:t></w:r></w:p>`,
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${imageRelId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`
+    );
+  }
+
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}</Relationships>`;
+
+  return zipStoreFiles([
+    { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
+    { name: "_rels/.rels", data: utf8Bytes(relsXml) },
+    { name: "word/document.xml", data: utf8Bytes(documentXml) },
+    { name: "word/_rels/document.xml.rels", data: utf8Bytes(docRelsXml) },
+    ...mediaFiles
+  ]);
+}
+
+function xmlEscape(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function utf8Bytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+function zipStoreFiles(files: Array<{ data: Uint8Array; name: string }>): Uint8Array {
+  const parts: Uint8Array[] = [];
+  const central: Uint8Array[] = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = utf8Bytes(file.name);
+    const crc = crc32(file.data);
+    const local = concatBytes([
+      le32(0x04034b50), le16(20), le16(0), le16(0), le16(0), le16(0),
+      le32(crc), le32(file.data.length), le32(file.data.length), le16(name.length), le16(0), name, file.data
+    ]);
+    parts.push(local);
+    central.push(concatBytes([
+      le32(0x02014b50), le16(20), le16(20), le16(0), le16(0), le16(0), le16(0),
+      le32(crc), le32(file.data.length), le32(file.data.length), le16(name.length), le16(0), le16(0),
+      le16(0), le16(0), le32(0), le32(offset), name
+    ]));
+    offset += local.length;
+  }
+  const centralStart = offset;
+  const centralBytes = concatBytes(central);
+  const end = concatBytes([
+    le32(0x06054b50), le16(0), le16(0), le16(files.length), le16(files.length),
+    le32(centralBytes.length), le32(centralStart), le16(0)
+  ]);
+  return concatBytes([...parts, centralBytes, end]);
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return output;
+}
+
+function le16(value: number): Uint8Array {
+  return new Uint8Array([value & 255, (value >>> 8) & 255]);
+}
+
+function le32(value: number): Uint8Array {
+  return new Uint8Array([value & 255, (value >>> 8) & 255, (value >>> 16) & 255, (value >>> 24) & 255]);
+}
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const [, payload = ""] = dataUrl.split(",", 2);
+  const binary = atob(payload);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function pickImageFile(): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.addEventListener("change", () => {
+      resolve(input.files?.[0] ?? null);
+    }, { once: true });
+    input.click();
+  });
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read image file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function pickPdfFile(): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/pdf,.pdf";
+    input.addEventListener("change", () => {
+      resolve(input.files?.[0] ?? null);
+    }, { once: true });
+    input.click();
+  });
+}
+
+function parsePageOrder(raw: string, pageCount: number): number[] | null {
+  const result: number[] = [];
+  for (const token of raw.split(/[,\s]+/).map((part) => part.trim()).filter(Boolean)) {
+    const range = token.match(/^(\d+)-(\d+)$/);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1 || start > pageCount || end > pageCount) {
+        return null;
+      }
+      const step = start <= end ? 1 : -1;
+      for (let value = start; step > 0 ? value <= end : value >= end; value += step) {
+        result.push(value - 1);
+      }
+      continue;
+    }
+    const page = Number(token);
+    if (!Number.isInteger(page) || page < 1 || page > pageCount) {
+      return null;
+    }
+    result.push(page - 1);
+  }
+  if (result.length !== pageCount || new Set(result).size !== pageCount) {
+    return null;
+  }
+  return result;
+}
+
+function parseCropInput(raw: string): { bottom: number; left: number; right: number; top: number } | null {
+  const parts = raw.split(/[,\s]+/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length !== 4) {
+    return null;
+  }
+  const values = parts.map(parseCropValue);
+  if (values.some((value) => value === null)) {
+    return null;
+  }
+  const [left, top, right, bottom] = values as number[];
+  if (left + right >= 0.9 || top + bottom >= 0.9) {
+    return null;
+  }
+  return { bottom, left, right, top };
+}
+
+function parseCropValue(raw: string): number | null {
+  const value = raw.endsWith("%") ? Number(raw.slice(0, -1)) / 100 : Number(raw);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return clamp(value, 0, 0.45);
+}
+
+function rotateElementClockwise<T extends InkElement>(element: T): T {
+  const clone = cloneElement(element) as T;
+  if (clone.kind === "stroke") {
+    clone.points = clone.points.map((point) => ({ x: 1 - point.y, y: point.x }));
+  } else if (clone.kind === "text") {
+    const box = normalizedTextBounds(clone);
+    clone.x = clamp(1 - box.maxY, 0, 1);
+    clone.y = clamp(box.minX, 0, 1);
+  } else if (clone.kind === "cover" || clone.kind === "image") {
+    const oldX = clone.x;
+    const oldHeight = clone.height;
+    const oldWidth = clone.width;
+    const oldY = clone.y;
+    const right = clone.x + clone.width;
+    clone.x = clamp(1 - (oldY + oldHeight), 0, 1);
+    clone.y = clamp(oldX, 0, 1);
+    clone.width = clamp(oldHeight, 0.001, 1);
+    clone.height = clamp(right - oldX || oldWidth, 0.001, 1);
+  }
+  clone.saved = false;
+  return clone;
+}
+
+function cropElement<T extends InkElement>(element: T, crop: { bottom: number; left: number; right: number; top: number }): T {
+  const clone = cloneElement(element) as T;
+  const width = Math.max(0.01, 1 - crop.left - crop.right);
+  const height = Math.max(0.01, 1 - crop.top - crop.bottom);
+  const mapPoint = (point: InkPoint): InkPoint => ({
+    x: clamp((point.x - crop.left) / width, 0, 1),
+    y: clamp((point.y - crop.top) / height, 0, 1)
+  });
+
+  if (clone.kind === "stroke") {
+    clone.points = clone.points.map(mapPoint);
+  } else if (clone.kind === "text") {
+    const point = mapPoint({ x: clone.x, y: clone.y });
+    clone.x = point.x;
+    clone.y = point.y;
+  } else if (clone.kind === "cover" || clone.kind === "image") {
+    const topLeft = mapPoint({ x: clone.x, y: clone.y });
+    clone.x = topLeft.x;
+    clone.y = topLeft.y;
+    clone.width = clamp(clone.width / width, 0.001, 1);
+    clone.height = clamp(clone.height / height, 0.001, 1);
+  }
+  clone.saved = false;
+  return clone;
+}
+
+function drawImageDataUrl(ctx: CanvasRenderingContext2D, image: InkImage, cssWidth: number, cssHeight: number): Promise<void> {
+  return new Promise((resolve) => {
+    const bitmap = new Image();
+    bitmap.onload = () => {
+      ctx.save();
+      ctx.globalAlpha = image.opacity;
+      ctx.drawImage(bitmap, image.x * cssWidth, image.y * cssHeight, image.width * cssWidth, image.height * cssHeight);
+      ctx.restore();
+      resolve();
+    };
+    bitmap.onerror = () => resolve();
+    bitmap.src = image.dataUrl;
+  });
+}
+
+function getImageDataUrlSize(dataUrl: string): Promise<{ height: number; width: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ height: Math.max(1, image.naturalHeight), width: Math.max(1, image.naturalWidth) });
+    image.onerror = () => reject(new Error("Could not load image file."));
+    image.src = dataUrl;
+  });
+}
+
+function resolvePdfFontkit(moduleValue: unknown): unknown {
+  const moduleShape = moduleValue as { create?: unknown; default?: { create?: unknown } };
+  const candidate = typeof moduleShape.create === "function" ? moduleShape : moduleShape.default;
+  if (!candidate || typeof candidate.create !== "function") {
+    throw new Error("PDF fontkit is unavailable.");
+  }
+  return candidate;
+}
+
 function getPageIndex(pageEl: HTMLElement, fallbackIndex: number): number {
   const raw = pageEl.dataset.pageNumber ?? pageEl.getAttribute("data-page-number");
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
@@ -1203,12 +5925,67 @@ function getNormalizedClientPoint(clientX: number, clientY: number, canvas: HTML
   };
 }
 
-function getTouchCenterY(touches: TouchList): number {
-  let sum = 0;
+function getTouchCenter(touches: TouchList): InkPoint {
+  let sumX = 0;
+  let sumY = 0;
   for (let i = 0; i < touches.length; i += 1) {
-    sum += touches[i].clientY;
+    sumX += touches[i].clientX;
+    sumY += touches[i].clientY;
   }
-  return sum / Math.max(1, touches.length);
+  const count = Math.max(1, touches.length);
+  return { x: sumX / count, y: sumY / count };
+}
+
+function getTouchDistance(touches: TouchList): number {
+  if (touches.length < 2) {
+    return 0;
+  }
+
+  const first = touches[0];
+  const second = touches[1];
+  return Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
+}
+
+function dispatchPdfZoomGesture(rootEl: HTMLElement, delta: number): void {
+  const button = findPdfZoomButton(rootEl, delta > 0 ? "in" : "out");
+  if (button) {
+    button.click();
+    return;
+  }
+
+  const target =
+    rootEl.querySelector<HTMLElement>(".pdfViewer, .pdf-viewer, .pdf-container, .workspace-leaf-content") ?? rootEl;
+  target.dispatchEvent(
+    new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+      deltaY: clamp(-delta * 1.5, -80, 80)
+    })
+  );
+}
+
+function findPdfZoomButton(rootEl: HTMLElement, direction: "in" | "out"): HTMLButtonElement | null {
+  const tokens =
+    direction === "in"
+      ? ["zoom in", "放大", "zoom-in"]
+      : ["zoom out", "缩小", "放小", "zoom-out"];
+
+  for (const button of Array.from(rootEl.querySelectorAll<HTMLButtonElement>("button, .clickable-icon"))) {
+    if (button.classList.contains("xodo-pdf-ink-button") || button.disabled) {
+      continue;
+    }
+
+    const label = `${button.getAttribute("aria-label") ?? ""} ${button.getAttribute("title") ?? ""} ${
+      button.textContent ?? ""
+    }`.toLowerCase();
+    if (tokens.some((token) => label.includes(token))) {
+      return button;
+    }
+  }
+
+  return null;
 }
 
 function findTouch(touches: TouchList, identifier: number): Touch | null {
@@ -1224,9 +6001,11 @@ function findScrollableAncestor(start: HTMLElement): HTMLElement {
   let element: HTMLElement | null = start;
   while (element) {
     const style = window.getComputedStyle(element);
-    const canScroll = element.scrollHeight > element.clientHeight + 2;
-    const allowsScroll = /auto|scroll|overlay/i.test(style.overflowY);
-    if (canScroll && allowsScroll) {
+    const canScrollY = element.scrollHeight > element.clientHeight + 2;
+    const canScrollX = element.scrollWidth > element.clientWidth + 2;
+    const allowsScrollY = /auto|scroll|overlay/i.test(style.overflowY);
+    const allowsScrollX = /auto|scroll|overlay/i.test(style.overflowX);
+    if ((canScrollY && allowsScrollY) || (canScrollX && allowsScrollX)) {
       return element;
     }
     element = element.parentElement;
@@ -1253,11 +6032,22 @@ function drawStroke(
   ctx.lineWidth = stroke.width;
   ctx.strokeStyle = stroke.color;
   ctx.beginPath();
-  ctx.moveTo(stroke.points[0].x * cssWidth, stroke.points[0].y * cssHeight);
+  const first = stroke.points[0];
+  ctx.moveTo(first.x * cssWidth, first.y * cssHeight);
 
-  for (let i = 1; i < stroke.points.length; i += 1) {
-    const point = stroke.points[i];
-    ctx.lineTo(point.x * cssWidth, point.y * cssHeight);
+  if (stroke.points.length === 2) {
+    const end = stroke.points[1];
+    ctx.lineTo(end.x * cssWidth, end.y * cssHeight);
+  } else {
+    for (let i = 1; i < stroke.points.length - 1; i += 1) {
+      const point = stroke.points[i];
+      const next = stroke.points[i + 1];
+      const midX = ((point.x + next.x) / 2) * cssWidth;
+      const midY = ((point.y + next.y) / 2) * cssHeight;
+      ctx.quadraticCurveTo(point.x * cssWidth, point.y * cssHeight, midX, midY);
+    }
+    const last = stroke.points[stroke.points.length - 1];
+    ctx.lineTo(last.x * cssWidth, last.y * cssHeight);
   }
 
   ctx.stroke();
@@ -1291,6 +6081,170 @@ function drawSelectionBox(ctx: CanvasRenderingContext2D, stroke: InkStroke, cssW
   ctx.restore();
 }
 
+function drawTextElement(ctx: CanvasRenderingContext2D, text: InkText, cssWidth: number, cssHeight: number, selected = false): void {
+  const lines = text.text.split(/\r?\n/);
+  ctx.save();
+  ctx.globalAlpha = selected ? Math.max(0.14, text.opacity * 0.38) : text.opacity;
+  ctx.fillStyle = text.color;
+  ctx.font = `${text.fontSize}px ${text.fontFamily ?? "sans-serif"}`;
+  ctx.textBaseline = "top";
+  const x = text.x * cssWidth;
+  let y = text.y * cssHeight;
+  for (const line of lines) {
+    ctx.fillText(line, x, y);
+    y += text.fontSize * 1.2;
+  }
+  ctx.restore();
+}
+
+function drawCoverElement(ctx: CanvasRenderingContext2D, cover: InkCover, cssWidth: number, cssHeight: number, selected = false): void {
+  ctx.save();
+  ctx.globalAlpha = selected ? Math.max(0.18, cover.opacity * 0.5) : cover.opacity;
+  ctx.fillStyle = cover.color;
+  ctx.fillRect(cover.x * cssWidth, cover.y * cssHeight, cover.width * cssWidth, cover.height * cssHeight);
+  ctx.restore();
+}
+
+function drawSelectionGroup(ctx: CanvasRenderingContext2D, elements: InkElement[], cssWidth: number, cssHeight: number): void {
+  const box = normalizedElementsBounds(elements);
+  if (!box) {
+    return;
+  }
+
+  const x = box.minX * cssWidth;
+  const y = box.minY * cssHeight;
+  const width = (box.maxX - box.minX) * cssWidth;
+  const height = (box.maxY - box.minY) * cssHeight;
+
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = "#1c7ed6";
+  ctx.fillStyle = "rgba(28, 126, 214, 0.06)";
+  ctx.lineWidth = 1.8;
+  ctx.setLineDash([7, 4]);
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeRect(x, y, width, height);
+  ctx.setLineDash([]);
+
+  for (const handle of getSelectionHandlePoints(box)) {
+    const size = 10;
+    const hx = handle.point.x * cssWidth;
+    const hy = handle.point.y * cssHeight;
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = "#1c7ed6";
+    ctx.lineWidth = 2;
+    ctx.fillRect(hx - size / 2, hy - size / 2, size, size);
+    ctx.strokeRect(hx - size / 2, hy - size / 2, size, size);
+  }
+
+  ctx.restore();
+}
+
+function drawNativeSelection(ctx: CanvasRenderingContext2D, selection: PdfNativeObject, cssWidth: number, cssHeight: number): void {
+  const x = selection.x * cssWidth;
+  const y = selection.y * cssHeight;
+  const width = selection.width * cssWidth;
+  const height = selection.height * cssHeight;
+
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = "#0ca678";
+  ctx.fillStyle = selection.kind === "text" ? "rgba(12, 166, 120, 0.10)" : "rgba(12, 166, 120, 0.06)";
+  ctx.lineWidth = 1.8;
+  ctx.setLineDash([5, 4]);
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeRect(x, y, width, height);
+  ctx.restore();
+}
+
+function mergeNativeTextFragmentsIntoLines(
+  fragments: Array<{ bottom: number; fontSize: number; index: number; left: number; right: number; text: string; top: number }>,
+  overlay: PageOverlay,
+  pageRect: DOMRect
+): Array<PdfNativeObject & { fontSize: number; text: string }> {
+  const sorted = [...fragments].sort((a, b) => (a.top - b.top) || (a.left - b.left));
+  const lines: Array<{
+    bottom: number;
+    fontSizes: number[];
+    fragments: Array<{ index: number; left: number; text: string }>;
+    left: number;
+    right: number;
+    top: number;
+  }> = [];
+
+  for (const fragment of sorted) {
+    const centerY = (fragment.top + fragment.bottom) / 2;
+    const line = lines.find((candidate) => {
+      const candidateCenterY = (candidate.top + candidate.bottom) / 2;
+      const tolerance = Math.max(3, Math.max(...candidate.fontSizes, fragment.fontSize) * 0.42);
+      return Math.abs(candidateCenterY - centerY) <= tolerance;
+    });
+
+    if (line) {
+      line.bottom = Math.max(line.bottom, fragment.bottom);
+      line.fontSizes.push(fragment.fontSize);
+      line.fragments.push({ index: fragment.index, left: fragment.left, text: fragment.text });
+      line.left = Math.min(line.left, fragment.left);
+      line.right = Math.max(line.right, fragment.right);
+      line.top = Math.min(line.top, fragment.top);
+    } else {
+      lines.push({
+        bottom: fragment.bottom,
+        fontSizes: [fragment.fontSize],
+        fragments: [{ index: fragment.index, left: fragment.left, text: fragment.text }],
+        left: fragment.left,
+        right: fragment.right,
+        top: fragment.top
+      });
+    }
+  }
+
+  return lines
+    .sort((a, b) => (a.top - b.top) || (a.left - b.left))
+    .map((line, index) => {
+      const ordered = line.fragments.sort((a, b) => a.left - b.left);
+      const text = ordered.map((fragment) => fragment.text).join(" ").replace(/\s+/g, " ").trim();
+      const fontSize = median(line.fontSizes);
+      return {
+        fontSize,
+        height: clamp((line.bottom - line.top) / Math.max(1, overlay.cssHeight), 0.001, 1),
+        id: `native-line-${overlay.pageIndex}-${index}`,
+        kind: "text" as const,
+        pageIndex: overlay.pageIndex,
+        text,
+        width: clamp((line.right - line.left) / Math.max(1, overlay.cssWidth), 0.001, 1),
+        x: clamp((line.left - pageRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+        y: clamp((line.top - pageRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
+      };
+    })
+    .filter((line) => line.text.length > 0);
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) {
+    return 12;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function drawMarqueeBox(ctx: CanvasRenderingContext2D, start: InkPoint, end: InkPoint, cssWidth: number, cssHeight: number): void {
+  const minX = Math.min(start.x, end.x) * cssWidth;
+  const minY = Math.min(start.y, end.y) * cssHeight;
+  const width = Math.abs(end.x - start.x) * cssWidth;
+  const height = Math.abs(end.y - start.y) * cssHeight;
+
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = "#228be6";
+  ctx.fillStyle = "rgba(34, 139, 230, 0.1)";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  ctx.fillRect(minX, minY, width, height);
+  ctx.strokeRect(minX, minY, width, height);
+  ctx.restore();
+}
+
 function strokeBounds(
   stroke: InkStroke,
   cssWidth: number,
@@ -1317,6 +6271,21 @@ function strokeBounds(
   return { maxX, maxY, minX, minY };
 }
 
+function textBounds(text: InkText, cssWidth: number, cssHeight: number): { maxX: number; maxY: number; minX: number; minY: number } {
+  const lines = text.text.split(/\r?\n/);
+  const maxChars = Math.max(1, ...lines.map((line) => line.length));
+  const width = Math.max(text.fontSize, maxChars * text.fontSize * 0.58);
+  const height = Math.max(text.fontSize, lines.length * text.fontSize * 1.2);
+  const minX = text.x * cssWidth;
+  const minY = text.y * cssHeight;
+  return {
+    maxX: minX + width,
+    maxY: minY + height,
+    minX,
+    minY
+  };
+}
+
 function strokeBoxContainsPoint(stroke: InkStroke, point: InkPoint, cssWidth: number, cssHeight: number): boolean {
   const box = strokeBounds(stroke, cssWidth, cssHeight);
   if (!box) {
@@ -1330,14 +6299,481 @@ function strokeBoxContainsPoint(stroke: InkStroke, point: InkPoint, cssWidth: nu
   return px >= box.minX - pad && px <= box.maxX + pad && py >= box.minY - pad && py <= box.maxY + pad;
 }
 
-function strokeContainsPoint(stroke: InkStroke, point: InkPoint, cssWidth: number, cssHeight: number): boolean {
+function textBoxContainsPoint(text: InkText, point: InkPoint, cssWidth: number, cssHeight: number): boolean {
+  const box = textBounds(text, cssWidth, cssHeight);
+  const pad = Math.max(8, text.fontSize * 0.45);
+  const px = point.x * cssWidth;
+  const py = point.y * cssHeight;
+  return px >= box.minX - pad && px <= box.maxX + pad && py >= box.minY - pad && py <= box.maxY + pad;
+}
+
+function strokeIntersectsSelection(
+  stroke: InkStroke,
+  start: InkPoint,
+  end: InkPoint,
+  cssWidth: number,
+  cssHeight: number
+): boolean {
+  const box = strokeBounds(stroke, cssWidth, cssHeight);
+  if (!box) {
+    return false;
+  }
+
+  const minX = Math.min(start.x, end.x) * cssWidth;
+  const maxX = Math.max(start.x, end.x) * cssWidth;
+  const minY = Math.min(start.y, end.y) * cssHeight;
+  const maxY = Math.max(start.y, end.y) * cssHeight;
+  const pad = Math.max(8, stroke.width * 1.8);
+
+  return box.maxX + pad >= minX && box.minX - pad <= maxX && box.maxY + pad >= minY && box.minY - pad <= maxY;
+}
+
+function textIntersectsSelection(text: InkText, start: InkPoint, end: InkPoint, cssWidth: number, cssHeight: number): boolean {
+  const box = textBounds(text, cssWidth, cssHeight);
+  const minX = Math.min(start.x, end.x) * cssWidth;
+  const maxX = Math.max(start.x, end.x) * cssWidth;
+  const minY = Math.min(start.y, end.y) * cssHeight;
+  const maxY = Math.max(start.y, end.y) * cssHeight;
+  return box.maxX >= minX && box.minX <= maxX && box.maxY >= minY && box.minY <= maxY;
+}
+
+function coverBoxContainsPoint(cover: InkCover | InkImage, point: InkPoint): boolean {
+  return point.x >= cover.x && point.x <= cover.x + cover.width && point.y >= cover.y && point.y <= cover.y + cover.height;
+}
+
+function coverIntersectsSelection(cover: InkCover | InkImage, start: InkPoint, end: InkPoint): boolean {
+  const minX = Math.min(start.x, end.x);
+  const maxX = Math.max(start.x, end.x);
+  const minY = Math.min(start.y, end.y);
+  const maxY = Math.max(start.y, end.y);
+  return cover.x + cover.width >= minX && cover.x <= maxX && cover.y + cover.height >= minY && cover.y <= maxY;
+}
+
+function imageBoxContainsPoint(image: InkImage, point: InkPoint): boolean {
+  return coverBoxContainsPoint(image, point);
+}
+
+function imageIntersectsSelection(image: InkImage, start: InkPoint, end: InkPoint): boolean {
+  return coverIntersectsSelection(image, start, end);
+}
+
+function nativeRegionContainsPoint(region: PdfNativeObject, point: InkPoint): boolean {
+  return point.x >= region.x && point.x <= region.x + region.width && point.y >= region.y && point.y <= region.y + region.height;
+}
+
+function isTapStroke(stroke: InkStroke, cssWidth: number, cssHeight: number): boolean {
+  const first = stroke.points[0];
+  if (!first) {
+    return false;
+  }
+
+  return stroke.points.every((point) => normalizedDistance(first, point, cssWidth, cssHeight) <= 4);
+}
+
+function translateStroke(stroke: InkStroke, dx: number, dy: number): void {
+  for (const point of stroke.points) {
+    point.x = clamp(point.x + dx, 0, 1);
+    point.y = clamp(point.y + dy, 0, 1);
+  }
+}
+
+function translateElement(element: InkElement, dx: number, dy: number): void {
+  if (element.kind === "stroke") {
+    translateStroke(element, dx, dy);
+  } else {
+    element.x = clamp(element.x + dx, 0, 1);
+    element.y = clamp(element.y + dy, 0, 1);
+  }
+}
+
+function cloneStroke(stroke: InkStroke): InkStroke {
+  return {
+    ...stroke,
+    points: stroke.points.map((point) => ({ ...point }))
+  };
+}
+
+function cloneElement(element: InkElement): InkElement {
+  return element.kind === "stroke" ? cloneStroke(element) : { ...element };
+}
+
+function normalizedStrokeBounds(stroke: InkStroke): NormalizedBounds | null {
+  if (stroke.points.length === 0) {
+    return null;
+  }
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  for (const point of stroke.points) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  return { maxX, maxY, minX, minY };
+}
+
+function normalizedTextBounds(text: InkText): NormalizedBounds {
+  const lines = text.text.split(/\r?\n/);
+  const maxChars = Math.max(1, ...lines.map((line) => line.length));
+  const width = Math.max(text.fontSize, maxChars * text.fontSize * 0.58) / Math.max(1, text.pageCssWidth);
+  const height = Math.max(text.fontSize, lines.length * text.fontSize * 1.2) / Math.max(1, text.pageCssHeight);
+  return {
+    maxX: text.x + width,
+    maxY: text.y + height,
+    minX: text.x,
+    minY: text.y
+  };
+}
+
+function normalizedCoverBounds(cover: InkCover | InkImage): NormalizedBounds {
+  return {
+    maxX: cover.x + cover.width,
+    maxY: cover.y + cover.height,
+    minX: cover.x,
+    minY: cover.y
+  };
+}
+
+function expandCoverToHideNativeText(cover: InkCover, overlay: PageOverlay): InkCover {
+  const padLeft = Math.min(0.02, Math.max(2 / Math.max(1, overlay.cssWidth), cover.width * 0.06));
+  const padRight = Math.min(0.04, Math.max(6 / Math.max(1, overlay.cssWidth), cover.width * 0.16));
+  const padTop = Math.min(0.02, Math.max(2 / Math.max(1, overlay.cssHeight), cover.height * 0.18));
+  const padBottom = Math.min(0.035, Math.max(5 / Math.max(1, overlay.cssHeight), cover.height * 0.36));
+  const x = clamp(cover.x - padLeft, 0, 1);
+  const y = clamp(cover.y - padTop * 0.45, 0, 1);
+  const maxX = clamp(cover.x + cover.width + padRight, 0, 1);
+  const maxY = clamp(cover.y + cover.height + padBottom, 0, 1);
+  return {
+    ...cover,
+    height: Math.max(0.001, maxY - y),
+    width: Math.max(0.001, maxX - x),
+    x,
+    y
+  };
+}
+
+function normalizedElementBounds(element: InkElement): NormalizedBounds | null {
+  if (element.kind === "stroke") {
+    return normalizedStrokeBounds(element);
+  }
+  if (element.kind === "text") {
+    return normalizedTextBounds(element);
+  }
+  return normalizedCoverBounds(element);
+}
+
+function normalizedStrokesBounds(strokes: InkStroke[]): NormalizedBounds | null {
+  let bounds: NormalizedBounds | null = null;
+  for (const stroke of strokes) {
+    const box = normalizedStrokeBounds(stroke);
+    if (!box) {
+      continue;
+    }
+    bounds = bounds
+      ? {
+          maxX: Math.max(bounds.maxX, box.maxX),
+          maxY: Math.max(bounds.maxY, box.maxY),
+          minX: Math.min(bounds.minX, box.minX),
+          minY: Math.min(bounds.minY, box.minY)
+        }
+      : box;
+  }
+  return bounds;
+}
+
+function normalizedElementsBounds(elements: InkElement[]): NormalizedBounds | null {
+  let bounds: NormalizedBounds | null = null;
+  for (const element of elements) {
+    const box = normalizedElementBounds(element);
+    if (!box) {
+      continue;
+    }
+    bounds = bounds
+      ? {
+          maxX: Math.max(bounds.maxX, box.maxX),
+          maxY: Math.max(bounds.maxY, box.maxY),
+          minX: Math.min(bounds.minX, box.minX),
+          minY: Math.min(bounds.minY, box.minY)
+        }
+      : box;
+  }
+  return bounds;
+}
+
+function getSelectionHandlePoints(bounds: NormalizedBounds): Array<{ handle: ResizeHandle; point: InkPoint }> {
+  return [
+    { handle: "nw", point: { x: bounds.minX, y: bounds.minY } },
+    { handle: "ne", point: { x: bounds.maxX, y: bounds.minY } },
+    { handle: "sw", point: { x: bounds.minX, y: bounds.maxY } },
+    { handle: "se", point: { x: bounds.maxX, y: bounds.maxY } }
+  ];
+}
+
+function findResizeHandleAt(bounds: NormalizedBounds, point: InkPoint, cssWidth: number, cssHeight: number, radius = 8, edgeBand = 0): ResizeHandle | null {
+  const px = point.x * cssWidth;
+  const py = point.y * cssHeight;
+
+  for (const item of getSelectionHandlePoints(bounds)) {
+    const hx = item.point.x * cssWidth;
+    const hy = item.point.y * cssHeight;
+    if (Math.abs(px - hx) <= radius && Math.abs(py - hy) <= radius) {
+      return item.handle;
+    }
+  }
+
+  if (edgeBand > 0) {
+    const minX = bounds.minX * cssWidth;
+    const maxX = bounds.maxX * cssWidth;
+    const minY = bounds.minY * cssHeight;
+    const maxY = bounds.maxY * cssHeight;
+    const inside = px >= minX - edgeBand && px <= maxX + edgeBand && py >= minY - edgeBand && py <= maxY + edgeBand;
+    if (inside) {
+      const nearLeft = Math.abs(px - minX) <= edgeBand;
+      const nearRight = Math.abs(px - maxX) <= edgeBand;
+      const nearTop = Math.abs(py - minY) <= edgeBand;
+      const nearBottom = Math.abs(py - maxY) <= edgeBand;
+      if ((nearLeft || nearRight) && (nearTop || nearBottom)) {
+        if (nearLeft && nearTop) return "nw";
+        if (nearRight && nearTop) return "ne";
+        if (nearLeft && nearBottom) return "sw";
+        return "se";
+      }
+      if (nearLeft) return py < (minY + maxY) / 2 ? "nw" : "sw";
+      if (nearRight) return py < (minY + maxY) / 2 ? "ne" : "se";
+      if (nearTop) return px < (minX + maxX) / 2 ? "nw" : "ne";
+      if (nearBottom) return px < (minX + maxX) / 2 ? "sw" : "se";
+    }
+  }
+
+  return null;
+}
+
+function resizeStrokesFromHandle(
+  strokes: InkStroke[],
+  bounds: NormalizedBounds,
+  handle: ResizeHandle,
+  point: InkPoint
+): InkStroke[] {
+  const anchor = getResizeAnchor(bounds, handle);
+  const originalCorner = getResizeCorner(bounds, handle);
+  const originalDx = originalCorner.x - anchor.x;
+  const originalDy = originalCorner.y - anchor.y;
+
+  let scaleX = originalDx === 0 ? 1 : (point.x - anchor.x) / originalDx;
+  let scaleY = originalDy === 0 ? 1 : (point.y - anchor.y) / originalDy;
+  scaleX = Math.max(0.12, scaleX);
+  scaleY = Math.max(0.12, scaleY);
+
+  const scaleWidth = clamp((Math.abs(scaleX) + Math.abs(scaleY)) / 2, 0.2, 8);
+  const resized = strokes.map((stroke) => {
+    const next = cloneStroke(stroke);
+    next.points = stroke.points.map((strokePoint) => ({
+      x: anchor.x + (strokePoint.x - anchor.x) * scaleX,
+      y: anchor.y + (strokePoint.y - anchor.y) * scaleY
+    }));
+    next.width = clamp(stroke.width * scaleWidth, 0.5, 80);
+    return next;
+  });
+
+  shiftStrokesInsidePage(resized);
+  return resized;
+}
+
+function resizeElementsFromHandle(
+  elements: InkElement[],
+  bounds: NormalizedBounds,
+  handle: ResizeHandle,
+  point: InkPoint
+): InkElement[] {
+  const anchor = getResizeAnchor(bounds, handle);
+  const originalCorner = getResizeCorner(bounds, handle);
+  const originalDx = originalCorner.x - anchor.x;
+  const originalDy = originalCorner.y - anchor.y;
+
+  let scaleX = originalDx === 0 ? 1 : (point.x - anchor.x) / originalDx;
+  let scaleY = originalDy === 0 ? 1 : (point.y - anchor.y) / originalDy;
+  scaleX = Math.max(0.12, scaleX);
+  scaleY = Math.max(0.12, scaleY);
+
+  const scaleSize = clamp((Math.abs(scaleX) + Math.abs(scaleY)) / 2, 0.2, 8);
+  const resized = elements.map((element) => {
+    const next = cloneElement(element);
+    if (next.kind === "stroke") {
+      next.points = element.kind === "stroke"
+        ? element.points.map((strokePoint) => ({
+            x: anchor.x + (strokePoint.x - anchor.x) * scaleX,
+            y: anchor.y + (strokePoint.y - anchor.y) * scaleY
+          }))
+        : next.points;
+      next.width = clamp(next.width * scaleSize, 0.5, 80);
+    } else if (next.kind === "text") {
+      next.x = anchor.x + (next.x - anchor.x) * scaleX;
+      next.y = anchor.y + (next.y - anchor.y) * scaleY;
+      next.fontSize = clamp(next.fontSize * scaleSize, 4, 96);
+    } else {
+      next.x = anchor.x + (next.x - anchor.x) * scaleX;
+      next.y = anchor.y + (next.y - anchor.y) * scaleY;
+      next.width = clamp(next.width * Math.abs(scaleX), 0.001, 1);
+      next.height = clamp(next.height * Math.abs(scaleY), 0.001, 1);
+    }
+    return next;
+  });
+
+  shiftElementsInsidePage(resized);
+  return resized;
+}
+
+function scaleStrokesAroundBoundsCenter(strokes: InkStroke[], bounds: NormalizedBounds, factor: number): InkStroke[] {
+  const center = {
+    x: (bounds.minX + bounds.maxX) / 2,
+    y: (bounds.minY + bounds.maxY) / 2
+  };
+  const resized = strokes.map((stroke) => {
+    const next = cloneStroke(stroke);
+    next.points = stroke.points.map((strokePoint) => ({
+      x: center.x + (strokePoint.x - center.x) * factor,
+      y: center.y + (strokePoint.y - center.y) * factor
+    }));
+    next.width = clamp(stroke.width * factor, 0.5, 80);
+    return next;
+  });
+
+  shiftStrokesInsidePage(resized);
+  return resized;
+}
+
+function scaleElementsAroundBoundsCenter(elements: InkElement[], bounds: NormalizedBounds, factor: number): InkElement[] {
+  const center = {
+    x: (bounds.minX + bounds.maxX) / 2,
+    y: (bounds.minY + bounds.maxY) / 2
+  };
+  const resized = elements.map((element) => {
+    const next = cloneElement(element);
+    if (next.kind === "stroke") {
+      next.points = next.points.map((strokePoint) => ({
+        x: center.x + (strokePoint.x - center.x) * factor,
+        y: center.y + (strokePoint.y - center.y) * factor
+      }));
+      next.width = clamp(next.width * factor, 0.5, 80);
+    } else if (next.kind === "text") {
+      next.x = center.x + (next.x - center.x) * factor;
+      next.y = center.y + (next.y - center.y) * factor;
+      next.fontSize = clamp(next.fontSize * factor, 4, 96);
+    } else {
+      next.x = center.x + (next.x - center.x) * factor;
+      next.y = center.y + (next.y - center.y) * factor;
+      next.width = clamp(next.width * factor, 0.001, 1);
+      next.height = clamp(next.height * factor, 0.001, 1);
+    }
+    return next;
+  });
+
+  shiftElementsInsidePage(resized);
+  return resized;
+}
+
+function getResizeAnchor(bounds: NormalizedBounds, handle: ResizeHandle): InkPoint {
+  if (handle === "nw") {
+    return { x: bounds.maxX, y: bounds.maxY };
+  }
+  if (handle === "ne") {
+    return { x: bounds.minX, y: bounds.maxY };
+  }
+  if (handle === "sw") {
+    return { x: bounds.maxX, y: bounds.minY };
+  }
+  return { x: bounds.minX, y: bounds.minY };
+}
+
+function getResizeCorner(bounds: NormalizedBounds, handle: ResizeHandle): InkPoint {
+  if (handle === "nw") {
+    return { x: bounds.minX, y: bounds.minY };
+  }
+  if (handle === "ne") {
+    return { x: bounds.maxX, y: bounds.minY };
+  }
+  if (handle === "sw") {
+    return { x: bounds.minX, y: bounds.maxY };
+  }
+  return { x: bounds.maxX, y: bounds.maxY };
+}
+
+function shiftStrokesInsidePage(strokes: InkStroke[]): void {
+  const box = normalizedStrokesBounds(strokes);
+  if (!box) {
+    return;
+  }
+
+  let dx = 0;
+  let dy = 0;
+  if (box.minX < 0) {
+    dx = -box.minX;
+  } else if (box.maxX > 1) {
+    dx = 1 - box.maxX;
+  }
+
+  if (box.minY < 0) {
+    dy = -box.minY;
+  } else if (box.maxY > 1) {
+    dy = 1 - box.maxY;
+  }
+
+  for (const stroke of strokes) {
+    for (const point of stroke.points) {
+      point.x = clamp(point.x + dx, 0, 1);
+      point.y = clamp(point.y + dy, 0, 1);
+    }
+  }
+}
+
+function shiftElementsInsidePage(elements: InkElement[]): void {
+  const box = normalizedElementsBounds(elements);
+  if (!box) {
+    return;
+  }
+
+  let dx = 0;
+  let dy = 0;
+  if (box.minX < 0) {
+    dx = -box.minX;
+  } else if (box.maxX > 1) {
+    dx = 1 - box.maxX;
+  }
+
+  if (box.minY < 0) {
+    dy = -box.minY;
+  } else if (box.maxY > 1) {
+    dy = 1 - box.maxY;
+  }
+
+  if (dx === 0 && dy === 0) {
+    return;
+  }
+
+  for (const element of elements) {
+    translateElement(element, dx, dy);
+  }
+}
+
+function strokeContainsPoint(
+  stroke: InkStroke,
+  point: InkPoint,
+  cssWidth: number,
+  cssHeight: number,
+  eraserWidth = 10
+): boolean {
   if (stroke.points.length < 2) {
     return false;
   }
 
   const px = point.x * cssWidth;
   const py = point.y * cssHeight;
-  const radius = Math.max(10, stroke.width * 2.2);
+  const radius = Math.max(eraserWidth, stroke.width * 2.2);
 
   for (let i = 1; i < stroke.points.length; i += 1) {
     const start = stroke.points[i - 1];
@@ -1455,6 +6891,169 @@ function cleanPdfPathHint(rawPath: string): string | null {
 
 function makeStrokeId(): string {
   return `stroke-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function safeAnnotationKey(path: string): string {
+  return encodeURIComponent(path).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function focusTextEditor(editor: HTMLTextAreaElement): void {
+  editor.focus({ preventScroll: true });
+  editor.select();
+  window.setTimeout(() => {
+    if (document.activeElement !== editor) {
+      editor.focus({ preventScroll: true });
+    }
+    editor.select();
+  }, 0);
+}
+
+async function fingerprintPdfBytes(buffer: ArrayBuffer, mtime?: number): Promise<PdfFingerprint> {
+  return {
+    mtime,
+    sha256: await sha256Hex(buffer),
+    size: buffer.byteLength
+  };
+}
+
+async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
+  if (!globalThis.crypto?.subtle) {
+    return fallbackBufferHash(buffer);
+  }
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function fallbackBufferHash(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  let h3 = 0x9e3779b9;
+  let h4 = 0x85ebca6b;
+  for (const byte of bytes) {
+    h1 = Math.imul(h1 ^ byte, 0x01000193);
+    h2 = Math.imul(h2 + byte, 0x85ebca6b);
+    h3 = Math.imul(h3 ^ (byte + h1), 0xc2b2ae35);
+    h4 = Math.imul(h4 + (byte ^ h2), 0x27d4eb2f);
+  }
+  return [h1, h2, h3, h4, bytes.byteLength, h1 ^ h3, h2 ^ h4, h1 ^ h2 ^ h3 ^ h4]
+    .map((part) => (part >>> 0).toString(16).padStart(8, "0"))
+    .join("");
+}
+
+function isPdfFingerprint(value: unknown): value is PdfFingerprint {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<PdfFingerprint>;
+  return (
+    typeof candidate.sha256 === "string" &&
+    /^[0-9a-f]{64}$/i.test(candidate.sha256) &&
+    typeof candidate.size === "number" &&
+    Number.isFinite(candidate.size) &&
+    (candidate.mtime === undefined || typeof candidate.mtime === "number")
+  );
+}
+
+function normalizeHexColor(value: string): string {
+  const trimmed = value.trim();
+  if (/^#[0-9a-f]{6}$/i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^#[0-9a-f]{3}$/i.test(trimmed)) {
+    return `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}`;
+  }
+  return "#000000";
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  return `#${[r, g, b].map((part) => clamp(Math.round(part), 0, 255).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function cssColorToHex(value: string): string | null {
+  const normalized = normalizeHexColor(value);
+  if (normalized !== "#000000" || /^#0{3,6}$/i.test(value.trim())) {
+    return normalized;
+  }
+  const match = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (!match) {
+    return null;
+  }
+  return rgbToHex(Number(match[1]), Number(match[2]), Number(match[3]));
+}
+
+function readableTextColor(backgroundColor: string): string {
+  const hex = cssColorToHex(backgroundColor) ?? "#ffffff";
+  const r = Number.parseInt(hex.slice(1, 3), 16);
+  const g = Number.parseInt(hex.slice(3, 5), 16);
+  const b = Number.parseInt(hex.slice(5, 7), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance < 0.5 ? "#ffffff" : "#000000";
+}
+
+function estimateTextEditorWidth(text: string, fontSize: number, fallbackWidth: number): number {
+  const longestLine = text.split(/\r?\n/).reduce((max, line) => Math.max(max, line.length), 0);
+  const estimated = longestLine * Math.max(6, fontSize) * 0.62;
+  return Math.max(fallbackWidth, estimated);
+}
+
+function invertHexColor(color: string): string {
+  const hex = cssColorToHex(color) ?? "#ffffff";
+  const r = 255 - Number.parseInt(hex.slice(1, 3), 16);
+  const g = 255 - Number.parseInt(hex.slice(3, 5), 16);
+  const b = 255 - Number.parseInt(hex.slice(5, 7), 16);
+  return rgbToHex(r, g, b);
+}
+
+function isInkElement(value: unknown): value is InkElement {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as Partial<InkElement>;
+  if (typeof item.id !== "string" || typeof item.pageIndex !== "number" || typeof item.saved !== "boolean") {
+    return false;
+  }
+  if (item.kind === "stroke") {
+    const stroke = item as Partial<InkStroke>;
+    return (
+      typeof stroke.color === "string" &&
+      typeof stroke.opacity === "number" &&
+      typeof stroke.width === "number" &&
+      Array.isArray(stroke.points) &&
+      stroke.points.every((point) => typeof point?.x === "number" && typeof point?.y === "number")
+    );
+  }
+  if (item.kind === "text") {
+    const text = item as Partial<InkText>;
+    return typeof text.text === "string" && typeof text.x === "number" && typeof text.y === "number" && typeof text.fontSize === "number";
+  }
+  if (item.kind === "cover") {
+    const cover = item as Partial<InkCover>;
+    return typeof cover.x === "number" && typeof cover.y === "number" && typeof cover.width === "number" && typeof cover.height === "number";
+  }
+  if (item.kind === "image") {
+    const image = item as Partial<InkImage>;
+    return (
+      typeof image.dataUrl === "string" &&
+      image.dataUrl.startsWith("data:image/") &&
+      typeof image.x === "number" &&
+      typeof image.y === "number" &&
+      typeof image.width === "number" &&
+      typeof image.height === "number" &&
+      typeof image.opacity === "number"
+    );
+  }
+  return false;
+}
+
+function markElementSaved<T extends InkElement>(element: T): T {
+  return { ...element, saved: true };
+}
+
+function markElementUnsaved<T extends InkElement>(element: T): T {
+  return { ...element, saved: false };
 }
 
 function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {

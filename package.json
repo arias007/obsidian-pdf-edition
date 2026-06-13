@@ -1,7 +1,7 @@
 {
-  "name": "ob-pdf-ink-xodo",
-  "version": "0.2.6",
-  "description": "Auto-saving Xodo-style ink annotations for Obsidian PDF views and embedded PDFs.",
+  "name": "pdftion",
+  "version": "0.3.14",
+  "description": "AI-open PDF annotation, editing, export, and Obsidian integration tools.",
   "main": "main.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
@@ -13,6 +13,7 @@
   "license": "MIT",
   "type": "module",
   "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
     "pdf-lib": "^1.17.1"
   },
   "devDependencies": {
@@ -21,3 +22,6 @@
     "typescript": "^6.0.3"
   }
 }
+
+
+
