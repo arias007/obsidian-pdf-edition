@@ -52131,7 +52131,6 @@ var INK_COLORS = [
   "#868e96"
 ];
 var PDFTION_AI_API_NAME = "PdftionAI";
-var LEGACY_PDF_EDIT_AI_API_NAME = "ObPdfInkXodoAI";
 var TEXT_FONTS = [
   { label: "\u9ED8\u8BA4", value: "sans-serif" },
   { label: "\u5B8B\u4F53", value: "SimSun, STSong, serif" },
@@ -52144,7 +52143,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   sessions = /* @__PURE__ */ new Map();
   surfaceScanTimers = [];
   async onload() {
-    document.body.classList.add("xodo-pdf-ink-menu-boost", "pdftion-menu-boost");
+    document.body.classList.add("pdftion-menu-boost");
     this.addCommand({
       id: "toggle-pdftion",
       name: "Toggle pdftion PDF annotation",
@@ -52220,12 +52219,8 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     if (window.PdftionAI) {
       delete window.PdftionAI;
     }
-    if (window.ObPdfInkXodoAI) {
-      delete window.ObPdfInkXodoAI;
-    }
     delete window[PDFTION_AI_API_NAME];
-    delete window[LEGACY_PDF_EDIT_AI_API_NAME];
-    document.body.classList.remove("xodo-pdf-ink-menu-boost", "pdftion-menu-boost");
+    document.body.classList.remove("pdftion-menu-boost");
     for (const session of this.sessions.values()) {
       session.destroy();
     }
@@ -52429,7 +52424,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   }
   commitEditorsOnOutsidePointer(event) {
     const target = event.target;
-    if (target instanceof HTMLElement && target.closest(".xodo-pdf-ink-native-editor, .pdftion-panel")) {
+    if (target instanceof HTMLElement && target.closest(".pdftion-native-editor, .pdftion-panel")) {
       return;
     }
     for (const session of this.sessions.values()) {
@@ -52570,9 +52565,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
       updateElements: (elements) => this.getActivePdfSession()?.aiUpdateElements(elements) ?? 0
     };
     window.PdftionAI = api;
-    window.ObPdfInkXodoAI = api;
     window[PDFTION_AI_API_NAME] = api;
-    window[LEGACY_PDF_EDIT_AI_API_NAME] = api;
   }
 };
 var InkSession = class {
@@ -52581,7 +52574,7 @@ var InkSession = class {
     this.leaf = leaf;
     this.file = file;
     this.rootEl = rootEl;
-    this.rootEl.classList.add("xodo-pdf-ink-root");
+    this.rootEl.classList.add("pdftion-root");
     this.injectButton();
     void this.loadEditableAnnotations();
     this.scanPages();
@@ -52664,16 +52657,16 @@ var InkSession = class {
     this.shareMenu?.remove();
     this.toolbar?.remove();
     this.toolbarHost?.remove();
-    this.rootEl.querySelector(".xodo-pdf-ink-inline-actions")?.remove();
+    this.rootEl.querySelector(".pdftion-inline-actions")?.remove();
     this.toolbarHost = null;
     for (const overlay of this.overlays.values()) {
       overlay.abort.abort();
       overlay.canvas.remove();
-      overlay.pageEl.classList.remove("xodo-pdf-ink-page");
+      overlay.pageEl.classList.remove("pdftion-page");
     }
     this.overlays.clear();
     this.pendingImageCrop = null;
-    this.rootEl.classList.remove("xodo-pdf-ink-enabled", "xodo-pdf-ink-root", "xodo-pdf-ink-selecting");
+    this.rootEl.classList.remove("pdftion-enabled", "pdftion-root", "pdftion-selecting");
   }
   updateFile(file) {
     if (file.path === this.file.path) {
@@ -52775,10 +52768,10 @@ var InkSession = class {
     if (!(node instanceof HTMLElement)) {
       return false;
     }
-    if (node.closest(".xodo-pdf-ink-root") && node.classList.contains("xodo-pdf-ink-canvas")) {
+    if (node.closest(".pdftion-root") && node.classList.contains("pdftion-canvas")) {
       return false;
     }
-    if (node.closest(".xodo-pdf-ink-toolbar-host, .xodo-pdf-ink-toolbar, .xodo-pdf-ink-palette-panel, .xodo-pdf-ink-image-menu, .xodo-pdf-ink-share-menu, .xodo-pdf-ink-embed-actions, .xodo-pdf-ink-inline-actions")) {
+    if (node.closest(".pdftion-toolbar-host, .pdftion-toolbar, .pdftion-palette-panel, .pdftion-image-menu, .pdftion-share-menu, .pdftion-embed-actions, .pdftion-inline-actions")) {
       return false;
     }
     if (node.classList.contains("page") || node.matches("canvas, .pdfViewer, .pdf-viewer, .pdf-container, .view-actions, .view-header, .file-embed-title, .embed-title")) {
@@ -52794,14 +52787,14 @@ var InkSession = class {
       this.moveButtonIntoHostIfAvailable(this.button);
       return;
     }
-    const existing = this.rootEl.querySelector(".xodo-pdf-ink-button");
+    const existing = this.rootEl.querySelector(".pdftion-button");
     if (existing) {
       this.button = existing;
       this.moveButtonIntoHostIfAvailable(existing);
       return;
     }
     const button = createIconButton("pen-line", "PDF ink annotation");
-    button.classList.add("xodo-pdf-ink-button");
+    button.classList.add("pdftion-button");
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -52821,7 +52814,7 @@ var InkSession = class {
     if (!actions) {
       return;
     }
-    const oldHost = button.closest(".xodo-pdf-ink-embed-actions");
+    const oldHost = button.closest(".pdftion-embed-actions");
     this.placeButtonInHost(actions, button);
     if (oldHost && oldHost.childElementCount === 0) {
       oldHost.remove();
@@ -52840,7 +52833,7 @@ var InkSession = class {
   }
   findZoomOutButton(host) {
     for (const item of Array.from(host.querySelectorAll("button, .clickable-icon, [aria-label], [title]"))) {
-      if (item.classList.contains("xodo-pdf-ink-button")) {
+      if (item.classList.contains("pdftion-button")) {
         continue;
       }
       const label = `${item.getAttribute("aria-label") ?? ""} ${item.getAttribute("title") ?? ""} ${item.textContent ?? ""}`.toLowerCase();
@@ -52878,12 +52871,12 @@ var InkSession = class {
     return srRoot.querySelector(".file-embed-title .file-embed-title-inner") ?? srRoot.querySelector(".file-embed-title") ?? srRoot.querySelector(".embed-title .embed-title-inner") ?? srRoot.querySelector(".embed-title") ?? this.ensureInlineEmbedHost();
   }
   ensureInlineEmbedHost(create2 = true) {
-    const existing = this.rootEl.querySelector(".xodo-pdf-ink-inline-actions");
+    const existing = this.rootEl.querySelector(".pdftion-inline-actions");
     if (existing || !create2) {
       return existing;
     }
     const host = document.createElement("div");
-    host.className = "xodo-pdf-ink-inline-actions";
+    host.className = "pdftion-inline-actions";
     const title2 = this.rootEl.querySelector(".file-embed-title, .embed-title, .markdown-embed-title") ?? this.rootEl.firstElementChild;
     if (title2?.parentElement) {
       title2.insertAdjacentElement("afterend", host);
@@ -52912,7 +52905,7 @@ var InkSession = class {
     let overlay = this.overlays.get(pageEl);
     if (!overlay) {
       const canvas = document.createElement("canvas");
-      canvas.className = "xodo-pdf-ink-canvas";
+      canvas.className = "pdftion-canvas";
       const abort = new AbortController();
       const newOverlay = {
         abort,
@@ -52945,7 +52938,7 @@ var InkSession = class {
         passive: false,
         signal: abort.signal
       });
-      pageEl.classList.add("xodo-pdf-ink-page");
+      pageEl.classList.add("pdftion-page");
       pageEl.appendChild(canvas);
       overlay = newOverlay;
       this.overlays.set(pageEl, overlay);
@@ -52955,7 +52948,7 @@ var InkSession = class {
   }
   resizeOverlay(overlay) {
     this.ensureOverlayCanvasMounted(overlay);
-    const visibleCanvas = overlay.pageEl.querySelector("canvas:not(.xodo-pdf-ink-canvas)");
+    const visibleCanvas = overlay.pageEl.querySelector("canvas:not(.pdftion-canvas)");
     const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
     const cssWidth = Math.round(rect.width);
     const cssHeight = Math.round(rect.height);
@@ -52988,7 +52981,7 @@ var InkSession = class {
     if (!this.rootEl.contains(overlay.pageEl)) {
       return false;
     }
-    overlay.pageEl.classList.add("xodo-pdf-ink-page");
+    overlay.pageEl.classList.add("pdftion-page");
     if (overlay.canvas.parentElement !== overlay.pageEl || overlay.pageEl.lastElementChild !== overlay.canvas) {
       overlay.pageEl.appendChild(overlay.canvas);
       return true;
@@ -53015,7 +53008,7 @@ var InkSession = class {
     this.cleanupDetachedOverlays();
     for (const overlay of this.overlays.values()) {
       const wasMounted = this.ensureOverlayCanvasMounted(overlay);
-      const visibleCanvas = overlay.pageEl.querySelector("canvas:not(.xodo-pdf-ink-canvas)");
+      const visibleCanvas = overlay.pageEl.querySelector("canvas:not(.pdftion-canvas)");
       const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
       const cssWidth = Math.round(rect.width);
       const cssHeight = Math.round(rect.height);
@@ -53032,8 +53025,8 @@ var InkSession = class {
   }
   setEnabled(enabled) {
     this.enabled = enabled;
-    this.rootEl.classList.toggle("xodo-pdf-ink-enabled", this.enabled);
-    this.rootEl.classList.toggle("xodo-pdf-ink-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
+    this.rootEl.classList.toggle("pdftion-enabled", this.enabled);
+    this.rootEl.classList.toggle("pdftion-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
     this.updateButtonState();
     if (this.enabled) {
       this.showToolbar();
@@ -53070,9 +53063,9 @@ var InkSession = class {
       return;
     }
     const toolbar = document.createElement("div");
-    toolbar.className = "xodo-pdf-ink-toolbar";
+    toolbar.className = "pdftion-toolbar";
     const dragHandle = createIconButton("grip-horizontal", "\u62D6\u52A8\u5DE5\u5177\u680F");
-    dragHandle.classList.add("xodo-pdf-ink-drag-handle");
+    dragHandle.classList.add("pdftion-drag-handle");
     this.attachToolbarDragHandle(dragHandle);
     toolbar.appendChild(dragHandle);
     const select = createIconButton("mouse-pointer-2", "Select");
@@ -53092,7 +53085,7 @@ var InkSession = class {
     text.addEventListener("click", () => this.setTool("text"));
     toolbar.appendChild(text);
     const image = createIconButton("image", "\u56FE\u7247\u5DE5\u5177");
-    image.classList.add("xodo-pdf-ink-image-button");
+    image.classList.add("pdftion-image-button");
     image.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -53104,7 +53097,7 @@ var InkSession = class {
     eraser.addEventListener("click", () => this.setTool("eraser"));
     toolbar.appendChild(eraser);
     const palette = createIconButton("palette", "\u8C03\u8272\u677F");
-    palette.classList.add("xodo-pdf-ink-palette-button");
+    palette.classList.add("pdftion-palette-button");
     palette.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -53118,7 +53111,7 @@ var InkSession = class {
     redo.addEventListener("click", () => this.redo());
     toolbar.appendChild(redo);
     const exportPdf = createIconButton("share-2", "\u5206\u4EAB/\u5BFC\u51FA");
-    exportPdf.classList.add("xodo-pdf-ink-share-button");
+    exportPdf.classList.add("pdftion-share-button");
     exportPdf.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -53142,12 +53135,12 @@ var InkSession = class {
   ensureToolbarHost() {
     const placement = this.getToolbarHostPlacement();
     const existingHosts = Array.from(
-      placement.container.querySelectorAll(":scope > .xodo-pdf-ink-toolbar-host")
+      placement.container.querySelectorAll(":scope > .pdftion-toolbar-host")
     );
     let host = this.toolbarHost?.isConnected && this.toolbarHost.parentElement === placement.container ? this.toolbarHost : existingHosts[0] ?? null;
     if (!host) {
       host = document.createElement("div");
-      host.className = "xodo-pdf-ink-toolbar-host";
+      host.className = "pdftion-toolbar-host";
     }
     if (placement.before !== host && (host.parentElement !== placement.container || host.nextElementSibling !== placement.before)) {
       placement.container.insertBefore(host, placement.before);
@@ -53222,7 +53215,7 @@ var InkSession = class {
     const firstChild = this.rootEl.firstElementChild;
     return {
       container: this.rootEl,
-      before: firstChild?.classList.contains("xodo-pdf-ink-toolbar-host") ? firstChild.nextElementSibling : firstChild
+      before: firstChild?.classList.contains("pdftion-toolbar-host") ? firstChild.nextElementSibling : firstChild
     };
   }
   updateToolbarState() {
@@ -53232,8 +53225,8 @@ var InkSession = class {
     for (const button of this.toolbar.querySelectorAll("[data-tool]")) {
       button.classList.toggle("is-active", button.dataset.tool === this.tool);
     }
-    this.toolbar.querySelector(".xodo-pdf-ink-image-button")?.classList.toggle("is-active", this.tool === "image-crop");
-    for (const colorButton of this.palette?.querySelectorAll(".xodo-pdf-ink-color") ?? []) {
+    this.toolbar.querySelector(".pdftion-image-button")?.classList.toggle("is-active", this.tool === "image-crop");
+    for (const colorButton of this.palette?.querySelectorAll(".pdftion-color") ?? []) {
       const target = colorButton.dataset.target;
       const activeColor = target === "highlight" ? this.highlightColor : target === "text" ? this.getTextPaletteColor() : this.penColor;
       colorButton.classList.toggle("is-active", colorButton.title === activeColor);
@@ -53242,7 +53235,7 @@ var InkSession = class {
   }
   setTool(tool) {
     this.tool = tool;
-    this.rootEl.classList.toggle("xodo-pdf-ink-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
+    this.rootEl.classList.toggle("pdftion-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
     if (tool !== "select" && tool !== "image-crop") {
       this.selectionDrag = null;
       this.nativeSelection = null;
@@ -53280,11 +53273,11 @@ var InkSession = class {
   }
   showImageMenu() {
     this.imageMenu?.remove();
-    const button = this.toolbar?.querySelector(".xodo-pdf-ink-image-button");
+    const button = this.toolbar?.querySelector(".pdftion-image-button");
     const panel = document.createElement("div");
-    panel.className = "xodo-pdf-ink-image-menu";
+    panel.className = "pdftion-image-menu";
     const capture = createIconButton("scan-line", "\u622A\u53D6\u56FE\u7247\u7F16\u8F91");
-    capture.classList.add("xodo-pdf-ink-image-menu-button");
+    capture.classList.add("pdftion-image-menu-button");
     capture.addEventListener("click", () => {
       panel.remove();
       this.imageMenu = null;
@@ -53292,7 +53285,7 @@ var InkSession = class {
     });
     panel.appendChild(capture);
     const insert = createIconButton("image-plus", "\u4ECE\u6587\u4EF6\u63D2\u5165\u56FE\u7247");
-    insert.classList.add("xodo-pdf-ink-image-menu-button");
+    insert.classList.add("pdftion-image-menu-button");
     insert.addEventListener("click", () => {
       panel.remove();
       this.imageMenu = null;
@@ -53318,11 +53311,11 @@ var InkSession = class {
   }
   showShareMenu() {
     this.shareMenu?.remove();
-    const button = this.toolbar?.querySelector(".xodo-pdf-ink-share-button");
+    const button = this.toolbar?.querySelector(".pdftion-share-button");
     const panel = document.createElement("div");
-    panel.className = "xodo-pdf-ink-share-menu";
+    panel.className = "pdftion-share-menu";
     const pdf = createIconButton("file-output", "\u5BFC\u51FA\u70E7\u5F55 PDF");
-    pdf.classList.add("xodo-pdf-ink-share-menu-button");
+    pdf.classList.add("pdftion-share-menu-button");
     pdf.addEventListener("click", () => {
       panel.remove();
       this.shareMenu = null;
@@ -53330,7 +53323,7 @@ var InkSession = class {
     });
     panel.appendChild(pdf);
     const docx = createIconButton("file-type-2", "\u8F6C\u6362 DOCX \u6587\u6863");
-    docx.classList.add("xodo-pdf-ink-share-menu-button");
+    docx.classList.add("pdftion-share-menu-button");
     docx.addEventListener("click", () => {
       panel.remove();
       this.shareMenu = null;
@@ -53338,7 +53331,7 @@ var InkSession = class {
     });
     panel.appendChild(docx);
     const md = createIconButton("file-text", "\u8F6C\u6362 MD \u6587\u4EF6");
-    md.classList.add("xodo-pdf-ink-share-menu-button");
+    md.classList.add("pdftion-share-menu-button");
     md.addEventListener("click", () => {
       panel.remove();
       this.shareMenu = null;
@@ -53520,7 +53513,7 @@ var InkSession = class {
     this.closeNativeTextEditor(false);
     const pageRect = overlay.pageEl.getBoundingClientRect();
     const editor = document.createElement("textarea");
-    editor.className = "xodo-pdf-ink-native-editor";
+    editor.className = "pdftion-native-editor";
     editor.classList.add("is-native-text-editor");
     editor.value = selection.text ?? "";
     const sampledBackground = this.samplePdfBackgroundColor(overlay, selection);
@@ -53568,7 +53561,7 @@ var InkSession = class {
     const pageRect = overlay.pageEl.getBoundingClientRect();
     const bounds = textBounds(textElement, overlay.cssWidth, overlay.cssHeight);
     const editor = document.createElement("textarea");
-    editor.className = "xodo-pdf-ink-native-editor";
+    editor.className = "pdftion-native-editor";
     editor.value = textElement.text;
     editor.style.backgroundColor = "rgba(255, 255, 255, 0.92)";
     editor.style.color = textElement.color;
@@ -53825,12 +53818,12 @@ var InkSession = class {
   showPalette() {
     this.palette?.remove();
     const panel = document.createElement("div");
-    panel.className = "xodo-pdf-ink-palette-panel";
+    panel.className = "pdftion-palette-panel";
     panel.addEventListener("pointerdown", (event) => event.stopPropagation());
     panel.addEventListener("click", (event) => event.stopPropagation());
     if (this.tool === "eraser") {
       panel.appendChild(
-        this.createPaletteRange("\u6A61\u76AE\u5927\u5C0F", "xodo-pdf-ink-width-eraser", 2, 120, 1, this.eraserWidth, (value) => {
+        this.createPaletteRange("\u6A61\u76AE\u5927\u5C0F", "pdftion-width-eraser", 2, 120, 1, this.eraserWidth, (value) => {
           this.eraserWidth = value;
         })
       );
@@ -53849,7 +53842,7 @@ var InkSession = class {
     this.updateToolbarState();
   }
   positionPalettePanel(panel) {
-    const button = this.toolbar?.querySelector(".xodo-pdf-ink-palette-button");
+    const button = this.toolbar?.querySelector(".pdftion-palette-button");
     const gap = 8;
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + gap);
     panel.style.top = `${fallbackTop}px`;
@@ -53871,16 +53864,16 @@ var InkSession = class {
   }
   createPaletteToolGroup(tool, title2) {
     const group = document.createElement("div");
-    group.className = "xodo-pdf-ink-palette-group";
+    group.className = "pdftion-palette-group";
     const heading = document.createElement("div");
-    heading.className = "xodo-pdf-ink-palette-heading";
+    heading.className = "pdftion-palette-heading";
     heading.textContent = title2;
     group.appendChild(heading);
     const colorRow = document.createElement("div");
-    colorRow.className = "xodo-pdf-ink-palette-colors";
+    colorRow.className = "pdftion-palette-colors";
     for (const swatch of INK_COLORS) {
       const colorButton = document.createElement("button");
-      colorButton.className = "xodo-pdf-ink-color";
+      colorButton.className = "pdftion-color";
       colorButton.dataset.target = tool;
       colorButton.style.backgroundColor = swatch;
       colorButton.title = swatch;
@@ -53894,12 +53887,12 @@ var InkSession = class {
     colorRow.appendChild(this.createAdvancedColorInput(tool, this.getToolColor(tool), (color) => this.setToolColor(tool, color)));
     group.appendChild(colorRow);
     group.appendChild(
-      this.createPaletteRange(`${title2}\u5927\u5C0F`, `xodo-pdf-ink-width-${tool}`, tool === "highlight" ? 2 : 0.5, tool === "highlight" ? 96 : 72, 0.5, this.getToolWidth(tool), (value) => {
+      this.createPaletteRange(`${title2}\u5927\u5C0F`, `pdftion-width-${tool}`, tool === "highlight" ? 2 : 0.5, tool === "highlight" ? 96 : 72, 0.5, this.getToolWidth(tool), (value) => {
         this.setToolWidth(tool, value);
       })
     );
     group.appendChild(
-      this.createPaletteRange(`${title2}\u900F\u660E\u5EA6`, `xodo-pdf-ink-opacity-${tool}`, 0.05, 1, 0.05, this.getToolOpacity(tool), (value) => {
+      this.createPaletteRange(`${title2}\u900F\u660E\u5EA6`, `pdftion-opacity-${tool}`, 0.05, 1, 0.05, this.getToolOpacity(tool), (value) => {
         this.setToolOpacity(tool, value);
       })
     );
@@ -53907,16 +53900,16 @@ var InkSession = class {
   }
   createPaletteTextGroup() {
     const group = document.createElement("div");
-    group.className = "xodo-pdf-ink-palette-group";
+    group.className = "pdftion-palette-group";
     const heading = document.createElement("div");
-    heading.className = "xodo-pdf-ink-palette-heading";
+    heading.className = "pdftion-palette-heading";
     heading.textContent = "\u6587\u5B57";
     group.appendChild(heading);
     const colorRow = document.createElement("div");
-    colorRow.className = "xodo-pdf-ink-palette-colors";
+    colorRow.className = "pdftion-palette-colors";
     for (const swatch of INK_COLORS) {
       const colorButton = document.createElement("button");
-      colorButton.className = "xodo-pdf-ink-color";
+      colorButton.className = "pdftion-color";
       colorButton.dataset.target = "text";
       colorButton.style.backgroundColor = swatch;
       colorButton.title = swatch;
@@ -53930,13 +53923,13 @@ var InkSession = class {
     colorRow.appendChild(this.createAdvancedColorInput("text", this.getTextPaletteColor(), (color) => this.setTextPaletteColor(color)));
     group.appendChild(colorRow);
     const fontRow = document.createElement("label");
-    fontRow.className = "xodo-pdf-ink-palette-range";
+    fontRow.className = "pdftion-palette-range";
     fontRow.title = "\u5B57\u4F53";
     const fontLabel = document.createElement("span");
     fontLabel.textContent = "\u5B57\u4F53";
     fontRow.appendChild(fontLabel);
     const select = document.createElement("select");
-    select.className = "xodo-pdf-ink-font-family";
+    select.className = "pdftion-font-family";
     for (const font of TEXT_FONTS) {
       const option = document.createElement("option");
       option.value = font.value;
@@ -53948,16 +53941,16 @@ var InkSession = class {
     fontRow.appendChild(select);
     group.appendChild(fontRow);
     group.appendChild(
-      this.createPaletteRange("\u6587\u5B57\u5927\u5C0F", "xodo-pdf-ink-size-text", 6, 120, 1, this.getTextPaletteFontSize(), (value) => this.setTextPaletteFontSize(value))
+      this.createPaletteRange("\u6587\u5B57\u5927\u5C0F", "pdftion-size-text", 6, 120, 1, this.getTextPaletteFontSize(), (value) => this.setTextPaletteFontSize(value))
     );
     group.appendChild(
-      this.createPaletteRange("\u6587\u5B57\u900F\u660E\u5EA6", "xodo-pdf-ink-opacity-text", 0.05, 1, 0.05, this.getTextPaletteOpacity(), (value) => this.setTextPaletteOpacity(value))
+      this.createPaletteRange("\u6587\u5B57\u900F\u660E\u5EA6", "pdftion-opacity-text", 0.05, 1, 0.05, this.getTextPaletteOpacity(), (value) => this.setTextPaletteOpacity(value))
     );
     return group;
   }
   createAdvancedColorInput(target, value, onInput) {
     const row = document.createElement("button");
-    row.className = "xodo-pdf-ink-color xodo-pdf-ink-color-advanced";
+    row.className = "pdftion-color pdftion-color-advanced";
     row.title = "\u81EA\u5B9A\u4E49\u989C\u8272";
     row.type = "button";
     const input = document.createElement("input");
@@ -53977,7 +53970,7 @@ var InkSession = class {
   }
   createPaletteRange(title2, className, min, max2, step, value, onInput) {
     const row = document.createElement("label");
-    row.className = "xodo-pdf-ink-palette-range";
+    row.className = "pdftion-palette-range";
     row.title = title2;
     const label = document.createElement("span");
     label.textContent = title2;
@@ -53998,28 +53991,28 @@ var InkSession = class {
       return;
     }
     for (const tool of ["pen", "highlight"]) {
-      const widthInput = this.palette.querySelector(`.xodo-pdf-ink-width-${tool}`);
+      const widthInput = this.palette.querySelector(`.pdftion-width-${tool}`);
       if (widthInput) {
         widthInput.value = String(this.getToolWidth(tool));
       }
-      const opacityInput = this.palette.querySelector(`.xodo-pdf-ink-opacity-${tool}`);
+      const opacityInput = this.palette.querySelector(`.pdftion-opacity-${tool}`);
       if (opacityInput) {
         opacityInput.value = String(this.getToolOpacity(tool));
       }
     }
-    const eraserInput = this.palette.querySelector(".xodo-pdf-ink-width-eraser");
+    const eraserInput = this.palette.querySelector(".pdftion-width-eraser");
     if (eraserInput) {
       eraserInput.value = String(this.eraserWidth);
     }
-    const textSizeInput = this.palette.querySelector(".xodo-pdf-ink-size-text");
+    const textSizeInput = this.palette.querySelector(".pdftion-size-text");
     if (textSizeInput) {
       textSizeInput.value = String(this.getTextPaletteFontSize());
     }
-    const textOpacityInput = this.palette.querySelector(".xodo-pdf-ink-opacity-text");
+    const textOpacityInput = this.palette.querySelector(".pdftion-opacity-text");
     if (textOpacityInput) {
       textOpacityInput.value = String(this.getTextPaletteOpacity());
     }
-    const textFontInput = this.palette.querySelector(".xodo-pdf-ink-font-family");
+    const textFontInput = this.palette.querySelector(".pdftion-font-family");
     if (textFontInput) {
       textFontInput.value = this.getTextPaletteFontFamily();
     }
@@ -57110,7 +57103,7 @@ function dispatchPdfZoomGesture(rootEl, delta) {
 function findPdfZoomButton(rootEl, direction2) {
   const tokens = direction2 === "in" ? ["zoom in", "\u653E\u5927", "zoom-in"] : ["zoom out", "\u7F29\u5C0F", "\u653E\u5C0F", "zoom-out"];
   for (const button of Array.from(rootEl.querySelectorAll("button, .clickable-icon"))) {
-    if (button.classList.contains("xodo-pdf-ink-button") || button.disabled) {
+    if (button.classList.contains("pdftion-button") || button.disabled) {
       continue;
     }
     const label = `${button.getAttribute("aria-label") ?? ""} ${button.getAttribute("title") ?? ""} ${button.textContent ?? ""}`.toLowerCase();

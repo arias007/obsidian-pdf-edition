@@ -1,8 +1,8 @@
-body.xodo-pdf-ink-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions,
-body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-actions,
-body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-actions,
-body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title,
-body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title {
+body.pdftion-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions,
+body.pdftion-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-actions,
+body.pdftion-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-actions,
+body.pdftion-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title,
+body.pdftion-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title {
   align-items: center;
   gap: 4px;
   overflow: visible;
@@ -10,16 +10,16 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title {
   z-index: 161;
 }
 
-body.xodo-pdf-ink-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions .clickable-icon,
-body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-actions .clickable-icon,
-body.xodo-pdf-ink-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-actions .clickable-icon,
-body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title .clickable-icon,
-body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .clickable-icon {
+body.pdftion-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions .clickable-icon,
+body.pdftion-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-actions .clickable-icon,
+body.pdftion-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-actions .clickable-icon,
+body.pdftion-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title .clickable-icon,
+body.pdftion-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .clickable-icon {
   min-height: 28px;
   min-width: 28px;
 }
 
-.xodo-pdf-ink-inline-actions {
+.pdftion-inline-actions {
   align-items: center;
   background: var(--background-primary);
   border: 1px solid var(--background-modifier-border);
@@ -35,29 +35,29 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   z-index: 10001;
 }
 
-.xodo-pdf-ink-inline-actions .clickable-icon {
+.pdftion-inline-actions .clickable-icon {
   min-height: 34px;
   min-width: 34px;
 }
 
-.xodo-pdf-ink-root {
+.pdftion-root {
   position: relative;
 }
 
-.xodo-pdf-ink-button {
+.pdftion-button {
   color: var(--text-muted);
 }
 
-.xodo-pdf-ink-button.is-active {
+.pdftion-button.is-active {
   background: var(--interactive-accent);
   color: var(--text-on-accent);
 }
 
-.xodo-pdf-ink-page {
+.pdftion-page {
   position: relative !important;
 }
 
-.xodo-pdf-ink-canvas {
+.pdftion-canvas {
   cursor: crosshair;
   pointer-events: none;
   position: absolute;
@@ -65,11 +65,11 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   z-index: 25;
 }
 
-.xodo-pdf-ink-selecting .xodo-pdf-ink-canvas {
+.pdftion-selecting .pdftion-canvas {
   cursor: pointer;
 }
 
-.xodo-pdf-ink-embed-actions {
+.pdftion-embed-actions {
   align-items: center;
   background: var(--background-primary);
   border: 1px solid var(--background-modifier-border);
@@ -85,11 +85,11 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   z-index: 10001;
 }
 
-.xodo-pdf-ink-enabled .xodo-pdf-ink-canvas {
+.pdftion-enabled .pdftion-canvas {
   pointer-events: auto;
 }
 
-.xodo-pdf-ink-toolbar-host {
+.pdftion-toolbar-host {
   align-items: center;
   display: none;
   height: 34px;
@@ -101,29 +101,29 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   z-index: 2147483600;
 }
 
-.xodo-pdf-ink-toolbar-host.is-floating {
+.pdftion-toolbar-host.is-floating {
   position: fixed;
   right: auto;
   width: max-content;
 }
 
-.xodo-pdf-ink-toolbar-host.is-dragging {
+.pdftion-toolbar-host.is-dragging {
   will-change: transform;
 }
 
-.xodo-pdf-ink-root.xodo-pdf-ink-enabled .xodo-pdf-ink-toolbar-host {
+.pdftion-root.pdftion-enabled .pdftion-toolbar-host {
   display: flex;
 }
 
-.xodo-pdf-ink-enabled .pdf-viewer,
-.xodo-pdf-ink-enabled .pdfViewer,
-.xodo-pdf-ink-enabled .pdf-container,
-.xodo-pdf-ink-enabled .xodo-pdf-ink-page {
+.pdftion-enabled .pdf-viewer,
+.pdftion-enabled .pdfViewer,
+.pdftion-enabled .pdf-container,
+.pdftion-enabled .pdftion-page {
   overscroll-behavior: contain;
   touch-action: none;
 }
 
-.xodo-pdf-ink-toolbar {
+.pdftion-toolbar {
   align-items: center;
   background: var(--background-primary);
   border: 1px solid var(--background-modifier-border);
@@ -142,28 +142,28 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   z-index: 1;
 }
 
-.xodo-pdf-ink-toolbar .clickable-icon {
+.pdftion-toolbar .clickable-icon {
   flex: 0 0 auto;
   height: 25px;
   width: 25px;
 }
 
-.xodo-pdf-ink-toolbar .xodo-pdf-ink-drag-handle {
+.pdftion-toolbar .pdftion-drag-handle {
   cursor: grab;
   touch-action: none;
 }
 
-.xodo-pdf-ink-toolbar .xodo-pdf-ink-drag-handle:active {
+.pdftion-toolbar .pdftion-drag-handle:active {
   cursor: grabbing;
 }
 
-.xodo-pdf-ink-toolbar .clickable-icon.is-active {
+.pdftion-toolbar .clickable-icon.is-active {
   background: var(--interactive-accent);
   color: var(--text-on-accent);
 }
 
-.xodo-pdf-ink-image-menu,
-.xodo-pdf-ink-share-menu {
+.pdftion-image-menu,
+.pdftion-share-menu {
   background: var(--background-primary);
   border: 1px solid var(--background-modifier-border);
   border-radius: 6px;
@@ -177,8 +177,8 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   z-index: 2147483602;
 }
 
-.xodo-pdf-ink-image-menu button,
-.xodo-pdf-ink-share-menu button {
+.pdftion-image-menu button,
+.pdftion-share-menu button {
   align-items: center;
   background: transparent;
   border: 0;
@@ -194,8 +194,8 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   width: 32px;
 }
 
-.xodo-pdf-ink-image-menu button:hover,
-.xodo-pdf-ink-share-menu button:hover {
+.pdftion-image-menu button:hover,
+.pdftion-share-menu button:hover {
   background: var(--background-modifier-hover);
 }
 
@@ -286,12 +286,12 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   width: 100%;
 }
 
-.xodo-pdf-ink-palette-range select {
+.pdftion-palette-range select {
   max-width: 132px;
   min-width: 96px;
 }
 
-.xodo-pdf-ink-palette-panel {
+.pdftion-palette-panel {
   background: var(--background-primary);
   border: 1px solid var(--background-modifier-border);
   border-radius: 6px;
@@ -310,7 +310,7 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   z-index: 2147483601;
 }
 
-.xodo-pdf-ink-palette-group {
+.pdftion-palette-group {
   border-top: 1px solid var(--background-modifier-border);
   display: flex;
   flex-direction: column;
@@ -318,25 +318,25 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   padding-top: 8px;
 }
 
-.xodo-pdf-ink-palette-group:first-child {
+.pdftion-palette-group:first-child {
   border-top: 0;
   padding-top: 0;
 }
 
-.xodo-pdf-ink-palette-heading {
+.pdftion-palette-heading {
   color: var(--text-normal);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.2;
 }
 
-.xodo-pdf-ink-palette-colors {
+.pdftion-palette-colors {
   display: grid;
   gap: 6px;
   grid-template-columns: repeat(5, 24px);
 }
 
-.xodo-pdf-ink-color {
+.pdftion-color {
   border: 1px solid var(--background-modifier-border);
   border-radius: 50%;
   box-sizing: border-box;
@@ -345,12 +345,12 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   width: 24px;
 }
 
-.xodo-pdf-ink-color.is-active {
+.pdftion-color.is-active {
   border-color: var(--text-normal);
   box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--interactive-accent);
 }
 
-.xodo-pdf-ink-color-advanced {
+.pdftion-color-advanced {
   align-items: center;
   background: var(--background-secondary);
   display: inline-flex;
@@ -358,7 +358,7 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   position: relative;
 }
 
-.xodo-pdf-ink-color-advanced input[type="color"] {
+.pdftion-color-advanced input[type="color"] {
   border: 0;
   cursor: pointer;
   height: 100%;
@@ -369,7 +369,7 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   width: 100%;
 }
 
-.xodo-pdf-ink-color-advanced::before {
+.pdftion-color-advanced::before {
   background: conic-gradient(#e03131, #fab005, #2f9e44, #1971c2, #7048e8, #c2255c, #e03131);
   border-radius: 50%;
   content: "";
@@ -377,13 +377,13 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   width: 16px;
 }
 
-.xodo-pdf-ink-width-pen,
-.xodo-pdf-ink-width-highlight {
+.pdftion-width-pen,
+.pdftion-width-highlight {
   accent-color: var(--interactive-accent);
   width: 100%;
 }
 
-.xodo-pdf-ink-palette-range {
+.pdftion-palette-range {
   color: var(--text-muted);
   display: flex;
   flex-direction: column;
@@ -392,13 +392,13 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   line-height: 1.2;
 }
 
-.xodo-pdf-ink-opacity-pen,
-.xodo-pdf-ink-opacity-highlight {
+.pdftion-opacity-pen,
+.pdftion-opacity-highlight {
   accent-color: var(--interactive-accent);
   width: 100%;
 }
 
-.xodo-pdf-ink-native-editor {
+.pdftion-native-editor {
   border: 1.5px dashed var(--interactive-accent);
   border-radius: 2px;
   box-shadow: none;
@@ -415,7 +415,7 @@ body.xodo-pdf-ink-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .
   z-index: 2147483602;
 }
 
-.xodo-pdf-ink-native-editor.is-native-text-editor {
+.pdftion-native-editor.is-native-text-editor {
   border-color: #1c7ed6;
   border-style: dashed;
   border-width: 1.8px;

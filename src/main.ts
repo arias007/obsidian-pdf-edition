@@ -21,7 +21,6 @@ const INK_COLORS = [
   "#868e96"
 ];
 const PDFTION_AI_API_NAME = "PdftionAI";
-const LEGACY_PDF_EDIT_AI_API_NAME = "ObPdfInkXodoAI";
 const TEXT_FONTS = [
   { label: "默认", value: "sans-serif" },
   { label: "宋体", value: "SimSun, STSong, serif" },
@@ -283,29 +282,9 @@ interface PdftionAiApi {
   updateElements(elements: InkElement[]): number;
 }
 
-interface PdfEditAiApi {
-  addCover(input: Partial<InkCover> & Pick<InkCover, "height" | "pageIndex" | "width" | "x" | "y">): string | null;
-  addStroke(input: Partial<InkStroke> & Pick<InkStroke, "pageIndex" | "points">): string | null;
-  addText(input: Partial<InkText> & Pick<InkText, "pageIndex" | "text" | "x" | "y">): string | null;
-  convertNativeDocument(): ConversionResult;
-  convertNativePage(pageIndex?: number): ConversionResult;
-  convertNativeSelection(): ConversionResult;
-  coverNativeSelection(): string | null;
-  deleteElements(ids: string[]): number;
-  exportAnnotatedPdf(): Promise<string | null>;
-  getCurrentFile(): string | null;
-  getElements(): InkElement[];
-  getNativeSelection(): PdfNativeObject | null;
-  getSelectedElements(): InkElement[];
-  replaceNativeText(text: string): { coverId: string | null; textId: string | null } | null;
-  replaceElements(elements: InkElement[]): boolean;
-  updateElements(elements: InkElement[]): number;
-}
-
 declare global {
   interface Window {
     PdftionAI?: PdftionAiApi;
-    ObPdfInkXodoAI?: PdfEditAiApi;
   }
 }
 
@@ -315,7 +294,7 @@ export default class PdftionPlugin extends Plugin {
   private surfaceScanTimers: number[] = [];
 
   async onload(): Promise<void> {
-    document.body.classList.add("xodo-pdf-ink-menu-boost", "pdftion-menu-boost");
+    document.body.classList.add("pdftion-menu-boost");
 
     this.addCommand({
       id: "toggle-pdftion",
@@ -399,12 +378,8 @@ export default class PdftionPlugin extends Plugin {
     if (window.PdftionAI) {
       delete window.PdftionAI;
     }
-    if (window.ObPdfInkXodoAI) {
-      delete window.ObPdfInkXodoAI;
-    }
     delete (window as unknown as Record<string, unknown>)[PDFTION_AI_API_NAME];
-    delete (window as unknown as Record<string, unknown>)[LEGACY_PDF_EDIT_AI_API_NAME];
-    document.body.classList.remove("xodo-pdf-ink-menu-boost", "pdftion-menu-boost");
+    document.body.classList.remove("pdftion-menu-boost");
     for (const session of this.sessions.values()) {
       session.destroy();
     }
@@ -643,7 +618,7 @@ export default class PdftionPlugin extends Plugin {
 
   private commitEditorsOnOutsidePointer(event: PointerEvent): void {
     const target = event.target;
-    if (target instanceof HTMLElement && target.closest(".xodo-pdf-ink-native-editor, .pdftion-panel")) {
+    if (target instanceof HTMLElement && target.closest(".pdftion-native-editor, .pdftion-panel")) {
       return;
     }
     for (const session of this.sessions.values()) {
@@ -808,9 +783,7 @@ export default class PdftionPlugin extends Plugin {
       updateElements: (elements) => this.getActivePdfSession()?.aiUpdateElements(elements) ?? 0
     };
     window.PdftionAI = api;
-    window.ObPdfInkXodoAI = api;
     (window as unknown as Record<string, PdftionAiApi | undefined>)[PDFTION_AI_API_NAME] = api;
-    (window as unknown as Record<string, PdfEditAiApi | undefined>)[LEGACY_PDF_EDIT_AI_API_NAME] = api;
   }
 }
 
@@ -873,7 +846,7 @@ class InkSession {
     private file: TFile,
     private rootEl: HTMLElement
   ) {
-    this.rootEl.classList.add("xodo-pdf-ink-root");
+    this.rootEl.classList.add("pdftion-root");
     this.injectButton();
     void this.loadEditableAnnotations();
     this.scanPages();
@@ -903,16 +876,16 @@ class InkSession {
     this.shareMenu?.remove();
     this.toolbar?.remove();
     this.toolbarHost?.remove();
-    this.rootEl.querySelector<HTMLElement>(".xodo-pdf-ink-inline-actions")?.remove();
+    this.rootEl.querySelector<HTMLElement>(".pdftion-inline-actions")?.remove();
     this.toolbarHost = null;
     for (const overlay of this.overlays.values()) {
       overlay.abort.abort();
       overlay.canvas.remove();
-      overlay.pageEl.classList.remove("xodo-pdf-ink-page");
+      overlay.pageEl.classList.remove("pdftion-page");
     }
     this.overlays.clear();
     this.pendingImageCrop = null;
-    this.rootEl.classList.remove("xodo-pdf-ink-enabled", "xodo-pdf-ink-root", "xodo-pdf-ink-selecting");
+    this.rootEl.classList.remove("pdftion-enabled", "pdftion-root", "pdftion-selecting");
   }
 
   updateFile(file: TFile): void {
@@ -1027,10 +1000,10 @@ class InkSession {
     if (!(node instanceof HTMLElement)) {
       return false;
     }
-    if (node.closest(".xodo-pdf-ink-root") && node.classList.contains("xodo-pdf-ink-canvas")) {
+    if (node.closest(".pdftion-root") && node.classList.contains("pdftion-canvas")) {
       return false;
     }
-    if (node.closest(".xodo-pdf-ink-toolbar-host, .xodo-pdf-ink-toolbar, .xodo-pdf-ink-palette-panel, .xodo-pdf-ink-image-menu, .xodo-pdf-ink-share-menu, .xodo-pdf-ink-embed-actions, .xodo-pdf-ink-inline-actions")) {
+    if (node.closest(".pdftion-toolbar-host, .pdftion-toolbar, .pdftion-palette-panel, .pdftion-image-menu, .pdftion-share-menu, .pdftion-embed-actions, .pdftion-inline-actions")) {
       return false;
     }
     if (
@@ -1052,7 +1025,7 @@ class InkSession {
       return;
     }
 
-    const existing = this.rootEl.querySelector<HTMLElement>(".xodo-pdf-ink-button");
+    const existing = this.rootEl.querySelector<HTMLElement>(".pdftion-button");
     if (existing) {
       this.button = existing;
       this.moveButtonIntoHostIfAvailable(existing);
@@ -1060,7 +1033,7 @@ class InkSession {
     }
 
     const button = createIconButton("pen-line", "PDF ink annotation");
-    button.classList.add("xodo-pdf-ink-button");
+    button.classList.add("pdftion-button");
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1084,7 +1057,7 @@ class InkSession {
       return;
     }
 
-    const oldHost = button.closest<HTMLElement>(".xodo-pdf-ink-embed-actions");
+    const oldHost = button.closest<HTMLElement>(".pdftion-embed-actions");
     this.placeButtonInHost(actions, button);
     if (oldHost && oldHost.childElementCount === 0) {
       oldHost.remove();
@@ -1107,7 +1080,7 @@ class InkSession {
 
   private findZoomOutButton(host: HTMLElement): HTMLElement | null {
     for (const item of Array.from(host.querySelectorAll<HTMLElement>("button, .clickable-icon, [aria-label], [title]"))) {
-      if (item.classList.contains("xodo-pdf-ink-button")) {
+      if (item.classList.contains("pdftion-button")) {
         continue;
       }
       const label = `${item.getAttribute("aria-label") ?? ""} ${item.getAttribute("title") ?? ""} ${item.textContent ?? ""}`.toLowerCase();
@@ -1196,13 +1169,13 @@ class InkSession {
   }
 
   private ensureInlineEmbedHost(create = true): HTMLElement | null {
-    const existing = this.rootEl.querySelector<HTMLElement>(".xodo-pdf-ink-inline-actions");
+    const existing = this.rootEl.querySelector<HTMLElement>(".pdftion-inline-actions");
     if (existing || !create) {
       return existing;
     }
 
     const host = document.createElement("div");
-    host.className = "xodo-pdf-ink-inline-actions";
+    host.className = "pdftion-inline-actions";
 
     const title =
       this.rootEl.querySelector<HTMLElement>(".file-embed-title, .embed-title, .markdown-embed-title") ??
@@ -1239,7 +1212,7 @@ class InkSession {
 
     if (!overlay) {
       const canvas = document.createElement("canvas");
-      canvas.className = "xodo-pdf-ink-canvas";
+      canvas.className = "pdftion-canvas";
 
       const abort = new AbortController();
       const newOverlay: PageOverlay = {
@@ -1275,7 +1248,7 @@ class InkSession {
         signal: abort.signal
       });
 
-      pageEl.classList.add("xodo-pdf-ink-page");
+      pageEl.classList.add("pdftion-page");
       pageEl.appendChild(canvas);
       overlay = newOverlay;
       this.overlays.set(pageEl, overlay);
@@ -1287,7 +1260,7 @@ class InkSession {
 
   private resizeOverlay(overlay: PageOverlay): void {
     this.ensureOverlayCanvasMounted(overlay);
-    const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.xodo-pdf-ink-canvas)");
+    const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.pdftion-canvas)");
     const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
     const cssWidth = Math.round(rect.width);
     const cssHeight = Math.round(rect.height);
@@ -1325,7 +1298,7 @@ class InkSession {
       return false;
     }
 
-    overlay.pageEl.classList.add("xodo-pdf-ink-page");
+    overlay.pageEl.classList.add("pdftion-page");
     if (overlay.canvas.parentElement !== overlay.pageEl || overlay.pageEl.lastElementChild !== overlay.canvas) {
       overlay.pageEl.appendChild(overlay.canvas);
       return true;
@@ -1356,7 +1329,7 @@ class InkSession {
     this.cleanupDetachedOverlays();
     for (const overlay of this.overlays.values()) {
       const wasMounted = this.ensureOverlayCanvasMounted(overlay);
-      const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.xodo-pdf-ink-canvas)");
+      const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.pdftion-canvas)");
       const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
       const cssWidth = Math.round(rect.width);
       const cssHeight = Math.round(rect.height);
@@ -1376,8 +1349,8 @@ class InkSession {
 
   private setEnabled(enabled: boolean): void {
     this.enabled = enabled;
-    this.rootEl.classList.toggle("xodo-pdf-ink-enabled", this.enabled);
-    this.rootEl.classList.toggle("xodo-pdf-ink-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
+    this.rootEl.classList.toggle("pdftion-enabled", this.enabled);
+    this.rootEl.classList.toggle("pdftion-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
     this.updateButtonState();
 
     if (this.enabled) {
@@ -1418,10 +1391,10 @@ class InkSession {
     }
 
     const toolbar = document.createElement("div");
-    toolbar.className = "xodo-pdf-ink-toolbar";
+    toolbar.className = "pdftion-toolbar";
 
     const dragHandle = createIconButton("grip-horizontal", "拖动工具栏");
-    dragHandle.classList.add("xodo-pdf-ink-drag-handle");
+    dragHandle.classList.add("pdftion-drag-handle");
     this.attachToolbarDragHandle(dragHandle);
     toolbar.appendChild(dragHandle);
 
@@ -1446,7 +1419,7 @@ class InkSession {
     toolbar.appendChild(text);
 
     const image = createIconButton("image", "图片工具");
-    image.classList.add("xodo-pdf-ink-image-button");
+    image.classList.add("pdftion-image-button");
     image.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1460,7 +1433,7 @@ class InkSession {
     toolbar.appendChild(eraser);
 
     const palette = createIconButton("palette", "调色板");
-    palette.classList.add("xodo-pdf-ink-palette-button");
+    palette.classList.add("pdftion-palette-button");
     palette.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1477,7 +1450,7 @@ class InkSession {
     toolbar.appendChild(redo);
 
     const exportPdf = createIconButton("share-2", "分享/导出");
-    exportPdf.classList.add("xodo-pdf-ink-share-button");
+    exportPdf.classList.add("pdftion-share-button");
     exportPdf.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1505,7 +1478,7 @@ class InkSession {
   private ensureToolbarHost(): HTMLElement | null {
     const placement = this.getToolbarHostPlacement();
     const existingHosts = Array.from(
-      placement.container.querySelectorAll<HTMLElement>(":scope > .xodo-pdf-ink-toolbar-host")
+      placement.container.querySelectorAll<HTMLElement>(":scope > .pdftion-toolbar-host")
     );
     let host =
       this.toolbarHost?.isConnected && this.toolbarHost.parentElement === placement.container
@@ -1514,7 +1487,7 @@ class InkSession {
 
     if (!host) {
       host = document.createElement("div");
-      host.className = "xodo-pdf-ink-toolbar-host";
+      host.className = "pdftion-toolbar-host";
     }
 
     if (
@@ -1600,7 +1573,7 @@ class InkSession {
     const firstChild = this.rootEl.firstElementChild as HTMLElement | null;
     return {
       container: this.rootEl,
-      before: firstChild?.classList.contains("xodo-pdf-ink-toolbar-host")
+      before: firstChild?.classList.contains("pdftion-toolbar-host")
         ? (firstChild.nextElementSibling as HTMLElement | null)
         : firstChild
     };
@@ -1614,9 +1587,9 @@ class InkSession {
     for (const button of this.toolbar.querySelectorAll<HTMLElement>("[data-tool]")) {
       button.classList.toggle("is-active", button.dataset.tool === this.tool);
     }
-    this.toolbar.querySelector<HTMLElement>(".xodo-pdf-ink-image-button")?.classList.toggle("is-active", this.tool === "image-crop");
+    this.toolbar.querySelector<HTMLElement>(".pdftion-image-button")?.classList.toggle("is-active", this.tool === "image-crop");
 
-    for (const colorButton of this.palette?.querySelectorAll<HTMLElement>(".xodo-pdf-ink-color") ?? []) {
+    for (const colorButton of this.palette?.querySelectorAll<HTMLElement>(".pdftion-color") ?? []) {
       const target = colorButton.dataset.target;
       const activeColor = target === "highlight" ? this.highlightColor : target === "text" ? this.getTextPaletteColor() : this.penColor;
       colorButton.classList.toggle("is-active", colorButton.title === activeColor);
@@ -1627,7 +1600,7 @@ class InkSession {
 
   private setTool(tool: ToolMode): void {
     this.tool = tool;
-    this.rootEl.classList.toggle("xodo-pdf-ink-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
+    this.rootEl.classList.toggle("pdftion-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
     if (tool !== "select" && tool !== "image-crop") {
       this.selectionDrag = null;
       this.nativeSelection = null;
@@ -1667,12 +1640,12 @@ class InkSession {
 
   private showImageMenu(): void {
     this.imageMenu?.remove();
-    const button = this.toolbar?.querySelector<HTMLElement>(".xodo-pdf-ink-image-button");
+    const button = this.toolbar?.querySelector<HTMLElement>(".pdftion-image-button");
     const panel = document.createElement("div");
-    panel.className = "xodo-pdf-ink-image-menu";
+    panel.className = "pdftion-image-menu";
 
     const capture = createIconButton("scan-line", "截取图片编辑");
-    capture.classList.add("xodo-pdf-ink-image-menu-button");
+    capture.classList.add("pdftion-image-menu-button");
     capture.addEventListener("click", () => {
       panel.remove();
       this.imageMenu = null;
@@ -1681,7 +1654,7 @@ class InkSession {
     panel.appendChild(capture);
 
     const insert = createIconButton("image-plus", "从文件插入图片");
-    insert.classList.add("xodo-pdf-ink-image-menu-button");
+    insert.classList.add("pdftion-image-menu-button");
     insert.addEventListener("click", () => {
       panel.remove();
       this.imageMenu = null;
@@ -1710,12 +1683,12 @@ class InkSession {
 
   private showShareMenu(): void {
     this.shareMenu?.remove();
-    const button = this.toolbar?.querySelector<HTMLElement>(".xodo-pdf-ink-share-button");
+    const button = this.toolbar?.querySelector<HTMLElement>(".pdftion-share-button");
     const panel = document.createElement("div");
-    panel.className = "xodo-pdf-ink-share-menu";
+    panel.className = "pdftion-share-menu";
 
     const pdf = createIconButton("file-output", "导出烧录 PDF");
-    pdf.classList.add("xodo-pdf-ink-share-menu-button");
+    pdf.classList.add("pdftion-share-menu-button");
     pdf.addEventListener("click", () => {
       panel.remove();
       this.shareMenu = null;
@@ -1724,7 +1697,7 @@ class InkSession {
     panel.appendChild(pdf);
 
     const docx = createIconButton("file-type-2", "转换 DOCX 文档");
-    docx.classList.add("xodo-pdf-ink-share-menu-button");
+    docx.classList.add("pdftion-share-menu-button");
     docx.addEventListener("click", () => {
       panel.remove();
       this.shareMenu = null;
@@ -1733,7 +1706,7 @@ class InkSession {
     panel.appendChild(docx);
 
     const md = createIconButton("file-text", "转换 MD 文件");
-    md.classList.add("xodo-pdf-ink-share-menu-button");
+    md.classList.add("pdftion-share-menu-button");
     md.addEventListener("click", () => {
       panel.remove();
       this.shareMenu = null;
@@ -1935,7 +1908,7 @@ class InkSession {
     this.closeNativeTextEditor(false);
     const pageRect = overlay.pageEl.getBoundingClientRect();
     const editor = document.createElement("textarea");
-    editor.className = "xodo-pdf-ink-native-editor";
+    editor.className = "pdftion-native-editor";
     editor.classList.add("is-native-text-editor");
     editor.value = selection.text ?? "";
     const sampledBackground = this.samplePdfBackgroundColor(overlay, selection);
@@ -1988,7 +1961,7 @@ class InkSession {
     const pageRect = overlay.pageEl.getBoundingClientRect();
     const bounds = textBounds(textElement, overlay.cssWidth, overlay.cssHeight);
     const editor = document.createElement("textarea");
-    editor.className = "xodo-pdf-ink-native-editor";
+    editor.className = "pdftion-native-editor";
     editor.value = textElement.text;
     editor.style.backgroundColor = "rgba(255, 255, 255, 0.92)";
     editor.style.color = textElement.color;
@@ -2272,13 +2245,13 @@ class InkSession {
     this.palette?.remove();
 
     const panel = document.createElement("div");
-    panel.className = "xodo-pdf-ink-palette-panel";
+    panel.className = "pdftion-palette-panel";
     panel.addEventListener("pointerdown", (event) => event.stopPropagation());
     panel.addEventListener("click", (event) => event.stopPropagation());
 
     if (this.tool === "eraser") {
       panel.appendChild(
-        this.createPaletteRange("橡皮大小", "xodo-pdf-ink-width-eraser", 2, 120, 1, this.eraserWidth, (value) => {
+        this.createPaletteRange("橡皮大小", "pdftion-width-eraser", 2, 120, 1, this.eraserWidth, (value) => {
           this.eraserWidth = value;
         })
       );
@@ -2298,7 +2271,7 @@ class InkSession {
   }
 
   private positionPalettePanel(panel: HTMLElement): void {
-    const button = this.toolbar?.querySelector<HTMLElement>(".xodo-pdf-ink-palette-button");
+    const button = this.toolbar?.querySelector<HTMLElement>(".pdftion-palette-button");
     const gap = 8;
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + gap);
 
@@ -2325,18 +2298,18 @@ class InkSession {
 
   private createPaletteToolGroup(tool: "pen" | "highlight", title: string): HTMLElement {
     const group = document.createElement("div");
-    group.className = "xodo-pdf-ink-palette-group";
+    group.className = "pdftion-palette-group";
 
     const heading = document.createElement("div");
-    heading.className = "xodo-pdf-ink-palette-heading";
+    heading.className = "pdftion-palette-heading";
     heading.textContent = title;
     group.appendChild(heading);
 
     const colorRow = document.createElement("div");
-    colorRow.className = "xodo-pdf-ink-palette-colors";
+    colorRow.className = "pdftion-palette-colors";
     for (const swatch of INK_COLORS) {
       const colorButton = document.createElement("button");
-      colorButton.className = "xodo-pdf-ink-color";
+      colorButton.className = "pdftion-color";
       colorButton.dataset.target = tool;
       colorButton.style.backgroundColor = swatch;
       colorButton.title = swatch;
@@ -2351,13 +2324,13 @@ class InkSession {
     group.appendChild(colorRow);
 
     group.appendChild(
-      this.createPaletteRange(`${title}大小`, `xodo-pdf-ink-width-${tool}`, tool === "highlight" ? 2 : 0.5, tool === "highlight" ? 96 : 72, 0.5, this.getToolWidth(tool), (value) => {
+      this.createPaletteRange(`${title}大小`, `pdftion-width-${tool}`, tool === "highlight" ? 2 : 0.5, tool === "highlight" ? 96 : 72, 0.5, this.getToolWidth(tool), (value) => {
         this.setToolWidth(tool, value);
       })
     );
 
     group.appendChild(
-      this.createPaletteRange(`${title}透明度`, `xodo-pdf-ink-opacity-${tool}`, 0.05, 1, 0.05, this.getToolOpacity(tool), (value) => {
+      this.createPaletteRange(`${title}透明度`, `pdftion-opacity-${tool}`, 0.05, 1, 0.05, this.getToolOpacity(tool), (value) => {
         this.setToolOpacity(tool, value);
       })
     );
@@ -2367,18 +2340,18 @@ class InkSession {
 
   private createPaletteTextGroup(): HTMLElement {
     const group = document.createElement("div");
-    group.className = "xodo-pdf-ink-palette-group";
+    group.className = "pdftion-palette-group";
 
     const heading = document.createElement("div");
-    heading.className = "xodo-pdf-ink-palette-heading";
+    heading.className = "pdftion-palette-heading";
     heading.textContent = "文字";
     group.appendChild(heading);
 
     const colorRow = document.createElement("div");
-    colorRow.className = "xodo-pdf-ink-palette-colors";
+    colorRow.className = "pdftion-palette-colors";
     for (const swatch of INK_COLORS) {
       const colorButton = document.createElement("button");
-      colorButton.className = "xodo-pdf-ink-color";
+      colorButton.className = "pdftion-color";
       colorButton.dataset.target = "text";
       colorButton.style.backgroundColor = swatch;
       colorButton.title = swatch;
@@ -2393,13 +2366,13 @@ class InkSession {
     group.appendChild(colorRow);
 
     const fontRow = document.createElement("label");
-    fontRow.className = "xodo-pdf-ink-palette-range";
+    fontRow.className = "pdftion-palette-range";
     fontRow.title = "字体";
     const fontLabel = document.createElement("span");
     fontLabel.textContent = "字体";
     fontRow.appendChild(fontLabel);
     const select = document.createElement("select");
-    select.className = "xodo-pdf-ink-font-family";
+    select.className = "pdftion-font-family";
     for (const font of TEXT_FONTS) {
       const option = document.createElement("option");
       option.value = font.value;
@@ -2412,11 +2385,11 @@ class InkSession {
     group.appendChild(fontRow);
 
     group.appendChild(
-      this.createPaletteRange("文字大小", "xodo-pdf-ink-size-text", 6, 120, 1, this.getTextPaletteFontSize(), (value) => this.setTextPaletteFontSize(value))
+      this.createPaletteRange("文字大小", "pdftion-size-text", 6, 120, 1, this.getTextPaletteFontSize(), (value) => this.setTextPaletteFontSize(value))
     );
 
     group.appendChild(
-      this.createPaletteRange("文字透明度", "xodo-pdf-ink-opacity-text", 0.05, 1, 0.05, this.getTextPaletteOpacity(), (value) => this.setTextPaletteOpacity(value))
+      this.createPaletteRange("文字透明度", "pdftion-opacity-text", 0.05, 1, 0.05, this.getTextPaletteOpacity(), (value) => this.setTextPaletteOpacity(value))
     );
 
     return group;
@@ -2424,7 +2397,7 @@ class InkSession {
 
   private createAdvancedColorInput(target: "pen" | "highlight" | "text", value: string, onInput: (color: string) => void): HTMLElement {
     const row = document.createElement("button");
-    row.className = "xodo-pdf-ink-color xodo-pdf-ink-color-advanced";
+    row.className = "pdftion-color pdftion-color-advanced";
     row.title = "自定义颜色";
     row.type = "button";
 
@@ -2455,7 +2428,7 @@ class InkSession {
     onInput: (value: number) => void
   ): HTMLElement {
     const row = document.createElement("label");
-    row.className = "xodo-pdf-ink-palette-range";
+    row.className = "pdftion-palette-range";
     row.title = title;
 
     const label = document.createElement("span");
@@ -2481,33 +2454,33 @@ class InkSession {
     }
 
     for (const tool of ["pen", "highlight"] as const) {
-      const widthInput = this.palette.querySelector<HTMLInputElement>(`.xodo-pdf-ink-width-${tool}`);
+      const widthInput = this.palette.querySelector<HTMLInputElement>(`.pdftion-width-${tool}`);
       if (widthInput) {
         widthInput.value = String(this.getToolWidth(tool));
       }
 
-      const opacityInput = this.palette.querySelector<HTMLInputElement>(`.xodo-pdf-ink-opacity-${tool}`);
+      const opacityInput = this.palette.querySelector<HTMLInputElement>(`.pdftion-opacity-${tool}`);
       if (opacityInput) {
         opacityInput.value = String(this.getToolOpacity(tool));
       }
     }
 
-    const eraserInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-width-eraser");
+    const eraserInput = this.palette.querySelector<HTMLInputElement>(".pdftion-width-eraser");
     if (eraserInput) {
       eraserInput.value = String(this.eraserWidth);
     }
 
-    const textSizeInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-size-text");
+    const textSizeInput = this.palette.querySelector<HTMLInputElement>(".pdftion-size-text");
     if (textSizeInput) {
       textSizeInput.value = String(this.getTextPaletteFontSize());
     }
 
-    const textOpacityInput = this.palette.querySelector<HTMLInputElement>(".xodo-pdf-ink-opacity-text");
+    const textOpacityInput = this.palette.querySelector<HTMLInputElement>(".pdftion-opacity-text");
     if (textOpacityInput) {
       textOpacityInput.value = String(this.getTextPaletteOpacity());
     }
 
-    const textFontInput = this.palette.querySelector<HTMLSelectElement>(".xodo-pdf-ink-font-family");
+    const textFontInput = this.palette.querySelector<HTMLSelectElement>(".pdftion-font-family");
     if (textFontInput) {
       textFontInput.value = this.getTextPaletteFontFamily();
     }
@@ -5973,7 +5946,7 @@ function findPdfZoomButton(rootEl: HTMLElement, direction: "in" | "out"): HTMLBu
       : ["zoom out", "缩小", "放小", "zoom-out"];
 
   for (const button of Array.from(rootEl.querySelectorAll<HTMLButtonElement>("button, .clickable-icon"))) {
-    if (button.classList.contains("xodo-pdf-ink-button") || button.disabled) {
+    if (button.classList.contains("pdftion-button") || button.disabled) {
       continue;
     }
 
