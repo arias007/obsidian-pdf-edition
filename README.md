@@ -1,5 +1,33 @@
 # pdftion
 
+pdftion adds editable PDF annotation tools, visual export, and an AI-friendly operation API to PDF views and embedded PDF previews.
+
+## Features
+
+- Draw pen and highlighter annotations directly on PDF pages.
+- Add editable text, cover regions, and inserted images as reusable overlay elements.
+- Move, resize, delete, undo, and redo plugin-created annotation elements.
+- Export a visible annotated PDF copy, plus Markdown and DOCX conversion helpers.
+- Use `window.PdftionAI` to inspect, select, update, delete, and export annotation data from scripts or AI agents.
+
+## Installation
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the matching GitHub release.
+2. Create a folder named `pdftion` inside your vault's `.obsidian/plugins/` folder.
+3. Copy the three downloaded files into `.obsidian/plugins/pdftion/`.
+4. Restart Obsidian or reload community plugins.
+5. Enable `pdftion` in Settings -> Community plugins.
+
+## Usage
+
+1. Open a PDF file or an embedded PDF preview.
+2. Click the pen button in the PDF toolbar.
+3. Draw, highlight, add text, cover content, select elements, or use the share menu.
+4. Edits are saved automatically as editable annotation data.
+5. Use the share menu to export a burned-in PDF copy when you need a file that looks like the current annotated view.
+
+## 中文说明
+
 pdftion 给 Obsidian PDF 阅读器和笔记内嵌 PDF 加批注、编辑、导出、AI 操作接口和 Obsidian 融合能力。
 
 ## 功能

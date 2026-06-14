@@ -1,9 +1,9 @@
 {
   "id": "pdftion",
   "name": "pdftion",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "minAppVersion": "1.8.0",
-  "description": "AI-open PDF annotation, editing, export, and Obsidian integration tools.",
+  "description": "AI-open PDF annotation, editing, export, and note integration tools.",
   "author": "Murat / Codex",
   "authorUrl": "",
   "isDesktopOnly": false

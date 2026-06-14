@@ -1,7 +1,7 @@
 {
   "name": "pdftion",
-  "version": "0.3.15",
-  "description": "AI-open PDF annotation, editing, export, and Obsidian integration tools.",
+  "version": "0.3.16",
+  "description": "AI-open PDF annotation, editing, export, and note integration tools.",
   "main": "main.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
