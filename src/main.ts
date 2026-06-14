@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile, WorkspaceLeaf, getLanguage, setIcon } from "obsidian";
+import { Notice, Plugin, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import * as fontkitModule from "@pdf-lib/fontkit";
 import { PDFDocument, degrees, rgb } from "pdf-lib";
 
@@ -26,7 +26,6 @@ const TEXT_FONTS = [
 
 function isChineseUi(): boolean {
   const languages = new Set<string>();
-  languages.add(getLanguage());
   languages.add(activeWindow.navigator.language);
   for (const language of activeWindow.navigator.languages ?? []) {
     languages.add(language);
@@ -6726,25 +6725,6 @@ function normalizedElementBounds(element: InkElement): NormalizedBounds | null {
     return normalizedTextBounds(element);
   }
   return normalizedCoverBounds(element);
-}
-
-function normalizedStrokesBounds(strokes: InkStroke[]): NormalizedBounds | null {
-  let bounds: NormalizedBounds | null = null;
-  for (const stroke of strokes) {
-    const box = normalizedStrokeBounds(stroke);
-    if (!box) {
-      continue;
-    }
-    bounds = bounds
-      ? {
-          maxX: Math.max(bounds.maxX, box.maxX),
-          maxY: Math.max(bounds.maxY, box.maxY),
-          minX: Math.min(bounds.minX, box.minX),
-          minY: Math.min(bounds.minY, box.minY)
-        }
-      : box;
-  }
-  return bounds;
 }
 
 function normalizedElementsBounds(elements: InkElement[]): NormalizedBounds | null {

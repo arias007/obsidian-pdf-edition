@@ -52135,7 +52135,6 @@ var TEXT_FONTS = [
 ];
 function isChineseUi() {
   const languages = /* @__PURE__ */ new Set();
-  languages.add((0, import_obsidian.getLanguage)());
   languages.add(activeWindow.navigator.language);
   for (const language of activeWindow.navigator.languages ?? []) {
     languages.add(language);
