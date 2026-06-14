@@ -29,6 +29,174 @@ const TEXT_FONTS = [
   { label: "衬线", value: "Georgia, serif" }
 ];
 
+function createActiveElement<K extends keyof HTMLElementTagNameMap>(tagName: K): HTMLElementTagNameMap[K] {
+  return activeDocument.createElement(tagName);
+}
+
+function appendToActiveBody(element: HTMLElement): void {
+  activeDocument.body.appendChild(element);
+}
+
+function getActiveBody(): HTMLElement {
+  return activeDocument.body;
+}
+
+function getActiveWindowSize(): { height: number; width: number } {
+  return {
+    height: activeWindow.innerHeight,
+    width: activeWindow.innerWidth
+  };
+}
+
+type CrossWindowNode = Node & {
+  instanceOf<T>(type: { new(): T }): this is T;
+};
+
+function hasCrossWindowInstanceCheck(value: unknown): value is CrossWindowNode {
+  return typeof value === "object" && value !== null && "instanceOf" in value;
+}
+
+function isHTMLElement(value: unknown): value is HTMLElement {
+  return hasCrossWindowInstanceCheck(value) && value.instanceOf(HTMLElement);
+}
+
+async function showPromptModal(options: {
+  actionLabel: string;
+  cancelLabel?: string;
+  defaultValue?: string;
+  message: string;
+  title: string;
+}): Promise<string | null> {
+  return new Promise((resolve) => {
+    const modal = createActiveElement("div");
+    modal.className = "pdftion-dialog-backdrop";
+
+    const panel = createActiveElement("div");
+    panel.className = "pdftion-dialog";
+
+    const heading = createActiveElement("div");
+    heading.className = "pdftion-dialog-title";
+    heading.textContent = options.title;
+    panel.appendChild(heading);
+
+    const message = createActiveElement("div");
+    message.className = "pdftion-dialog-message";
+    message.textContent = options.message;
+    panel.appendChild(message);
+
+    const input = createActiveElement("textarea");
+    input.className = "pdftion-dialog-input";
+    input.value = options.defaultValue ?? "";
+    panel.appendChild(input);
+
+    const actions = createActiveElement("div");
+    actions.className = "pdftion-dialog-actions";
+
+    const cancel = createActiveElement("button");
+    cancel.type = "button";
+    cancel.textContent = options.cancelLabel ?? "取消";
+    cancel.addEventListener("click", () => {
+      modal.remove();
+      resolve(null);
+    });
+    actions.appendChild(cancel);
+
+    const submit = createActiveElement("button");
+    submit.type = "button";
+    submit.textContent = options.actionLabel;
+    submit.classList.add("mod-cta");
+    submit.addEventListener("click", () => {
+      const value = input.value.trim();
+      modal.remove();
+      resolve(value || null);
+    });
+    actions.appendChild(submit);
+
+    panel.appendChild(actions);
+    modal.appendChild(panel);
+    appendToActiveBody(modal);
+    input.focus({ preventScroll: true });
+
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        modal.remove();
+        resolve(null);
+      }
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        const value = input.value.trim();
+        modal.remove();
+        resolve(value || null);
+      }
+    });
+  });
+}
+
+async function showConfirmModal(options: {
+  cancelLabel?: string;
+  confirmLabel?: string;
+  message: string;
+  title: string;
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    const modal = createActiveElement("div");
+    modal.className = "pdftion-dialog-backdrop";
+
+    const panel = createActiveElement("div");
+    panel.className = "pdftion-dialog";
+
+    const heading = createActiveElement("div");
+    heading.className = "pdftion-dialog-title";
+    heading.textContent = options.title;
+    panel.appendChild(heading);
+
+    const message = createActiveElement("div");
+    message.className = "pdftion-dialog-message";
+    message.textContent = options.message;
+    panel.appendChild(message);
+
+    const actions = createActiveElement("div");
+    actions.className = "pdftion-dialog-actions";
+
+    const cancel = createActiveElement("button");
+    cancel.type = "button";
+    cancel.textContent = options.cancelLabel ?? "取消";
+    cancel.addEventListener("click", () => {
+      modal.remove();
+      resolve(false);
+    });
+    actions.appendChild(cancel);
+
+    const confirm = createActiveElement("button");
+    confirm.type = "button";
+    confirm.textContent = options.confirmLabel ?? "确认";
+    confirm.classList.add("mod-cta");
+    confirm.addEventListener("click", () => {
+      modal.remove();
+      resolve(true);
+    });
+    actions.appendChild(confirm);
+
+    panel.appendChild(actions);
+    modal.appendChild(panel);
+    appendToActiveBody(modal);
+
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        modal.remove();
+        resolve(false);
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        modal.remove();
+        resolve(true);
+      }
+    });
+  });
+}
+
 interface PdfViewLike {
   containerEl?: HTMLElement;
   contentEl?: HTMLElement;
@@ -294,11 +462,11 @@ export default class PdftionPlugin extends Plugin {
   private surfaceScanTimers: number[] = [];
 
   async onload(): Promise<void> {
-    document.body.classList.add("pdftion-menu-boost");
+    getActiveBody().classList.add("pdftion-menu-boost");
 
     this.addCommand({
-      id: "toggle-pdftion",
-      name: "Toggle pdftion PDF annotation",
+      id: "toggle",
+      name: "Toggle PDF annotation",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -311,7 +479,7 @@ export default class PdftionPlugin extends Plugin {
 
     this.addCommand({
       id: "export-annotated-pdf",
-      name: "Pdftion: export current PDF with visible annotations",
+      name: "Export current PDF with visible annotations",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -324,7 +492,7 @@ export default class PdftionPlugin extends Plugin {
 
     this.addCommand({
       id: "export-annotations-markdown",
-      name: "Pdftion: export annotations to Markdown",
+      name: "Export annotations to Markdown",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -337,7 +505,7 @@ export default class PdftionPlugin extends Plugin {
 
     this.addCommand({
       id: "show-pdf-page-navigator",
-      name: "Pdftion: show page navigator",
+      name: "Show page navigator",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -350,7 +518,7 @@ export default class PdftionPlugin extends Plugin {
 
     this.addCommand({
       id: "convert-pdf-markdown-docx",
-      name: "Pdftion: PDF/Markdown/DOCX conversion hub",
+      name: "PDF/Markdown/DOCX conversion hub",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -364,10 +532,10 @@ export default class PdftionPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.queuePdfSurfaceScans()));
     this.registerEvent(this.app.workspace.on("layout-change", () => this.queuePdfSurfaceScans()));
     this.registerEvent(this.app.workspace.on("file-open", () => this.queuePdfSurfaceScans()));
-    this.registerDomEvent(document, "visibilitychange", () => this.flushAllSessionsSoon());
-    this.registerDomEvent(document, "pointerdown", (event) => this.commitEditorsOnOutsidePointer(event), { capture: true });
-    this.registerDomEvent(window, "pagehide", () => this.flushAllSessionsSoon());
-    this.registerDomEvent(window, "beforeunload", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(activeDocument, "visibilitychange", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(activeDocument, "pointerdown", (event) => this.commitEditorsOnOutsidePointer(event), { capture: true });
+    this.registerDomEvent(activeWindow, "pagehide", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(activeWindow, "beforeunload", () => this.flushAllSessionsSoon());
     this.register(() => this.clearSurfaceScanTimers());
 
     this.queuePdfSurfaceScans();
@@ -375,11 +543,11 @@ export default class PdftionPlugin extends Plugin {
   }
 
   onunload(): void {
-    if (window.PdftionAI) {
-      delete window.PdftionAI;
+    if (activeWindow.PdftionAI) {
+      delete activeWindow.PdftionAI;
     }
-    delete (window as unknown as Record<string, unknown>)[PDFTION_AI_API_NAME];
-    document.body.classList.remove("pdftion-menu-boost");
+    delete (activeWindow as unknown as Record<string, unknown>)[PDFTION_AI_API_NAME];
+    getActiveBody().classList.remove("pdftion-menu-boost");
     for (const session of this.sessions.values()) {
       session.destroy();
     }
@@ -390,7 +558,7 @@ export default class PdftionPlugin extends Plugin {
   private queuePdfSurfaceScans(): void {
     this.clearSurfaceScanTimers();
     for (const delay of [0, 80, 180, 420, 900, 1800, 3200]) {
-      const timer = window.setTimeout(() => {
+      const timer = activeWindow.setTimeout(() => {
         this.surfaceScanTimers = this.surfaceScanTimers.filter((value) => value !== timer);
         this.scanPdfSurfaces();
       }, delay);
@@ -400,7 +568,7 @@ export default class PdftionPlugin extends Plugin {
 
   private clearSurfaceScanTimers(): void {
     for (const timer of this.surfaceScanTimers) {
-      window.clearTimeout(timer);
+      activeWindow.clearTimeout(timer);
     }
     this.surfaceScanTimers = [];
   }
@@ -567,9 +735,10 @@ export default class PdftionPlugin extends Plugin {
       }
     });
 
-    const activeLeaf = this.app.workspace.activeLeaf ?? this.app.workspace.getLeavesOfType("markdown")[0] ?? this.app.workspace.getLeavesOfType("pdf")[0] ?? null;
-    if (activeLeaf) {
-      for (const surface of this.findPdfSurfaces(document.body, activeLeaf.view as unknown as PdfViewLike)) {
+    const activeFile = this.app.workspace.getActiveFile();
+    const currentLeaf = activeFile ? this.findLeafForFile(activeFile) : this.app.workspace.getMostRecentLeaf();
+    if (currentLeaf) {
+      for (const surface of this.findPdfSurfaces(activeDocument.body, currentLeaf.view as unknown as PdfViewLike)) {
         if (!this.isDetachedPdfSurface(surface.rootEl) || this.isCoveredByExistingSession(surface.rootEl)) {
           continue;
         }
@@ -581,17 +750,28 @@ export default class PdftionPlugin extends Plugin {
           continue;
         }
 
-        const session = new InkSession(this, activeLeaf, surface.file, surface.rootEl);
+        const session = new InkSession(this, currentLeaf, surface.file, surface.rootEl);
         this.sessions.set(surface.rootEl, session);
       }
     }
 
     for (const [rootEl, session] of this.sessions.entries()) {
-      if (!document.body.contains(rootEl) || !liveRoots.has(rootEl)) {
+      if (!activeDocument.body.contains(rootEl) || !liveRoots.has(rootEl)) {
         session.destroy();
         this.sessions.delete(rootEl);
       }
     }
+  }
+
+  private findLeafForFile(file: TFile): WorkspaceLeaf | null {
+    let matched: WorkspaceLeaf | null = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const view = leaf.view as unknown as PdfViewLike;
+      if (view.file?.path === file.path) {
+        matched = leaf;
+      }
+    });
+    return matched;
   }
 
   private flushAllSessionsSoon(): void {
@@ -618,7 +798,7 @@ export default class PdftionPlugin extends Plugin {
 
   private commitEditorsOnOutsidePointer(event: PointerEvent): void {
     const target = event.target;
-    if (target instanceof HTMLElement && target.closest(".pdftion-native-editor, .pdftion-panel")) {
+    if (isHTMLElement(target) && target.closest(".pdftion-native-editor, .pdftion-panel")) {
       return;
     }
     for (const session of this.sessions.values()) {
@@ -707,7 +887,8 @@ export default class PdftionPlugin extends Plugin {
   }
 
   private getActivePdfSession(): InkSession | null {
-    const leaf = this.app.workspace.activeLeaf;
+    const activeFile = this.app.workspace.getActiveFile();
+    const leaf = activeFile ? this.findLeafForFile(activeFile) : this.app.workspace.getMostRecentLeaf();
     if (!leaf) {
       return null;
     }
@@ -737,10 +918,10 @@ export default class PdftionPlugin extends Plugin {
     let best: { score: number; session: InkSession } | null = null;
     for (const [rootEl, session] of this.sessions.entries()) {
       const rect = rootEl.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0 || rect.bottom < 0 || rect.top > window.innerHeight) {
+      if (rect.width <= 0 || rect.height <= 0 || rect.bottom < 0 || rect.top > activeWindow.innerHeight) {
         continue;
       }
-      const score = Math.abs(rect.top + rect.height / 2 - window.innerHeight / 2);
+      const score = Math.abs(rect.top + rect.height / 2 - activeWindow.innerHeight / 2);
       if (!best || score < best.score) {
         best = { score, session };
       }
@@ -782,7 +963,7 @@ export default class PdftionPlugin extends Plugin {
       getPageCrops: () => this.getActivePdfSession()?.getPageCrops() ?? {},
       updateElements: (elements) => this.getActivePdfSession()?.aiUpdateElements(elements) ?? 0
     };
-    window.PdftionAI = api;
+    activeWindow.PdftionAI = api;
     (window as unknown as Record<string, PdftionAiApi | undefined>)[PDFTION_AI_API_NAME] = api;
   }
 }
@@ -970,7 +1151,7 @@ class InkSession {
 
   private scheduleScanPages(delay = 250): void {
     this.clearScanTimer();
-    this.scanTimer = window.setTimeout(() => {
+    this.scanTimer = activeWindow.setTimeout(() => {
       this.scanTimer = null;
       this.scanPages();
     }, delay);
@@ -997,7 +1178,7 @@ class InkSession {
   }
 
   private isRelevantPdfMutationNode(node: Node): boolean {
-    if (!(node instanceof HTMLElement)) {
+    if (!node.instanceOf(HTMLElement)) {
       return false;
     }
     if (node.closest(".pdftion-root") && node.classList.contains("pdftion-canvas")) {
@@ -1174,7 +1355,7 @@ class InkSession {
       return existing;
     }
 
-    const host = document.createElement("div");
+    const host = activeDocument.createElement("div");
     host.className = "pdftion-inline-actions";
 
     const title =
@@ -1211,7 +1392,7 @@ class InkSession {
     let overlay = this.overlays.get(pageEl);
 
     if (!overlay) {
-      const canvas = document.createElement("canvas");
+      const canvas = activeDocument.createElement("canvas");
       canvas.className = "pdftion-canvas";
 
       const abort = new AbortController();
@@ -1225,25 +1406,25 @@ class InkSession {
         pageIndex
       };
 
-      canvas.addEventListener("pointerdown", (event) => this.onPointerDown(event, newOverlay), { signal: abort.signal });
-      canvas.addEventListener("dblclick", (event) => this.onDoubleClick(event, newOverlay), { signal: abort.signal });
-      canvas.addEventListener("pointermove", (event) => this.onPointerMove(event, newOverlay), { signal: abort.signal });
-      canvas.addEventListener("pointerup", (event) => this.onPointerUp(event, newOverlay), { signal: abort.signal });
-      canvas.addEventListener("pointercancel", (event) => this.onPointerUp(event, newOverlay), { signal: abort.signal });
-      canvas.addEventListener("lostpointercapture", (event) => this.onPointerUp(event, newOverlay), { signal: abort.signal });
-      canvas.addEventListener("touchstart", (event) => this.onTouchStart(event, newOverlay), {
+      canvas.addEventListener("pointerdown", (event: PointerEvent) => this.onPointerDown(event, newOverlay), { signal: abort.signal });
+      canvas.addEventListener("dblclick", (event: MouseEvent) => this.onDoubleClick(event, newOverlay), { signal: abort.signal });
+      canvas.addEventListener("pointermove", (event: PointerEvent) => this.onPointerMove(event, newOverlay), { signal: abort.signal });
+      canvas.addEventListener("pointerup", (event: PointerEvent) => this.onPointerUp(event, newOverlay), { signal: abort.signal });
+      canvas.addEventListener("pointercancel", (event: PointerEvent) => this.onPointerUp(event, newOverlay), { signal: abort.signal });
+      canvas.addEventListener("lostpointercapture", (event: PointerEvent) => this.onPointerUp(event, newOverlay), { signal: abort.signal });
+      canvas.addEventListener("touchstart", (event: TouchEvent) => this.onTouchStart(event, newOverlay), {
         passive: false,
         signal: abort.signal
       });
-      canvas.addEventListener("touchmove", (event) => this.onTouchMove(event, newOverlay), {
+      canvas.addEventListener("touchmove", (event: TouchEvent) => this.onTouchMove(event, newOverlay), {
         passive: false,
         signal: abort.signal
       });
-      canvas.addEventListener("touchend", (event) => this.onTouchEnd(event, newOverlay), {
+      canvas.addEventListener("touchend", (event: TouchEvent) => this.onTouchEnd(event, newOverlay), {
         passive: false,
         signal: abort.signal
       });
-      canvas.addEventListener("touchcancel", (event) => this.onTouchEnd(event, newOverlay), {
+      canvas.addEventListener("touchcancel", (event: TouchEvent) => this.onTouchEnd(event, newOverlay), {
         passive: false,
         signal: abort.signal
       });
@@ -1264,7 +1445,7 @@ class InkSession {
     const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
     const cssWidth = Math.round(rect.width);
     const cssHeight = Math.round(rect.height);
-    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const dpr = Math.max(1, Math.min(3, activeWindow.devicePixelRatio || 1));
 
     if (cssWidth <= 0 || cssHeight <= 0) {
       this.scheduleScanPages(260);
@@ -1278,16 +1459,14 @@ class InkSession {
     overlay.cssWidth = cssWidth;
     overlay.cssHeight = cssHeight;
     overlay.dpr = dpr;
-    if (visibleCanvas) {
-      const pageRect = overlay.pageEl.getBoundingClientRect();
-      overlay.canvas.style.left = `${Math.max(0, Math.round(rect.left - pageRect.left))}px`;
-      overlay.canvas.style.top = `${Math.max(0, Math.round(rect.top - pageRect.top))}px`;
-    } else {
-      overlay.canvas.style.left = "0";
-      overlay.canvas.style.top = "0";
-    }
-    overlay.canvas.style.width = `${cssWidth}px`;
-    overlay.canvas.style.height = `${cssHeight}px`;
+    const left = visibleCanvas ? `${Math.max(0, Math.round(rect.left - overlay.pageEl.getBoundingClientRect().left))}px` : "0";
+    const top = visibleCanvas ? `${Math.max(0, Math.round(rect.top - overlay.pageEl.getBoundingClientRect().top))}px` : "0";
+    overlay.canvas.setCssStyles({
+      height: `${cssHeight}px`,
+      left,
+      top,
+      width: `${cssWidth}px`
+    });
     overlay.canvas.width = Math.max(1, Math.round(cssWidth * dpr));
     overlay.canvas.height = Math.max(1, Math.round(cssHeight * dpr));
     this.redrawOverlay(overlay);
@@ -1310,12 +1489,12 @@ class InkSession {
     if (this.healthTimer !== null) {
       return;
     }
-    this.healthTimer = window.setInterval(() => this.repairActiveOverlays(), OVERLAY_HEALTH_CHECK_MS);
+    this.healthTimer = activeWindow.setInterval(() => this.repairActiveOverlays(), OVERLAY_HEALTH_CHECK_MS);
   }
 
   private stopOverlayHealthCheck(): void {
     if (this.healthTimer !== null) {
-      window.clearInterval(this.healthTimer);
+      activeWindow.clearInterval(this.healthTimer);
       this.healthTimer = null;
     }
   }
@@ -1390,7 +1569,7 @@ class InkSession {
       return;
     }
 
-    const toolbar = document.createElement("div");
+    const toolbar = activeDocument.createElement("div");
     toolbar.className = "pdftion-toolbar";
 
     const dragHandle = createIconButton("grip-horizontal", "拖动工具栏");
@@ -1467,10 +1646,10 @@ class InkSession {
     toolbar.appendChild(navigator);
 
     const clear = createIconButton("trash-2", "删除选中/清空插件标注");
-    clear.addEventListener("click", () => this.clearUnsavedInk());
+    clear.addEventListener("click", () => void this.clearUnsavedInk());
     toolbar.appendChild(clear);
 
-    (this.ensureToolbarHost() ?? document.body).appendChild(toolbar);
+    (this.ensureToolbarHost() ?? activeDocument.body).appendChild(toolbar);
     this.toolbar = toolbar;
     this.updateToolbarState();
   }
@@ -1486,7 +1665,7 @@ class InkSession {
         : existingHosts[0] ?? null;
 
     if (!host) {
-      host = document.createElement("div");
+      host = activeDocument.createElement("div");
       host.className = "pdftion-toolbar-host";
     }
 
@@ -1521,46 +1700,50 @@ class InkSession {
       handle.setPointerCapture?.(event.pointerId);
       host.classList.add("is-floating");
       host.classList.add("is-dragging");
-      host.style.left = `${startRect.left}px`;
-      host.style.top = `${startRect.top}px`;
-      host.style.width = `${startRect.width}px`;
-      host.style.height = `${startRect.height}px`;
-      host.style.transform = "translate3d(0, 0, 0)";
+      host.setCssStyles({
+        height: `${startRect.height}px`,
+        left: `${startRect.left}px`,
+        top: `${startRect.top}px`,
+        transform: "translate3d(0, 0, 0)",
+        width: `${startRect.width}px`
+      });
       let dragX = 0;
       let dragY = 0;
       let frame = 0;
 
       const applyTransform = (): void => {
         frame = 0;
-        host.style.transform = `translate3d(${dragX}px, ${dragY}px, 0)`;
+        host.setCssStyles({ transform: `translate3d(${dragX}px, ${dragY}px, 0)` });
       };
 
       const move = (moveEvent: PointerEvent): void => {
-        const maxLeft = Math.max(0, window.innerWidth - host.offsetWidth);
-        const maxTop = Math.max(0, window.innerHeight - host.offsetHeight);
+        const maxLeft = Math.max(0, activeWindow.innerWidth - host.offsetWidth);
+        const maxTop = Math.max(0, activeWindow.innerHeight - host.offsetHeight);
         dragX = clamp(startRect.left + moveEvent.clientX - startX, 0, maxLeft) - startRect.left;
         dragY = clamp(startRect.top + moveEvent.clientY - startY, 0, maxTop) - startRect.top;
         if (frame === 0) {
-          frame = window.requestAnimationFrame(applyTransform);
+          frame = activeWindow.requestAnimationFrame(applyTransform);
         }
       };
       const up = (): void => {
         if (frame !== 0) {
-          window.cancelAnimationFrame(frame);
+          activeWindow.cancelAnimationFrame(frame);
           frame = 0;
         }
-        host.style.left = `${startRect.left + dragX}px`;
-        host.style.top = `${startRect.top + dragY}px`;
-        host.style.transform = "";
+        host.setCssStyles({
+          left: `${startRect.left + dragX}px`,
+          top: `${startRect.top + dragY}px`,
+          transform: ""
+        });
         host.classList.remove("is-dragging");
         handle.releasePointerCapture?.(event.pointerId);
-        window.removeEventListener("pointermove", move, true);
-        window.removeEventListener("pointerup", up, true);
-        window.removeEventListener("pointercancel", up, true);
+        activeWindow.removeEventListener("pointermove", move, true);
+        activeWindow.removeEventListener("pointerup", up, true);
+        activeWindow.removeEventListener("pointercancel", up, true);
       };
-      window.addEventListener("pointermove", move, true);
-      window.addEventListener("pointerup", up, true);
-      window.addEventListener("pointercancel", up, true);
+      activeWindow.addEventListener("pointermove", move, true);
+      activeWindow.addEventListener("pointerup", up, true);
+      activeWindow.addEventListener("pointercancel", up, true);
     });
   }
 
@@ -1584,12 +1767,13 @@ class InkSession {
       return;
     }
 
-    for (const button of this.toolbar.querySelectorAll<HTMLElement>("[data-tool]")) {
+    for (const button of Array.from(this.toolbar.querySelectorAll("[data-tool]")).filter(isHTMLElement)) {
       button.classList.toggle("is-active", button.dataset.tool === this.tool);
     }
     this.toolbar.querySelector<HTMLElement>(".pdftion-image-button")?.classList.toggle("is-active", this.tool === "image-crop");
 
-    for (const colorButton of this.palette?.querySelectorAll<HTMLElement>(".pdftion-color") ?? []) {
+    const colorButtons = this.palette ? Array.from(this.palette.querySelectorAll(".pdftion-color")).filter(isHTMLElement) : [];
+    for (const colorButton of colorButtons) {
       const target = colorButton.dataset.target;
       const activeColor = target === "highlight" ? this.highlightColor : target === "text" ? this.getTextPaletteColor() : this.penColor;
       colorButton.classList.toggle("is-active", colorButton.title === activeColor);
@@ -1641,7 +1825,7 @@ class InkSession {
   private showImageMenu(): void {
     this.imageMenu?.remove();
     const button = this.toolbar?.querySelector<HTMLElement>(".pdftion-image-button");
-    const panel = document.createElement("div");
+    const panel = activeDocument.createElement("div");
     panel.className = "pdftion-image-menu";
 
     const capture = createIconButton("scan-line", "截取图片编辑");
@@ -1662,11 +1846,13 @@ class InkSession {
     });
     panel.appendChild(insert);
 
-    document.body.appendChild(panel);
+    appendToActiveBody(panel);
     const rect = button?.getBoundingClientRect();
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + 6);
-    panel.style.top = `${Math.min(window.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`;
-    panel.style.left = `${Math.min(window.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`;
+    panel.setCssStyles({
+      left: `${Math.min(activeWindow.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`,
+      top: `${Math.min(activeWindow.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`
+    });
     this.imageMenu = panel;
   }
 
@@ -1684,7 +1870,7 @@ class InkSession {
   private showShareMenu(): void {
     this.shareMenu?.remove();
     const button = this.toolbar?.querySelector<HTMLElement>(".pdftion-share-button");
-    const panel = document.createElement("div");
+    const panel = activeDocument.createElement("div");
     panel.className = "pdftion-share-menu";
 
     const pdf = createIconButton("file-output", "导出烧录 PDF");
@@ -1714,11 +1900,13 @@ class InkSession {
     });
     panel.appendChild(md);
 
-    document.body.appendChild(panel);
+    appendToActiveBody(panel);
     const rect = button?.getBoundingClientRect();
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + 6);
-    panel.style.top = `${Math.min(window.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`;
-    panel.style.left = `${Math.min(window.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`;
+    panel.setCssStyles({
+      left: `${Math.min(activeWindow.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`,
+      top: `${Math.min(activeWindow.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`
+    });
     this.shareMenu = panel;
   }
 
@@ -1907,7 +2095,7 @@ class InkSession {
   private openNativeTextEditor(selection: PdfNativeObject, overlay: PageOverlay): void {
     this.closeNativeTextEditor(false);
     const pageRect = overlay.pageEl.getBoundingClientRect();
-    const editor = document.createElement("textarea");
+    const editor = activeDocument.createElement("textarea");
     editor.className = "pdftion-native-editor";
     editor.classList.add("is-native-text-editor");
     editor.value = selection.text ?? "";
@@ -1915,15 +2103,17 @@ class InkSession {
     this.nativeTextEditorCover = this.createNativeTextCover(selection, overlay, sampledBackground, false);
     this.redrawOverlay(overlay);
     editor.dataset.coverColor = sampledBackground;
-    editor.style.backgroundColor = "rgba(255, 255, 255, 0.02)";
-    editor.style.borderColor = "#1c7ed6";
-    editor.style.color = readableTextColor(sampledBackground);
-    editor.style.fontSize = `${Math.max(8, selection.height * overlay.cssHeight * 0.82)}px`;
-    editor.style.height = `${Math.max(24, selection.height * overlay.cssHeight)}px`;
-    editor.style.left = `${pageRect.left + selection.x * overlay.cssWidth}px`;
-    editor.style.lineHeight = "1.15";
-    editor.style.top = `${pageRect.top + selection.y * overlay.cssHeight}px`;
-    editor.style.width = `${Math.max(32, selection.width * overlay.cssWidth)}px`;
+    editor.setCssStyles({
+      backgroundColor: "rgba(255, 255, 255, 0.02)",
+      borderColor: "#1c7ed6",
+      color: readableTextColor(sampledBackground),
+      fontSize: `${Math.max(8, selection.height * overlay.cssHeight * 0.82)}px`,
+      height: `${Math.max(24, selection.height * overlay.cssHeight)}px`,
+      left: `${pageRect.left + selection.x * overlay.cssWidth}px`,
+      lineHeight: "1.15",
+      top: `${pageRect.top + selection.y * overlay.cssHeight}px`,
+      width: `${Math.max(32, selection.width * overlay.cssWidth)}px`
+    });
 
     const commit = (): void => {
       if (this.nativeTextEditor !== editor) {
@@ -1951,7 +2141,7 @@ class InkSession {
       // Keep the native text editor locked to the selected text box.
     });
 
-    document.body.appendChild(editor);
+    appendToActiveBody(editor);
     this.nativeTextEditor = editor;
     focusTextEditor(editor);
   }
@@ -1960,19 +2150,21 @@ class InkSession {
     this.closeNativeTextEditor(false);
     const pageRect = overlay.pageEl.getBoundingClientRect();
     const bounds = textBounds(textElement, overlay.cssWidth, overlay.cssHeight);
-    const editor = document.createElement("textarea");
+    const editor = activeDocument.createElement("textarea");
     editor.className = "pdftion-native-editor";
     editor.value = textElement.text;
-    editor.style.backgroundColor = "rgba(255, 255, 255, 0.92)";
-    editor.style.color = textElement.color;
-    editor.style.fontFamily = textElement.fontFamily ?? "sans-serif";
-    editor.style.fontSize = `${textElement.fontSize}px`;
-    editor.style.height = `${Math.max(24, bounds.maxY - bounds.minY + 8)}px`;
-    editor.style.left = `${pageRect.left + bounds.minX}px`;
-    editor.style.lineHeight = "1.15";
-    editor.style.top = `${pageRect.top + bounds.minY}px`;
     const estimatedWidth = estimateTextEditorWidth(editor.value, textElement.fontSize, bounds.maxX - bounds.minX);
-    editor.style.width = `${Math.min(Math.max(48, estimatedWidth + 24), Math.max(80, window.innerWidth - (pageRect.left + bounds.minX) - 12))}px`;
+    editor.setCssStyles({
+      backgroundColor: "rgba(255, 255, 255, 0.92)",
+      color: textElement.color,
+      fontFamily: textElement.fontFamily ?? "sans-serif",
+      fontSize: `${textElement.fontSize}px`,
+      height: `${Math.max(24, bounds.maxY - bounds.minY + 8)}px`,
+      left: `${pageRect.left + bounds.minX}px`,
+      lineHeight: "1.15",
+      top: `${pageRect.top + bounds.minY}px`,
+      width: `${Math.min(Math.max(48, estimatedWidth + 24), Math.max(80, activeWindow.innerWidth - (pageRect.left + bounds.minX) - 12))}px`
+    });
 
     const commit = (): void => {
       if (this.nativeTextEditor !== editor) {
@@ -2009,10 +2201,10 @@ class InkSession {
       }
     });
     editor.addEventListener("input", () => {
-      editor.style.height = `${Math.max(24, editor.scrollHeight)}px`;
+      editor.setCssStyles({ height: `${Math.max(24, editor.scrollHeight)}px` });
     });
 
-    document.body.appendChild(editor);
+    appendToActiveBody(editor);
     this.nativeTextEditor = editor;
     focusTextEditor(editor);
   }
@@ -2244,10 +2436,10 @@ class InkSession {
   private showPalette(): void {
     this.palette?.remove();
 
-    const panel = document.createElement("div");
+    const panel = activeDocument.createElement("div");
     panel.className = "pdftion-palette-panel";
-    panel.addEventListener("pointerdown", (event) => event.stopPropagation());
-    panel.addEventListener("click", (event) => event.stopPropagation());
+    panel.addEventListener("pointerdown", (event: PointerEvent) => event.stopPropagation());
+    panel.addEventListener("click", (event: MouseEvent) => event.stopPropagation());
 
     if (this.tool === "eraser") {
       panel.appendChild(
@@ -2264,7 +2456,7 @@ class InkSession {
     } else {
       panel.appendChild(this.createPaletteToolGroup("pen", "笔"));
     }
-    document.body.appendChild(panel);
+    activeDocument.body.appendChild(panel);
     this.palette = panel;
     this.positionPalettePanel(panel);
     this.updateToolbarState();
@@ -2275,43 +2467,47 @@ class InkSession {
     const gap = 8;
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + gap);
 
-    panel.style.top = `${fallbackTop}px`;
-    panel.style.right = `${Math.max(8, window.innerWidth - (button?.getBoundingClientRect().right ?? window.innerWidth - 12))}px`;
+    panel.setCssStyles({
+      right: `${Math.max(8, activeWindow.innerWidth - (button?.getBoundingClientRect().right ?? activeWindow.innerWidth - 12))}px`,
+      top: `${fallbackTop}px`
+    });
 
-    window.requestAnimationFrame(() => {
+    activeWindow.requestAnimationFrame(() => {
       const rect = panel.getBoundingClientRect();
       const buttonRect = button?.getBoundingClientRect();
-      let left = buttonRect ? buttonRect.right - rect.width : window.innerWidth - rect.width - 12;
+      let left = buttonRect ? buttonRect.right - rect.width : activeWindow.innerWidth - rect.width - 12;
       let top = buttonRect ? buttonRect.bottom + gap : fallbackTop;
 
-      left = clamp(left, 8, Math.max(8, window.innerWidth - rect.width - 8));
-      if (buttonRect && top + rect.height > window.innerHeight - 8) {
+      left = clamp(left, 8, Math.max(8, activeWindow.innerWidth - rect.width - 8));
+      if (buttonRect && top + rect.height > activeWindow.innerHeight - 8) {
         top = buttonRect.top - rect.height - gap;
       }
-      top = clamp(top, 8, Math.max(8, window.innerHeight - rect.height - 8));
+      top = clamp(top, 8, Math.max(8, activeWindow.innerHeight - rect.height - 8));
 
-      panel.style.left = `${left}px`;
-      panel.style.right = "auto";
-      panel.style.top = `${top}px`;
+      panel.setCssStyles({
+        left: `${left}px`,
+        right: "auto",
+        top: `${top}px`
+      });
     });
   }
 
   private createPaletteToolGroup(tool: "pen" | "highlight", title: string): HTMLElement {
-    const group = document.createElement("div");
+    const group = activeDocument.createElement("div");
     group.className = "pdftion-palette-group";
 
-    const heading = document.createElement("div");
+    const heading = activeDocument.createElement("div");
     heading.className = "pdftion-palette-heading";
     heading.textContent = title;
     group.appendChild(heading);
 
-    const colorRow = document.createElement("div");
+    const colorRow = activeDocument.createElement("div");
     colorRow.className = "pdftion-palette-colors";
     for (const swatch of INK_COLORS) {
-      const colorButton = document.createElement("button");
+      const colorButton = activeDocument.createElement("button");
       colorButton.className = "pdftion-color";
       colorButton.dataset.target = tool;
-      colorButton.style.backgroundColor = swatch;
+      colorButton.setCssProps({ "--pdftion-swatch-color": swatch });
       colorButton.title = swatch;
       colorButton.type = "button";
       colorButton.addEventListener("click", () => {
@@ -2339,21 +2535,21 @@ class InkSession {
   }
 
   private createPaletteTextGroup(): HTMLElement {
-    const group = document.createElement("div");
+    const group = activeDocument.createElement("div");
     group.className = "pdftion-palette-group";
 
-    const heading = document.createElement("div");
+    const heading = activeDocument.createElement("div");
     heading.className = "pdftion-palette-heading";
     heading.textContent = "文字";
     group.appendChild(heading);
 
-    const colorRow = document.createElement("div");
+    const colorRow = activeDocument.createElement("div");
     colorRow.className = "pdftion-palette-colors";
     for (const swatch of INK_COLORS) {
-      const colorButton = document.createElement("button");
+      const colorButton = activeDocument.createElement("button");
       colorButton.className = "pdftion-color";
       colorButton.dataset.target = "text";
-      colorButton.style.backgroundColor = swatch;
+      colorButton.setCssProps({ "--pdftion-swatch-color": swatch });
       colorButton.title = swatch;
       colorButton.type = "button";
       colorButton.addEventListener("click", () => {
@@ -2365,16 +2561,16 @@ class InkSession {
     colorRow.appendChild(this.createAdvancedColorInput("text", this.getTextPaletteColor(), (color) => this.setTextPaletteColor(color)));
     group.appendChild(colorRow);
 
-    const fontRow = document.createElement("label");
+    const fontRow = activeDocument.createElement("label");
     fontRow.className = "pdftion-palette-range";
     fontRow.title = "字体";
-    const fontLabel = document.createElement("span");
+    const fontLabel = activeDocument.createElement("span");
     fontLabel.textContent = "字体";
     fontRow.appendChild(fontLabel);
-    const select = document.createElement("select");
+    const select = activeDocument.createElement("select");
     select.className = "pdftion-font-family";
     for (const font of TEXT_FONTS) {
-      const option = document.createElement("option");
+      const option = activeDocument.createElement("option");
       option.value = font.value;
       option.textContent = font.label;
       select.appendChild(option);
@@ -2396,16 +2592,16 @@ class InkSession {
   }
 
   private createAdvancedColorInput(target: "pen" | "highlight" | "text", value: string, onInput: (color: string) => void): HTMLElement {
-    const row = document.createElement("button");
+    const row = activeDocument.createElement("button");
     row.className = "pdftion-color pdftion-color-advanced";
     row.title = "自定义颜色";
     row.type = "button";
 
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.dataset.target = target;
     input.type = "color";
     input.value = normalizeHexColor(value);
-    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("click", (event: MouseEvent) => event.stopPropagation());
     input.addEventListener("input", () => {
       onInput(input.value);
       this.updateToolbarState();
@@ -2427,15 +2623,15 @@ class InkSession {
     value: number,
     onInput: (value: number) => void
   ): HTMLElement {
-    const row = document.createElement("label");
+    const row = activeDocument.createElement("label");
     row.className = "pdftion-palette-range";
     row.title = title;
 
-    const label = document.createElement("span");
+    const label = activeDocument.createElement("span");
     label.textContent = title;
     row.appendChild(label);
 
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.className = className;
     input.max = String(max);
     input.min = String(min);
@@ -2559,12 +2755,12 @@ class InkSession {
       return;
     }
 
-    const panel = document.createElement("div");
+    const panel = activeDocument.createElement("div");
     panel.className = "pdftion-panel pdftion-page-navigator";
-    panel.addEventListener("pointerdown", (event) => event.stopPropagation());
-    panel.addEventListener("click", (event) => event.stopPropagation());
+    panel.addEventListener("pointerdown", (event: PointerEvent) => event.stopPropagation());
+    panel.addEventListener("click", (event: MouseEvent) => event.stopPropagation());
 
-    const header = document.createElement("div");
+    const header = activeDocument.createElement("div");
     header.className = "pdftion-panel-header";
     header.textContent = "pdftion";
     const close = createIconButton("x", "关闭");
@@ -2576,84 +2772,86 @@ class InkSession {
     panel.appendChild(header);
 
     const stats = this.aiGetStats();
-    const summary = document.createElement("div");
+    const summary = activeDocument.createElement("div");
     summary.className = "pdftion-panel-summary";
     summary.textContent = `读取页面... | 笔迹 ${stats.strokes} | 文字 ${stats.texts} | 图片 ${stats.images} | 遮挡 ${stats.covers}`;
     panel.appendChild(summary);
 
-    const list = document.createElement("div");
+    const list = activeDocument.createElement("div");
     list.className = "pdftion-page-list";
     list.textContent = "读取页面...";
     panel.appendChild(list);
 
-    const actions = document.createElement("div");
+    const actions = activeDocument.createElement("div");
     actions.className = "pdftion-panel-actions";
 
-    const up = document.createElement("button");
+    const up = activeDocument.createElement("button");
     up.type = "button";
     up.textContent = "上移";
     up.addEventListener("click", () => void this.moveSelectedPages(-1));
     actions.appendChild(up);
 
-    const down = document.createElement("button");
+    const down = activeDocument.createElement("button");
     down.type = "button";
     down.textContent = "下移";
     down.addEventListener("click", () => void this.moveSelectedPages(1));
     actions.appendChild(down);
 
-    const reorder = document.createElement("button");
+    const reorder = activeDocument.createElement("button");
     reorder.type = "button";
     reorder.textContent = "重排";
     reorder.addEventListener("click", () => void this.reorderPagesByPrompt());
     actions.appendChild(reorder);
 
-    const rotate = document.createElement("button");
+    const rotate = activeDocument.createElement("button");
     rotate.type = "button";
     rotate.textContent = "旋转";
     rotate.addEventListener("click", () => void this.rotateSelectedPagesClockwise());
     actions.appendChild(rotate);
 
-    const crop = document.createElement("button");
+    const crop = activeDocument.createElement("button");
     crop.type = "button";
     crop.textContent = "裁切";
     crop.addEventListener("click", () => void this.cropSelectedPagesByPrompt());
     actions.appendChild(crop);
 
-    const deletePages = document.createElement("button");
+    const deletePages = activeDocument.createElement("button");
     deletePages.type = "button";
     deletePages.textContent = "删页";
     deletePages.addEventListener("click", () => void this.deleteSelectedPages());
     actions.appendChild(deletePages);
 
-    const importPdf = document.createElement("button");
+    const importPdf = activeDocument.createElement("button");
     importPdf.type = "button";
     importPdf.textContent = "导入PDF";
     importPdf.addEventListener("click", () => void this.importPdfByPrompt());
     actions.appendChild(importPdf);
 
-    const exportMd = document.createElement("button");
+    const exportMd = activeDocument.createElement("button");
     exportMd.type = "button";
     exportMd.textContent = "导出 MD";
     exportMd.addEventListener("click", () => void this.exportAnnotationsMarkdown());
     actions.appendChild(exportMd);
-    const insertLink = document.createElement("button");
+    const insertLink = activeDocument.createElement("button");
     insertLink.type = "button";
     insertLink.textContent = "OB链接";
     insertLink.addEventListener("click", () => void this.insertObsidianLinkInteractive());
     actions.appendChild(insertLink);
-    const convert = document.createElement("button");
+    const convert = activeDocument.createElement("button");
     convert.type = "button";
     convert.textContent = "MD/DOCX";
     convert.addEventListener("click", () => void this.exportMarkdownDocxBridge());
     actions.appendChild(convert);
     panel.appendChild(actions);
 
-    document.body.appendChild(panel);
+    activeDocument.body.appendChild(panel);
     this.pageNavigator = panel;
     void this.populatePageNavigatorList(list, summary);
     const anchor = this.toolbarHost?.getBoundingClientRect();
-    panel.style.top = `${Math.max(8, anchor ? anchor.bottom + 8 : 80)}px`;
-    panel.style.right = "12px";
+    panel.setCssStyles({
+      right: "12px",
+      top: `${Math.max(8, anchor ? anchor.bottom + 8 : 80)}px`
+    });
   }
 
   private async populatePageNavigatorList(list: HTMLElement, summary: HTMLElement): Promise<void> {
@@ -2667,10 +2865,10 @@ class InkSession {
     }
 
     for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
-      const row = document.createElement("div");
+      const row = activeDocument.createElement("div");
       row.className = "pdftion-page-row";
 
-      const checkbox = document.createElement("input");
+      const checkbox = activeDocument.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = this.selectedPageIndexes.has(pageIndex);
       checkbox.addEventListener("change", () => {
@@ -2682,7 +2880,7 @@ class InkSession {
       });
       row.appendChild(checkbox);
 
-      const item = document.createElement("button");
+      const item = activeDocument.createElement("button");
       item.type = "button";
       item.className = "pdftion-page-item";
       const count = this.getEditableElements().filter((element) => element.pageIndex === pageIndex).length;
@@ -2749,7 +2947,12 @@ class InkSession {
 
   private async reorderPagesByPrompt(): Promise<void> {
     const pageCount = await this.getCurrentPdfPageCount();
-    const raw = window.prompt(`输入新的页码顺序，例如 3,1,2 或 1-3,5。当前共 ${pageCount} 页。`);
+    const raw = await showPromptModal({
+      actionLabel: "重排",
+      defaultValue: "",
+      message: `输入新的页码顺序，例如 3,1,2 或 1-3,5。当前共 ${pageCount} 页。`,
+      title: "重组页面"
+    });
     if (!raw) {
       return;
     }
@@ -2768,7 +2971,11 @@ class InkSession {
       new Notice("不能删除全部页面。");
       return;
     }
-    if (!window.confirm(`删除 ${selected.size} 页？此操作会修改当前 PDF。`)) {
+    if (!(await showConfirmModal({
+      confirmLabel: "删除",
+      message: `删除 ${selected.size} 页？此操作会修改当前 PDF。`,
+      title: "删除页面"
+    }))) {
       return;
     }
     const order = Array.from({ length: pageCount }, (_, index) => index).filter((pageIndex) => !selected.has(pageIndex));
@@ -2793,7 +3000,11 @@ class InkSession {
   private async cropSelectedPagesByPrompt(): Promise<void> {
     const pageCount = await this.getCurrentPdfPageCount();
     const selected = this.getSelectedPageIndexes(pageCount);
-    const raw = window.prompt("输入裁切比例：左,上,右,下。可填 0.05 或 5%，例如 0.03,0.04,0.03,0.04");
+    const raw = await showPromptModal({
+      actionLabel: "裁切",
+      message: "输入裁切比例：左,上,右,下。可填 0.05 或 5%，例如 0.03,0.04,0.03,0.04",
+      title: "裁切页面"
+    });
     if (!raw) {
       return;
     }
@@ -2823,7 +3034,12 @@ class InkSession {
     }
     const pageCount = await this.getCurrentPdfPageCount();
     const defaultInsert = this.getSelectedPageIndexes(pageCount).at(-1) ?? pageCount - 1;
-    const raw = window.prompt("插入到第几页之后？填 0 表示插到最前，留空表示插到选中页之后。", String(defaultInsert + 1));
+    const raw = await showPromptModal({
+      actionLabel: "插入",
+      defaultValue: String(defaultInsert + 1),
+      message: "插入到第几页之后？填 0 表示插到最前，留空表示插到选中页之后。",
+      title: "导入 PDF"
+    });
     const insertAfter = raw?.trim() ? Math.max(0, Math.floor(Number(raw)) || 0) : defaultInsert + 1;
     const insertIndex = clamp(insertAfter, 0, pageCount);
 
@@ -3415,7 +3631,7 @@ class InkSession {
     this.scheduleAutoSave();
   }
 
-  private clearUnsavedInk(): void {
+  private async clearUnsavedInk(): Promise<void> {
     if (this.selectedStrokeIds.size > 0) {
       const selected = new Set(this.selectedStrokeIds);
       const before = this.getEditableElements().length;
@@ -3448,7 +3664,11 @@ class InkSession {
       return;
     }
 
-    if (!window.confirm("清空本插件可编辑标注？不会直接删除原 PDF 内容，但会移除覆盖层和本插件标注。")) {
+    if (!(await showConfirmModal({
+      confirmLabel: "清空",
+      message: "清空本插件可编辑标注？不会直接删除原 PDF 内容，但会移除覆盖层和本插件标注。",
+      title: "清空标注"
+    }))) {
       return;
     }
 
@@ -3800,7 +4020,7 @@ class InkSession {
     const scale = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight));
     const outputWidth = Math.max(1, Math.round(sourceWidth * scale));
     const outputHeight = Math.max(1, Math.round(sourceHeight * scale));
-    const canvas = document.createElement("canvas");
+    const canvas = activeDocument.createElement("canvas");
     canvas.width = outputWidth;
     canvas.height = outputHeight;
     const ctx = canvas.getContext("2d");
@@ -3933,7 +4153,11 @@ class InkSession {
       new Notice("没有遮挡区域可固化。");
       return;
     }
-    if (!window.confirm("固化遮挡会修改当前 PDF：有遮挡的已渲染页面会重建为图片页，从而删除底层被遮挡文字/图片对象。继续？")) {
+    if (!(await showConfirmModal({
+      confirmLabel: "固化",
+      message: "固化遮挡会修改当前 PDF：有遮挡的已渲染页面会重建为图片页，从而删除底层被遮挡文字/图片对象。继续？",
+      title: "固化遮挡"
+    }))) {
       return;
     }
 
@@ -3984,7 +4208,7 @@ class InkSession {
     if (!pdfCanvas || pdfCanvas.width <= 0 || pdfCanvas.height <= 0) {
       return null;
     }
-    const canvas = document.createElement("canvas");
+    const canvas = activeDocument.createElement("canvas");
     canvas.width = pdfCanvas.width;
     canvas.height = pdfCanvas.height;
     const ctx = canvas.getContext("2d");
@@ -4268,7 +4492,7 @@ class InkSession {
     const scale = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight));
     const outputWidth = Math.max(1, Math.round(sourceWidth * scale));
     const outputHeight = Math.max(1, Math.round(sourceHeight * scale));
-    const canvas = document.createElement("canvas");
+    const canvas = activeDocument.createElement("canvas");
     canvas.width = outputWidth;
     canvas.height = outputHeight;
     const ctx = canvas.getContext("2d");
@@ -4325,7 +4549,11 @@ class InkSession {
   }
 
   private async insertObsidianLinkInteractive(): Promise<void> {
-    const raw = window.prompt("输入 OB 链接或笔记名，例如 [[笔记]] / ![[图片.png]]");
+    const raw = await showPromptModal({
+      actionLabel: "插入",
+      message: "输入 OB 链接或笔记名，例如 [[笔记]] / ![[图片.png]]",
+      title: "插入 OB 链接"
+    });
     if (!raw) {
       return;
     }
@@ -4623,8 +4851,8 @@ class InkSession {
       if (regionPx && !(rect.right >= regionPx.left && rect.left <= regionPx.right && rect.bottom >= regionPx.top && rect.top <= regionPx.bottom)) {
         continue;
       }
-      const style = window.getComputedStyle(span);
-      const fontSize = Number.parseFloat(style.fontSize || "") || Math.max(4, rect.height * 0.82);
+      const computedStyle = activeWindow.getComputedStyle(span);
+      const fontSize = Number.parseFloat(computedStyle.fontSize || "") || Math.max(4, rect.height * 0.82);
       fragments.push({
         bottom: rect.bottom,
         fontSize,
@@ -4659,7 +4887,7 @@ class InkSession {
   }
 
   private getVisibleOverlay(): PageOverlay | null {
-    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 1;
+    const viewportHeight = activeWindow.innerHeight || activeDocument.documentElement.clientHeight || 1;
     let best: { distance: number; overlay: PageOverlay } | null = null;
     for (const overlay of this.overlays.values()) {
       const rect = overlay.pageEl.getBoundingClientRect();
@@ -5243,7 +5471,7 @@ class InkSession {
       return;
     }
     this.clearAutoSaveTimer();
-    this.saveTimer = window.setTimeout(() => {
+    this.saveTimer = activeWindow.setTimeout(() => {
       this.saveTimer = null;
       void this.saveIntoPdf(true);
     }, delay);
@@ -5259,14 +5487,14 @@ class InkSession {
 
   private clearAutoSaveTimer(): void {
     if (this.saveTimer !== null) {
-      window.clearTimeout(this.saveTimer);
+      activeWindow.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
   }
 
   private clearScanTimer(): void {
     if (this.scanTimer !== null) {
-      window.clearTimeout(this.scanTimer);
+      activeWindow.clearTimeout(this.scanTimer);
       this.scanTimer = null;
     }
   }
@@ -5285,7 +5513,7 @@ class InkSession {
 }
 
 function createIconButton(icon: string, title: string): HTMLElement {
-  const button = document.createElement("button");
+  const button = activeDocument.createElement("button");
   button.className = "clickable-icon";
   button.title = title;
   button.type = "button";
@@ -5517,11 +5745,11 @@ function arrayBufferToDataUrl(buffer: ArrayBuffer, mime: string): string {
 }
 
 function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+  return new Promise((resolve) => activeWindow.setTimeout(resolve, ms));
 }
 
 function waitForNextFrame(): Promise<void> {
-  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+  return new Promise((resolve) => activeWindow.requestAnimationFrame(() => resolve()));
 }
 
 function loadDataUrlImage(dataUrl: string): Promise<HTMLImageElement> {
@@ -5571,12 +5799,12 @@ function buildDocxFromParagraphs(paragraphs: string[], title: string): Uint8Arra
   ];
   const body = content.map((paragraph) => `<w:p><w:r><w:t xml:space="preserve">${paragraph}</w:t></w:r></w:p>`).join("");
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
-  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/activeDocument.xml" ContentType="application/vnd.openxmlformats-officeactiveDocument.wordprocessingml.activeDocument.main+xml"/></Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/activeDocument.xml"/></Relationships>`;
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
     { name: "_rels/.rels", data: utf8Bytes(rels) },
-    { name: "word/document.xml", data: utf8Bytes(documentXml) }
+    { name: "word/activeDocument.xml", data: utf8Bytes(documentXml) }
   ]);
 }
 
@@ -5624,15 +5852,15 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   }
 
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
-  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/activeDocument.xml" ContentType="application/vnd.openxmlformats-officeactiveDocument.wordprocessingml.activeDocument.main+xml"/></Types>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/activeDocument.xml"/></Relationships>`;
   const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}</Relationships>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
     { name: "_rels/.rels", data: utf8Bytes(relsXml) },
-    { name: "word/document.xml", data: utf8Bytes(documentXml) },
-    { name: "word/_rels/document.xml.rels", data: utf8Bytes(docRelsXml) },
+    { name: "word/activeDocument.xml", data: utf8Bytes(documentXml) },
+    { name: "word/_rels/activeDocument.xml.rels", data: utf8Bytes(docRelsXml) },
     ...mediaFiles
   ]);
 }
@@ -5715,7 +5943,7 @@ function dataUrlToBytes(dataUrl: string): Uint8Array {
 
 function pickImageFile(): Promise<File | null> {
   return new Promise((resolve) => {
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.type = "file";
     input.accept = "image/*";
     input.addEventListener("change", () => {
@@ -5736,7 +5964,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 function pickPdfFile(): Promise<File | null> {
   return new Promise((resolve) => {
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.type = "file";
     input.accept = "application/pdf,.pdf";
     input.addEventListener("change", () => {
@@ -5973,18 +6201,18 @@ function findTouch(touches: TouchList, identifier: number): Touch | null {
 function findScrollableAncestor(start: HTMLElement): HTMLElement {
   let element: HTMLElement | null = start;
   while (element) {
-    const style = window.getComputedStyle(element);
+    const computedStyle = activeWindow.getComputedStyle(element);
     const canScrollY = element.scrollHeight > element.clientHeight + 2;
     const canScrollX = element.scrollWidth > element.clientWidth + 2;
-    const allowsScrollY = /auto|scroll|overlay/i.test(style.overflowY);
-    const allowsScrollX = /auto|scroll|overlay/i.test(style.overflowX);
+    const allowsScrollY = /auto|scroll|overlay/i.test(computedStyle.overflowY);
+    const allowsScrollX = /auto|scroll|overlay/i.test(computedStyle.overflowX);
     if ((canScrollY && allowsScrollY) || (canScrollX && allowsScrollX)) {
       return element;
     }
     element = element.parentElement;
   }
 
-  return (document.scrollingElement as HTMLElement | null) ?? document.documentElement;
+  return (activeDocument.scrollingElement as HTMLElement | null) ?? activeDocument.documentElement;
 }
 
 function drawStroke(
@@ -6526,37 +6754,6 @@ function findResizeHandleAt(bounds: NormalizedBounds, point: InkPoint, cssWidth:
   return null;
 }
 
-function resizeStrokesFromHandle(
-  strokes: InkStroke[],
-  bounds: NormalizedBounds,
-  handle: ResizeHandle,
-  point: InkPoint
-): InkStroke[] {
-  const anchor = getResizeAnchor(bounds, handle);
-  const originalCorner = getResizeCorner(bounds, handle);
-  const originalDx = originalCorner.x - anchor.x;
-  const originalDy = originalCorner.y - anchor.y;
-
-  let scaleX = originalDx === 0 ? 1 : (point.x - anchor.x) / originalDx;
-  let scaleY = originalDy === 0 ? 1 : (point.y - anchor.y) / originalDy;
-  scaleX = Math.max(0.12, scaleX);
-  scaleY = Math.max(0.12, scaleY);
-
-  const scaleWidth = clamp((Math.abs(scaleX) + Math.abs(scaleY)) / 2, 0.2, 8);
-  const resized = strokes.map((stroke) => {
-    const next = cloneStroke(stroke);
-    next.points = stroke.points.map((strokePoint) => ({
-      x: anchor.x + (strokePoint.x - anchor.x) * scaleX,
-      y: anchor.y + (strokePoint.y - anchor.y) * scaleY
-    }));
-    next.width = clamp(stroke.width * scaleWidth, 0.5, 80);
-    return next;
-  });
-
-  shiftStrokesInsidePage(resized);
-  return resized;
-}
-
 function resizeElementsFromHandle(
   elements: InkElement[],
   bounds: NormalizedBounds,
@@ -6598,25 +6795,6 @@ function resizeElementsFromHandle(
   });
 
   shiftElementsInsidePage(resized);
-  return resized;
-}
-
-function scaleStrokesAroundBoundsCenter(strokes: InkStroke[], bounds: NormalizedBounds, factor: number): InkStroke[] {
-  const center = {
-    x: (bounds.minX + bounds.maxX) / 2,
-    y: (bounds.minY + bounds.maxY) / 2
-  };
-  const resized = strokes.map((stroke) => {
-    const next = cloneStroke(stroke);
-    next.points = stroke.points.map((strokePoint) => ({
-      x: center.x + (strokePoint.x - center.x) * factor,
-      y: center.y + (strokePoint.y - center.y) * factor
-    }));
-    next.width = clamp(stroke.width * factor, 0.5, 80);
-    return next;
-  });
-
-  shiftStrokesInsidePage(resized);
   return resized;
 }
 
@@ -6873,8 +7051,8 @@ function safeAnnotationKey(path: string): string {
 function focusTextEditor(editor: HTMLTextAreaElement): void {
   editor.focus({ preventScroll: true });
   editor.select();
-  window.setTimeout(() => {
-    if (document.activeElement !== editor) {
+  activeWindow.setTimeout(() => {
+    if (activeDocument.activeElement !== editor) {
       editor.focus({ preventScroll: true });
     }
     editor.select();
@@ -6890,10 +7068,10 @@ async function fingerprintPdfBytes(buffer: ArrayBuffer, mtime?: number): Promise
 }
 
 async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
-  if (!globalThis.crypto?.subtle) {
+  if (!activeWindow.crypto?.subtle) {
     return fallbackBufferHash(buffer);
   }
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+  const digest = await activeWindow.crypto.subtle.digest("SHA-256", buffer);
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
@@ -6972,14 +7150,6 @@ function estimateTextEditorWidth(text: string, fontSize: number, fallbackWidth: 
   return Math.max(fallbackWidth, estimated);
 }
 
-function invertHexColor(color: string): string {
-  const hex = cssColorToHex(color) ?? "#ffffff";
-  const r = 255 - Number.parseInt(hex.slice(1, 3), 16);
-  const g = 255 - Number.parseInt(hex.slice(3, 5), 16);
-  const b = 255 - Number.parseInt(hex.slice(5, 7), 16);
-  return rgbToHex(r, g, b);
-}
-
 function isInkElement(value: unknown): value is InkElement {
   if (!value || typeof value !== "object") {
     return false;
@@ -7027,15 +7197,6 @@ function markElementSaved<T extends InkElement>(element: T): T {
 
 function markElementUnsaved<T extends InkElement>(element: T): T {
   return { ...element, saved: false };
-}
-
-function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    if (predicate(items[i])) {
-      return i;
-    }
-  }
-  return -1;
 }
 
 function hexToRgb(hex: string): { b: number; g: number; r: number } {

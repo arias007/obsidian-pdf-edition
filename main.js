@@ -52138,15 +52138,137 @@ var TEXT_FONTS = [
   { label: "\u7B49\u5BBD", value: "Consolas, monospace" },
   { label: "\u886C\u7EBF", value: "Georgia, serif" }
 ];
+function createActiveElement(tagName) {
+  return activeDocument.createElement(tagName);
+}
+function appendToActiveBody(element) {
+  activeDocument.body.appendChild(element);
+}
+function getActiveBody() {
+  return activeDocument.body;
+}
+function hasCrossWindowInstanceCheck(value) {
+  return typeof value === "object" && value !== null && "instanceOf" in value;
+}
+function isHTMLElement(value) {
+  return hasCrossWindowInstanceCheck(value) && value.instanceOf(HTMLElement);
+}
+async function showPromptModal(options) {
+  return new Promise((resolve) => {
+    const modal = createActiveElement("div");
+    modal.className = "pdftion-dialog-backdrop";
+    const panel = createActiveElement("div");
+    panel.className = "pdftion-dialog";
+    const heading = createActiveElement("div");
+    heading.className = "pdftion-dialog-title";
+    heading.textContent = options.title;
+    panel.appendChild(heading);
+    const message = createActiveElement("div");
+    message.className = "pdftion-dialog-message";
+    message.textContent = options.message;
+    panel.appendChild(message);
+    const input = createActiveElement("textarea");
+    input.className = "pdftion-dialog-input";
+    input.value = options.defaultValue ?? "";
+    panel.appendChild(input);
+    const actions = createActiveElement("div");
+    actions.className = "pdftion-dialog-actions";
+    const cancel = createActiveElement("button");
+    cancel.type = "button";
+    cancel.textContent = options.cancelLabel ?? "\u53D6\u6D88";
+    cancel.addEventListener("click", () => {
+      modal.remove();
+      resolve(null);
+    });
+    actions.appendChild(cancel);
+    const submit = createActiveElement("button");
+    submit.type = "button";
+    submit.textContent = options.actionLabel;
+    submit.classList.add("mod-cta");
+    submit.addEventListener("click", () => {
+      const value = input.value.trim();
+      modal.remove();
+      resolve(value || null);
+    });
+    actions.appendChild(submit);
+    panel.appendChild(actions);
+    modal.appendChild(panel);
+    appendToActiveBody(modal);
+    input.focus({ preventScroll: true });
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        modal.remove();
+        resolve(null);
+      }
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        const value = input.value.trim();
+        modal.remove();
+        resolve(value || null);
+      }
+    });
+  });
+}
+async function showConfirmModal(options) {
+  return new Promise((resolve) => {
+    const modal = createActiveElement("div");
+    modal.className = "pdftion-dialog-backdrop";
+    const panel = createActiveElement("div");
+    panel.className = "pdftion-dialog";
+    const heading = createActiveElement("div");
+    heading.className = "pdftion-dialog-title";
+    heading.textContent = options.title;
+    panel.appendChild(heading);
+    const message = createActiveElement("div");
+    message.className = "pdftion-dialog-message";
+    message.textContent = options.message;
+    panel.appendChild(message);
+    const actions = createActiveElement("div");
+    actions.className = "pdftion-dialog-actions";
+    const cancel = createActiveElement("button");
+    cancel.type = "button";
+    cancel.textContent = options.cancelLabel ?? "\u53D6\u6D88";
+    cancel.addEventListener("click", () => {
+      modal.remove();
+      resolve(false);
+    });
+    actions.appendChild(cancel);
+    const confirm = createActiveElement("button");
+    confirm.type = "button";
+    confirm.textContent = options.confirmLabel ?? "\u786E\u8BA4";
+    confirm.classList.add("mod-cta");
+    confirm.addEventListener("click", () => {
+      modal.remove();
+      resolve(true);
+    });
+    actions.appendChild(confirm);
+    panel.appendChild(actions);
+    modal.appendChild(panel);
+    appendToActiveBody(modal);
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        modal.remove();
+        resolve(false);
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        modal.remove();
+        resolve(true);
+      }
+    });
+  });
+}
 var PdftionPlugin = class extends import_obsidian.Plugin {
   annotationFontBytes = null;
   sessions = /* @__PURE__ */ new Map();
   surfaceScanTimers = [];
   async onload() {
-    document.body.classList.add("pdftion-menu-boost");
+    getActiveBody().classList.add("pdftion-menu-boost");
     this.addCommand({
-      id: "toggle-pdftion",
-      name: "Toggle pdftion PDF annotation",
+      id: "toggle",
+      name: "Toggle PDF annotation",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -52158,7 +52280,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "export-annotated-pdf",
-      name: "Pdftion: export current PDF with visible annotations",
+      name: "Export current PDF with visible annotations",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -52170,7 +52292,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "export-annotations-markdown",
-      name: "Pdftion: export annotations to Markdown",
+      name: "Export annotations to Markdown",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -52182,7 +52304,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "show-pdf-page-navigator",
-      name: "Pdftion: show page navigator",
+      name: "Show page navigator",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -52194,7 +52316,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "convert-pdf-markdown-docx",
-      name: "Pdftion: PDF/Markdown/DOCX conversion hub",
+      name: "PDF/Markdown/DOCX conversion hub",
       callback: () => {
         const session = this.getActivePdfSession();
         if (!session) {
@@ -52207,20 +52329,20 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.queuePdfSurfaceScans()));
     this.registerEvent(this.app.workspace.on("layout-change", () => this.queuePdfSurfaceScans()));
     this.registerEvent(this.app.workspace.on("file-open", () => this.queuePdfSurfaceScans()));
-    this.registerDomEvent(document, "visibilitychange", () => this.flushAllSessionsSoon());
-    this.registerDomEvent(document, "pointerdown", (event) => this.commitEditorsOnOutsidePointer(event), { capture: true });
-    this.registerDomEvent(window, "pagehide", () => this.flushAllSessionsSoon());
-    this.registerDomEvent(window, "beforeunload", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(activeDocument, "visibilitychange", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(activeDocument, "pointerdown", (event) => this.commitEditorsOnOutsidePointer(event), { capture: true });
+    this.registerDomEvent(activeWindow, "pagehide", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(activeWindow, "beforeunload", () => this.flushAllSessionsSoon());
     this.register(() => this.clearSurfaceScanTimers());
     this.queuePdfSurfaceScans();
     this.installAiApi();
   }
   onunload() {
-    if (window.PdftionAI) {
-      delete window.PdftionAI;
+    if (activeWindow.PdftionAI) {
+      delete activeWindow.PdftionAI;
     }
-    delete window[PDFTION_AI_API_NAME];
-    document.body.classList.remove("pdftion-menu-boost");
+    delete activeWindow[PDFTION_AI_API_NAME];
+    getActiveBody().classList.remove("pdftion-menu-boost");
     for (const session of this.sessions.values()) {
       session.destroy();
     }
@@ -52230,7 +52352,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   queuePdfSurfaceScans() {
     this.clearSurfaceScanTimers();
     for (const delay of [0, 80, 180, 420, 900, 1800, 3200]) {
-      const timer = window.setTimeout(() => {
+      const timer = activeWindow.setTimeout(() => {
         this.surfaceScanTimers = this.surfaceScanTimers.filter((value) => value !== timer);
         this.scanPdfSurfaces();
       }, delay);
@@ -52239,7 +52361,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   }
   clearSurfaceScanTimers() {
     for (const timer of this.surfaceScanTimers) {
-      window.clearTimeout(timer);
+      activeWindow.clearTimeout(timer);
     }
     this.surfaceScanTimers = [];
   }
@@ -52379,9 +52501,10 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
         this.sessions.set(surface.rootEl, session);
       }
     });
-    const activeLeaf = this.app.workspace.activeLeaf ?? this.app.workspace.getLeavesOfType("markdown")[0] ?? this.app.workspace.getLeavesOfType("pdf")[0] ?? null;
-    if (activeLeaf) {
-      for (const surface of this.findPdfSurfaces(document.body, activeLeaf.view)) {
+    const activeFile = this.app.workspace.getActiveFile();
+    const currentLeaf = activeFile ? this.findLeafForFile(activeFile) : this.app.workspace.getMostRecentLeaf();
+    if (currentLeaf) {
+      for (const surface of this.findPdfSurfaces(activeDocument.body, currentLeaf.view)) {
         if (!this.isDetachedPdfSurface(surface.rootEl) || this.isCoveredByExistingSession(surface.rootEl)) {
           continue;
         }
@@ -52392,16 +52515,26 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
           existing.scheduleQuietScan();
           continue;
         }
-        const session = new InkSession(this, activeLeaf, surface.file, surface.rootEl);
+        const session = new InkSession(this, currentLeaf, surface.file, surface.rootEl);
         this.sessions.set(surface.rootEl, session);
       }
     }
     for (const [rootEl, session] of this.sessions.entries()) {
-      if (!document.body.contains(rootEl) || !liveRoots.has(rootEl)) {
+      if (!activeDocument.body.contains(rootEl) || !liveRoots.has(rootEl)) {
         session.destroy();
         this.sessions.delete(rootEl);
       }
     }
+  }
+  findLeafForFile(file) {
+    let matched = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const view = leaf.view;
+      if (view.file?.path === file.path) {
+        matched = leaf;
+      }
+    });
+    return matched;
   }
   flushAllSessionsSoon() {
     for (const session of this.sessions.values()) {
@@ -52424,7 +52557,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   }
   commitEditorsOnOutsidePointer(event) {
     const target = event.target;
-    if (target instanceof HTMLElement && target.closest(".pdftion-native-editor, .pdftion-panel")) {
+    if (isHTMLElement(target) && target.closest(".pdftion-native-editor, .pdftion-panel")) {
       return;
     }
     for (const session of this.sessions.values()) {
@@ -52495,7 +52628,8 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     return this.app.vault.getFiles().find((file) => file.extension === "pdf" && file.name.toLowerCase() === fileName) ?? null;
   }
   getActivePdfSession() {
-    const leaf = this.app.workspace.activeLeaf;
+    const activeFile = this.app.workspace.getActiveFile();
+    const leaf = activeFile ? this.findLeafForFile(activeFile) : this.app.workspace.getMostRecentLeaf();
     if (!leaf) {
       return null;
     }
@@ -52520,10 +52654,10 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     let best = null;
     for (const [rootEl, session] of this.sessions.entries()) {
       const rect = rootEl.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0 || rect.bottom < 0 || rect.top > window.innerHeight) {
+      if (rect.width <= 0 || rect.height <= 0 || rect.bottom < 0 || rect.top > activeWindow.innerHeight) {
         continue;
       }
-      const score = Math.abs(rect.top + rect.height / 2 - window.innerHeight / 2);
+      const score = Math.abs(rect.top + rect.height / 2 - activeWindow.innerHeight / 2);
       if (!best || score < best.score) {
         best = { score, session };
       }
@@ -52564,7 +52698,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
       getPageCrops: () => this.getActivePdfSession()?.getPageCrops() ?? {},
       updateElements: (elements) => this.getActivePdfSession()?.aiUpdateElements(elements) ?? 0
     };
-    window.PdftionAI = api;
+    activeWindow.PdftionAI = api;
     window[PDFTION_AI_API_NAME] = api;
   }
 };
@@ -52741,7 +52875,7 @@ var InkSession = class {
   }
   scheduleScanPages(delay = 250) {
     this.clearScanTimer();
-    this.scanTimer = window.setTimeout(() => {
+    this.scanTimer = activeWindow.setTimeout(() => {
       this.scanTimer = null;
       this.scanPages();
     }, delay);
@@ -52765,7 +52899,7 @@ var InkSession = class {
     });
   }
   isRelevantPdfMutationNode(node) {
-    if (!(node instanceof HTMLElement)) {
+    if (!node.instanceOf(HTMLElement)) {
       return false;
     }
     if (node.closest(".pdftion-root") && node.classList.contains("pdftion-canvas")) {
@@ -52875,7 +53009,7 @@ var InkSession = class {
     if (existing || !create2) {
       return existing;
     }
-    const host = document.createElement("div");
+    const host = activeDocument.createElement("div");
     host.className = "pdftion-inline-actions";
     const title2 = this.rootEl.querySelector(".file-embed-title, .embed-title, .markdown-embed-title") ?? this.rootEl.firstElementChild;
     if (title2?.parentElement) {
@@ -52904,7 +53038,7 @@ var InkSession = class {
     const pageIndex = getPageIndex(pageEl, fallbackIndex);
     let overlay = this.overlays.get(pageEl);
     if (!overlay) {
-      const canvas = document.createElement("canvas");
+      const canvas = activeDocument.createElement("canvas");
       canvas.className = "pdftion-canvas";
       const abort = new AbortController();
       const newOverlay = {
@@ -52952,7 +53086,7 @@ var InkSession = class {
     const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
     const cssWidth = Math.round(rect.width);
     const cssHeight = Math.round(rect.height);
-    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const dpr = Math.max(1, Math.min(3, activeWindow.devicePixelRatio || 1));
     if (cssWidth <= 0 || cssHeight <= 0) {
       this.scheduleScanPages(260);
       return;
@@ -52963,16 +53097,14 @@ var InkSession = class {
     overlay.cssWidth = cssWidth;
     overlay.cssHeight = cssHeight;
     overlay.dpr = dpr;
-    if (visibleCanvas) {
-      const pageRect = overlay.pageEl.getBoundingClientRect();
-      overlay.canvas.style.left = `${Math.max(0, Math.round(rect.left - pageRect.left))}px`;
-      overlay.canvas.style.top = `${Math.max(0, Math.round(rect.top - pageRect.top))}px`;
-    } else {
-      overlay.canvas.style.left = "0";
-      overlay.canvas.style.top = "0";
-    }
-    overlay.canvas.style.width = `${cssWidth}px`;
-    overlay.canvas.style.height = `${cssHeight}px`;
+    const left = visibleCanvas ? `${Math.max(0, Math.round(rect.left - overlay.pageEl.getBoundingClientRect().left))}px` : "0";
+    const top = visibleCanvas ? `${Math.max(0, Math.round(rect.top - overlay.pageEl.getBoundingClientRect().top))}px` : "0";
+    overlay.canvas.setCssStyles({
+      height: `${cssHeight}px`,
+      left,
+      top,
+      width: `${cssWidth}px`
+    });
     overlay.canvas.width = Math.max(1, Math.round(cssWidth * dpr));
     overlay.canvas.height = Math.max(1, Math.round(cssHeight * dpr));
     this.redrawOverlay(overlay);
@@ -52992,11 +53124,11 @@ var InkSession = class {
     if (this.healthTimer !== null) {
       return;
     }
-    this.healthTimer = window.setInterval(() => this.repairActiveOverlays(), OVERLAY_HEALTH_CHECK_MS);
+    this.healthTimer = activeWindow.setInterval(() => this.repairActiveOverlays(), OVERLAY_HEALTH_CHECK_MS);
   }
   stopOverlayHealthCheck() {
     if (this.healthTimer !== null) {
-      window.clearInterval(this.healthTimer);
+      activeWindow.clearInterval(this.healthTimer);
       this.healthTimer = null;
     }
   }
@@ -53062,7 +53194,7 @@ var InkSession = class {
       this.updateToolbarState();
       return;
     }
-    const toolbar = document.createElement("div");
+    const toolbar = activeDocument.createElement("div");
     toolbar.className = "pdftion-toolbar";
     const dragHandle = createIconButton("grip-horizontal", "\u62D6\u52A8\u5DE5\u5177\u680F");
     dragHandle.classList.add("pdftion-drag-handle");
@@ -53126,9 +53258,9 @@ var InkSession = class {
     });
     toolbar.appendChild(navigator2);
     const clear = createIconButton("trash-2", "\u5220\u9664\u9009\u4E2D/\u6E05\u7A7A\u63D2\u4EF6\u6807\u6CE8");
-    clear.addEventListener("click", () => this.clearUnsavedInk());
+    clear.addEventListener("click", () => void this.clearUnsavedInk());
     toolbar.appendChild(clear);
-    (this.ensureToolbarHost() ?? document.body).appendChild(toolbar);
+    (this.ensureToolbarHost() ?? activeDocument.body).appendChild(toolbar);
     this.toolbar = toolbar;
     this.updateToolbarState();
   }
@@ -53139,7 +53271,7 @@ var InkSession = class {
     );
     let host = this.toolbarHost?.isConnected && this.toolbarHost.parentElement === placement.container ? this.toolbarHost : existingHosts[0] ?? null;
     if (!host) {
-      host = document.createElement("div");
+      host = activeDocument.createElement("div");
       host.className = "pdftion-toolbar-host";
     }
     if (placement.before !== host && (host.parentElement !== placement.container || host.nextElementSibling !== placement.before)) {
@@ -53167,44 +53299,48 @@ var InkSession = class {
       handle.setPointerCapture?.(event.pointerId);
       host.classList.add("is-floating");
       host.classList.add("is-dragging");
-      host.style.left = `${startRect.left}px`;
-      host.style.top = `${startRect.top}px`;
-      host.style.width = `${startRect.width}px`;
-      host.style.height = `${startRect.height}px`;
-      host.style.transform = "translate3d(0, 0, 0)";
+      host.setCssStyles({
+        height: `${startRect.height}px`,
+        left: `${startRect.left}px`,
+        top: `${startRect.top}px`,
+        transform: "translate3d(0, 0, 0)",
+        width: `${startRect.width}px`
+      });
       let dragX = 0;
       let dragY = 0;
       let frame = 0;
       const applyTransform = () => {
         frame = 0;
-        host.style.transform = `translate3d(${dragX}px, ${dragY}px, 0)`;
+        host.setCssStyles({ transform: `translate3d(${dragX}px, ${dragY}px, 0)` });
       };
       const move = (moveEvent) => {
-        const maxLeft = Math.max(0, window.innerWidth - host.offsetWidth);
-        const maxTop = Math.max(0, window.innerHeight - host.offsetHeight);
+        const maxLeft = Math.max(0, activeWindow.innerWidth - host.offsetWidth);
+        const maxTop = Math.max(0, activeWindow.innerHeight - host.offsetHeight);
         dragX = clamp(startRect.left + moveEvent.clientX - startX, 0, maxLeft) - startRect.left;
         dragY = clamp(startRect.top + moveEvent.clientY - startY, 0, maxTop) - startRect.top;
         if (frame === 0) {
-          frame = window.requestAnimationFrame(applyTransform);
+          frame = activeWindow.requestAnimationFrame(applyTransform);
         }
       };
       const up = () => {
         if (frame !== 0) {
-          window.cancelAnimationFrame(frame);
+          activeWindow.cancelAnimationFrame(frame);
           frame = 0;
         }
-        host.style.left = `${startRect.left + dragX}px`;
-        host.style.top = `${startRect.top + dragY}px`;
-        host.style.transform = "";
+        host.setCssStyles({
+          left: `${startRect.left + dragX}px`,
+          top: `${startRect.top + dragY}px`,
+          transform: ""
+        });
         host.classList.remove("is-dragging");
         handle.releasePointerCapture?.(event.pointerId);
-        window.removeEventListener("pointermove", move, true);
-        window.removeEventListener("pointerup", up, true);
-        window.removeEventListener("pointercancel", up, true);
+        activeWindow.removeEventListener("pointermove", move, true);
+        activeWindow.removeEventListener("pointerup", up, true);
+        activeWindow.removeEventListener("pointercancel", up, true);
       };
-      window.addEventListener("pointermove", move, true);
-      window.addEventListener("pointerup", up, true);
-      window.addEventListener("pointercancel", up, true);
+      activeWindow.addEventListener("pointermove", move, true);
+      activeWindow.addEventListener("pointerup", up, true);
+      activeWindow.addEventListener("pointercancel", up, true);
     });
   }
   getToolbarHostPlacement() {
@@ -53222,11 +53358,12 @@ var InkSession = class {
     if (!this.toolbar) {
       return;
     }
-    for (const button of this.toolbar.querySelectorAll("[data-tool]")) {
+    for (const button of Array.from(this.toolbar.querySelectorAll("[data-tool]")).filter(isHTMLElement)) {
       button.classList.toggle("is-active", button.dataset.tool === this.tool);
     }
     this.toolbar.querySelector(".pdftion-image-button")?.classList.toggle("is-active", this.tool === "image-crop");
-    for (const colorButton of this.palette?.querySelectorAll(".pdftion-color") ?? []) {
+    const colorButtons = this.palette ? Array.from(this.palette.querySelectorAll(".pdftion-color")).filter(isHTMLElement) : [];
+    for (const colorButton of colorButtons) {
       const target = colorButton.dataset.target;
       const activeColor = target === "highlight" ? this.highlightColor : target === "text" ? this.getTextPaletteColor() : this.penColor;
       colorButton.classList.toggle("is-active", colorButton.title === activeColor);
@@ -53274,7 +53411,7 @@ var InkSession = class {
   showImageMenu() {
     this.imageMenu?.remove();
     const button = this.toolbar?.querySelector(".pdftion-image-button");
-    const panel = document.createElement("div");
+    const panel = activeDocument.createElement("div");
     panel.className = "pdftion-image-menu";
     const capture = createIconButton("scan-line", "\u622A\u53D6\u56FE\u7247\u7F16\u8F91");
     capture.classList.add("pdftion-image-menu-button");
@@ -53292,11 +53429,13 @@ var InkSession = class {
       void this.pickAndInsertImageFile();
     });
     panel.appendChild(insert);
-    document.body.appendChild(panel);
+    appendToActiveBody(panel);
     const rect = button?.getBoundingClientRect();
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + 6);
-    panel.style.top = `${Math.min(window.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`;
-    panel.style.left = `${Math.min(window.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`;
+    panel.setCssStyles({
+      left: `${Math.min(activeWindow.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`,
+      top: `${Math.min(activeWindow.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`
+    });
     this.imageMenu = panel;
   }
   toggleShareMenu() {
@@ -53312,7 +53451,7 @@ var InkSession = class {
   showShareMenu() {
     this.shareMenu?.remove();
     const button = this.toolbar?.querySelector(".pdftion-share-button");
-    const panel = document.createElement("div");
+    const panel = activeDocument.createElement("div");
     panel.className = "pdftion-share-menu";
     const pdf = createIconButton("file-output", "\u5BFC\u51FA\u70E7\u5F55 PDF");
     pdf.classList.add("pdftion-share-menu-button");
@@ -53338,11 +53477,13 @@ var InkSession = class {
       void this.exportConvertedMarkdown();
     });
     panel.appendChild(md);
-    document.body.appendChild(panel);
+    appendToActiveBody(panel);
     const rect = button?.getBoundingClientRect();
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + 6);
-    panel.style.top = `${Math.min(window.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`;
-    panel.style.left = `${Math.min(window.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`;
+    panel.setCssStyles({
+      left: `${Math.min(activeWindow.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`,
+      top: `${Math.min(activeWindow.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`
+    });
     this.shareMenu = panel;
   }
   onPointerDown(event, overlay) {
@@ -53512,7 +53653,7 @@ var InkSession = class {
   openNativeTextEditor(selection, overlay) {
     this.closeNativeTextEditor(false);
     const pageRect = overlay.pageEl.getBoundingClientRect();
-    const editor = document.createElement("textarea");
+    const editor = activeDocument.createElement("textarea");
     editor.className = "pdftion-native-editor";
     editor.classList.add("is-native-text-editor");
     editor.value = selection.text ?? "";
@@ -53520,15 +53661,17 @@ var InkSession = class {
     this.nativeTextEditorCover = this.createNativeTextCover(selection, overlay, sampledBackground, false);
     this.redrawOverlay(overlay);
     editor.dataset.coverColor = sampledBackground;
-    editor.style.backgroundColor = "rgba(255, 255, 255, 0.02)";
-    editor.style.borderColor = "#1c7ed6";
-    editor.style.color = readableTextColor(sampledBackground);
-    editor.style.fontSize = `${Math.max(8, selection.height * overlay.cssHeight * 0.82)}px`;
-    editor.style.height = `${Math.max(24, selection.height * overlay.cssHeight)}px`;
-    editor.style.left = `${pageRect.left + selection.x * overlay.cssWidth}px`;
-    editor.style.lineHeight = "1.15";
-    editor.style.top = `${pageRect.top + selection.y * overlay.cssHeight}px`;
-    editor.style.width = `${Math.max(32, selection.width * overlay.cssWidth)}px`;
+    editor.setCssStyles({
+      backgroundColor: "rgba(255, 255, 255, 0.02)",
+      borderColor: "#1c7ed6",
+      color: readableTextColor(sampledBackground),
+      fontSize: `${Math.max(8, selection.height * overlay.cssHeight * 0.82)}px`,
+      height: `${Math.max(24, selection.height * overlay.cssHeight)}px`,
+      left: `${pageRect.left + selection.x * overlay.cssWidth}px`,
+      lineHeight: "1.15",
+      top: `${pageRect.top + selection.y * overlay.cssHeight}px`,
+      width: `${Math.max(32, selection.width * overlay.cssWidth)}px`
+    });
     const commit = () => {
       if (this.nativeTextEditor !== editor) {
         return;
@@ -53552,7 +53695,7 @@ var InkSession = class {
     });
     editor.addEventListener("input", () => {
     });
-    document.body.appendChild(editor);
+    appendToActiveBody(editor);
     this.nativeTextEditor = editor;
     focusTextEditor(editor);
   }
@@ -53560,19 +53703,21 @@ var InkSession = class {
     this.closeNativeTextEditor(false);
     const pageRect = overlay.pageEl.getBoundingClientRect();
     const bounds = textBounds(textElement, overlay.cssWidth, overlay.cssHeight);
-    const editor = document.createElement("textarea");
+    const editor = activeDocument.createElement("textarea");
     editor.className = "pdftion-native-editor";
     editor.value = textElement.text;
-    editor.style.backgroundColor = "rgba(255, 255, 255, 0.92)";
-    editor.style.color = textElement.color;
-    editor.style.fontFamily = textElement.fontFamily ?? "sans-serif";
-    editor.style.fontSize = `${textElement.fontSize}px`;
-    editor.style.height = `${Math.max(24, bounds.maxY - bounds.minY + 8)}px`;
-    editor.style.left = `${pageRect.left + bounds.minX}px`;
-    editor.style.lineHeight = "1.15";
-    editor.style.top = `${pageRect.top + bounds.minY}px`;
     const estimatedWidth = estimateTextEditorWidth(editor.value, textElement.fontSize, bounds.maxX - bounds.minX);
-    editor.style.width = `${Math.min(Math.max(48, estimatedWidth + 24), Math.max(80, window.innerWidth - (pageRect.left + bounds.minX) - 12))}px`;
+    editor.setCssStyles({
+      backgroundColor: "rgba(255, 255, 255, 0.92)",
+      color: textElement.color,
+      fontFamily: textElement.fontFamily ?? "sans-serif",
+      fontSize: `${textElement.fontSize}px`,
+      height: `${Math.max(24, bounds.maxY - bounds.minY + 8)}px`,
+      left: `${pageRect.left + bounds.minX}px`,
+      lineHeight: "1.15",
+      top: `${pageRect.top + bounds.minY}px`,
+      width: `${Math.min(Math.max(48, estimatedWidth + 24), Math.max(80, activeWindow.innerWidth - (pageRect.left + bounds.minX) - 12))}px`
+    });
     const commit = () => {
       if (this.nativeTextEditor !== editor) {
         return;
@@ -53607,9 +53752,9 @@ var InkSession = class {
       }
     });
     editor.addEventListener("input", () => {
-      editor.style.height = `${Math.max(24, editor.scrollHeight)}px`;
+      editor.setCssStyles({ height: `${Math.max(24, editor.scrollHeight)}px` });
     });
-    document.body.appendChild(editor);
+    appendToActiveBody(editor);
     this.nativeTextEditor = editor;
     focusTextEditor(editor);
   }
@@ -53817,7 +53962,7 @@ var InkSession = class {
   }
   showPalette() {
     this.palette?.remove();
-    const panel = document.createElement("div");
+    const panel = activeDocument.createElement("div");
     panel.className = "pdftion-palette-panel";
     panel.addEventListener("pointerdown", (event) => event.stopPropagation());
     panel.addEventListener("click", (event) => event.stopPropagation());
@@ -53836,7 +53981,7 @@ var InkSession = class {
     } else {
       panel.appendChild(this.createPaletteToolGroup("pen", "\u7B14"));
     }
-    document.body.appendChild(panel);
+    activeDocument.body.appendChild(panel);
     this.palette = panel;
     this.positionPalettePanel(panel);
     this.updateToolbarState();
@@ -53845,37 +53990,41 @@ var InkSession = class {
     const button = this.toolbar?.querySelector(".pdftion-palette-button");
     const gap = 8;
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + gap);
-    panel.style.top = `${fallbackTop}px`;
-    panel.style.right = `${Math.max(8, window.innerWidth - (button?.getBoundingClientRect().right ?? window.innerWidth - 12))}px`;
-    window.requestAnimationFrame(() => {
+    panel.setCssStyles({
+      right: `${Math.max(8, activeWindow.innerWidth - (button?.getBoundingClientRect().right ?? activeWindow.innerWidth - 12))}px`,
+      top: `${fallbackTop}px`
+    });
+    activeWindow.requestAnimationFrame(() => {
       const rect = panel.getBoundingClientRect();
       const buttonRect = button?.getBoundingClientRect();
-      let left = buttonRect ? buttonRect.right - rect.width : window.innerWidth - rect.width - 12;
+      let left = buttonRect ? buttonRect.right - rect.width : activeWindow.innerWidth - rect.width - 12;
       let top = buttonRect ? buttonRect.bottom + gap : fallbackTop;
-      left = clamp(left, 8, Math.max(8, window.innerWidth - rect.width - 8));
-      if (buttonRect && top + rect.height > window.innerHeight - 8) {
+      left = clamp(left, 8, Math.max(8, activeWindow.innerWidth - rect.width - 8));
+      if (buttonRect && top + rect.height > activeWindow.innerHeight - 8) {
         top = buttonRect.top - rect.height - gap;
       }
-      top = clamp(top, 8, Math.max(8, window.innerHeight - rect.height - 8));
-      panel.style.left = `${left}px`;
-      panel.style.right = "auto";
-      panel.style.top = `${top}px`;
+      top = clamp(top, 8, Math.max(8, activeWindow.innerHeight - rect.height - 8));
+      panel.setCssStyles({
+        left: `${left}px`,
+        right: "auto",
+        top: `${top}px`
+      });
     });
   }
   createPaletteToolGroup(tool, title2) {
-    const group = document.createElement("div");
+    const group = activeDocument.createElement("div");
     group.className = "pdftion-palette-group";
-    const heading = document.createElement("div");
+    const heading = activeDocument.createElement("div");
     heading.className = "pdftion-palette-heading";
     heading.textContent = title2;
     group.appendChild(heading);
-    const colorRow = document.createElement("div");
+    const colorRow = activeDocument.createElement("div");
     colorRow.className = "pdftion-palette-colors";
     for (const swatch of INK_COLORS) {
-      const colorButton = document.createElement("button");
+      const colorButton = activeDocument.createElement("button");
       colorButton.className = "pdftion-color";
       colorButton.dataset.target = tool;
-      colorButton.style.backgroundColor = swatch;
+      colorButton.setCssProps({ "--pdftion-swatch-color": swatch });
       colorButton.title = swatch;
       colorButton.type = "button";
       colorButton.addEventListener("click", () => {
@@ -53899,19 +54048,19 @@ var InkSession = class {
     return group;
   }
   createPaletteTextGroup() {
-    const group = document.createElement("div");
+    const group = activeDocument.createElement("div");
     group.className = "pdftion-palette-group";
-    const heading = document.createElement("div");
+    const heading = activeDocument.createElement("div");
     heading.className = "pdftion-palette-heading";
     heading.textContent = "\u6587\u5B57";
     group.appendChild(heading);
-    const colorRow = document.createElement("div");
+    const colorRow = activeDocument.createElement("div");
     colorRow.className = "pdftion-palette-colors";
     for (const swatch of INK_COLORS) {
-      const colorButton = document.createElement("button");
+      const colorButton = activeDocument.createElement("button");
       colorButton.className = "pdftion-color";
       colorButton.dataset.target = "text";
-      colorButton.style.backgroundColor = swatch;
+      colorButton.setCssProps({ "--pdftion-swatch-color": swatch });
       colorButton.title = swatch;
       colorButton.type = "button";
       colorButton.addEventListener("click", () => {
@@ -53922,16 +54071,16 @@ var InkSession = class {
     }
     colorRow.appendChild(this.createAdvancedColorInput("text", this.getTextPaletteColor(), (color) => this.setTextPaletteColor(color)));
     group.appendChild(colorRow);
-    const fontRow = document.createElement("label");
+    const fontRow = activeDocument.createElement("label");
     fontRow.className = "pdftion-palette-range";
     fontRow.title = "\u5B57\u4F53";
-    const fontLabel = document.createElement("span");
+    const fontLabel = activeDocument.createElement("span");
     fontLabel.textContent = "\u5B57\u4F53";
     fontRow.appendChild(fontLabel);
-    const select = document.createElement("select");
+    const select = activeDocument.createElement("select");
     select.className = "pdftion-font-family";
     for (const font of TEXT_FONTS) {
-      const option = document.createElement("option");
+      const option = activeDocument.createElement("option");
       option.value = font.value;
       option.textContent = font.label;
       select.appendChild(option);
@@ -53949,11 +54098,11 @@ var InkSession = class {
     return group;
   }
   createAdvancedColorInput(target, value, onInput) {
-    const row = document.createElement("button");
+    const row = activeDocument.createElement("button");
     row.className = "pdftion-color pdftion-color-advanced";
     row.title = "\u81EA\u5B9A\u4E49\u989C\u8272";
     row.type = "button";
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.dataset.target = target;
     input.type = "color";
     input.value = normalizeHexColor(value);
@@ -53969,13 +54118,13 @@ var InkSession = class {
     return row;
   }
   createPaletteRange(title2, className, min, max2, step, value, onInput) {
-    const row = document.createElement("label");
+    const row = activeDocument.createElement("label");
     row.className = "pdftion-palette-range";
     row.title = title2;
-    const label = document.createElement("span");
+    const label = activeDocument.createElement("span");
     label.textContent = title2;
     row.appendChild(label);
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.className = className;
     input.max = String(max2);
     input.min = String(min);
@@ -54078,11 +54227,11 @@ var InkSession = class {
       this.pageNavigator = null;
       return;
     }
-    const panel = document.createElement("div");
+    const panel = activeDocument.createElement("div");
     panel.className = "pdftion-panel pdftion-page-navigator";
     panel.addEventListener("pointerdown", (event) => event.stopPropagation());
     panel.addEventListener("click", (event) => event.stopPropagation());
-    const header = document.createElement("div");
+    const header = activeDocument.createElement("div");
     header.className = "pdftion-panel-header";
     header.textContent = "pdftion";
     const close = createIconButton("x", "\u5173\u95ED");
@@ -54093,73 +54242,75 @@ var InkSession = class {
     header.appendChild(close);
     panel.appendChild(header);
     const stats = this.aiGetStats();
-    const summary = document.createElement("div");
+    const summary = activeDocument.createElement("div");
     summary.className = "pdftion-panel-summary";
     summary.textContent = `\u8BFB\u53D6\u9875\u9762... | \u7B14\u8FF9 ${stats.strokes} | \u6587\u5B57 ${stats.texts} | \u56FE\u7247 ${stats.images} | \u906E\u6321 ${stats.covers}`;
     panel.appendChild(summary);
-    const list = document.createElement("div");
+    const list = activeDocument.createElement("div");
     list.className = "pdftion-page-list";
     list.textContent = "\u8BFB\u53D6\u9875\u9762...";
     panel.appendChild(list);
-    const actions = document.createElement("div");
+    const actions = activeDocument.createElement("div");
     actions.className = "pdftion-panel-actions";
-    const up = document.createElement("button");
+    const up = activeDocument.createElement("button");
     up.type = "button";
     up.textContent = "\u4E0A\u79FB";
     up.addEventListener("click", () => void this.moveSelectedPages(-1));
     actions.appendChild(up);
-    const down = document.createElement("button");
+    const down = activeDocument.createElement("button");
     down.type = "button";
     down.textContent = "\u4E0B\u79FB";
     down.addEventListener("click", () => void this.moveSelectedPages(1));
     actions.appendChild(down);
-    const reorder2 = document.createElement("button");
+    const reorder2 = activeDocument.createElement("button");
     reorder2.type = "button";
     reorder2.textContent = "\u91CD\u6392";
     reorder2.addEventListener("click", () => void this.reorderPagesByPrompt());
     actions.appendChild(reorder2);
-    const rotate = document.createElement("button");
+    const rotate = activeDocument.createElement("button");
     rotate.type = "button";
     rotate.textContent = "\u65CB\u8F6C";
     rotate.addEventListener("click", () => void this.rotateSelectedPagesClockwise());
     actions.appendChild(rotate);
-    const crop = document.createElement("button");
+    const crop = activeDocument.createElement("button");
     crop.type = "button";
     crop.textContent = "\u88C1\u5207";
     crop.addEventListener("click", () => void this.cropSelectedPagesByPrompt());
     actions.appendChild(crop);
-    const deletePages = document.createElement("button");
+    const deletePages = activeDocument.createElement("button");
     deletePages.type = "button";
     deletePages.textContent = "\u5220\u9875";
     deletePages.addEventListener("click", () => void this.deleteSelectedPages());
     actions.appendChild(deletePages);
-    const importPdf = document.createElement("button");
+    const importPdf = activeDocument.createElement("button");
     importPdf.type = "button";
     importPdf.textContent = "\u5BFC\u5165PDF";
     importPdf.addEventListener("click", () => void this.importPdfByPrompt());
     actions.appendChild(importPdf);
-    const exportMd = document.createElement("button");
+    const exportMd = activeDocument.createElement("button");
     exportMd.type = "button";
     exportMd.textContent = "\u5BFC\u51FA MD";
     exportMd.addEventListener("click", () => void this.exportAnnotationsMarkdown());
     actions.appendChild(exportMd);
-    const insertLink = document.createElement("button");
+    const insertLink = activeDocument.createElement("button");
     insertLink.type = "button";
     insertLink.textContent = "OB\u94FE\u63A5";
     insertLink.addEventListener("click", () => void this.insertObsidianLinkInteractive());
     actions.appendChild(insertLink);
-    const convert = document.createElement("button");
+    const convert = activeDocument.createElement("button");
     convert.type = "button";
     convert.textContent = "MD/DOCX";
     convert.addEventListener("click", () => void this.exportMarkdownDocxBridge());
     actions.appendChild(convert);
     panel.appendChild(actions);
-    document.body.appendChild(panel);
+    activeDocument.body.appendChild(panel);
     this.pageNavigator = panel;
     void this.populatePageNavigatorList(list, summary);
     const anchor = this.toolbarHost?.getBoundingClientRect();
-    panel.style.top = `${Math.max(8, anchor ? anchor.bottom + 8 : 80)}px`;
-    panel.style.right = "12px";
+    panel.setCssStyles({
+      right: "12px",
+      top: `${Math.max(8, anchor ? anchor.bottom + 8 : 80)}px`
+    });
   }
   async populatePageNavigatorList(list, summary) {
     const pageCount = await this.getCurrentPdfPageCount();
@@ -54170,9 +54321,9 @@ var InkSession = class {
       this.selectedPageIndexes.add(clamp(Math.floor(this.getVisibleOverlay()?.pageIndex ?? 0), 0, Math.max(0, pageCount - 1)));
     }
     for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
-      const row = document.createElement("div");
+      const row = activeDocument.createElement("div");
       row.className = "pdftion-page-row";
-      const checkbox = document.createElement("input");
+      const checkbox = activeDocument.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = this.selectedPageIndexes.has(pageIndex);
       checkbox.addEventListener("change", () => {
@@ -54183,7 +54334,7 @@ var InkSession = class {
         }
       });
       row.appendChild(checkbox);
-      const item = document.createElement("button");
+      const item = activeDocument.createElement("button");
       item.type = "button";
       item.className = "pdftion-page-item";
       const count = this.getEditableElements().filter((element) => element.pageIndex === pageIndex).length;
@@ -54241,7 +54392,12 @@ var InkSession = class {
   }
   async reorderPagesByPrompt() {
     const pageCount = await this.getCurrentPdfPageCount();
-    const raw = window.prompt(`\u8F93\u5165\u65B0\u7684\u9875\u7801\u987A\u5E8F\uFF0C\u4F8B\u5982 3,1,2 \u6216 1-3,5\u3002\u5F53\u524D\u5171 ${pageCount} \u9875\u3002`);
+    const raw = await showPromptModal({
+      actionLabel: "\u91CD\u6392",
+      defaultValue: "",
+      message: `\u8F93\u5165\u65B0\u7684\u9875\u7801\u987A\u5E8F\uFF0C\u4F8B\u5982 3,1,2 \u6216 1-3,5\u3002\u5F53\u524D\u5171 ${pageCount} \u9875\u3002`,
+      title: "\u91CD\u7EC4\u9875\u9762"
+    });
     if (!raw) {
       return;
     }
@@ -54259,7 +54415,11 @@ var InkSession = class {
       new import_obsidian.Notice("\u4E0D\u80FD\u5220\u9664\u5168\u90E8\u9875\u9762\u3002");
       return;
     }
-    if (!window.confirm(`\u5220\u9664 ${selected.size} \u9875\uFF1F\u6B64\u64CD\u4F5C\u4F1A\u4FEE\u6539\u5F53\u524D PDF\u3002`)) {
+    if (!await showConfirmModal({
+      confirmLabel: "\u5220\u9664",
+      message: `\u5220\u9664 ${selected.size} \u9875\uFF1F\u6B64\u64CD\u4F5C\u4F1A\u4FEE\u6539\u5F53\u524D PDF\u3002`,
+      title: "\u5220\u9664\u9875\u9762"
+    })) {
       return;
     }
     const order = Array.from({ length: pageCount }, (_2, index) => index).filter((pageIndex) => !selected.has(pageIndex));
@@ -54282,7 +54442,11 @@ var InkSession = class {
   async cropSelectedPagesByPrompt() {
     const pageCount = await this.getCurrentPdfPageCount();
     const selected = this.getSelectedPageIndexes(pageCount);
-    const raw = window.prompt("\u8F93\u5165\u88C1\u5207\u6BD4\u4F8B\uFF1A\u5DE6,\u4E0A,\u53F3,\u4E0B\u3002\u53EF\u586B 0.05 \u6216 5%\uFF0C\u4F8B\u5982 0.03,0.04,0.03,0.04");
+    const raw = await showPromptModal({
+      actionLabel: "\u88C1\u5207",
+      message: "\u8F93\u5165\u88C1\u5207\u6BD4\u4F8B\uFF1A\u5DE6,\u4E0A,\u53F3,\u4E0B\u3002\u53EF\u586B 0.05 \u6216 5%\uFF0C\u4F8B\u5982 0.03,0.04,0.03,0.04",
+      title: "\u88C1\u5207\u9875\u9762"
+    });
     if (!raw) {
       return;
     }
@@ -54311,7 +54475,12 @@ var InkSession = class {
     }
     const pageCount = await this.getCurrentPdfPageCount();
     const defaultInsert = this.getSelectedPageIndexes(pageCount).at(-1) ?? pageCount - 1;
-    const raw = window.prompt("\u63D2\u5165\u5230\u7B2C\u51E0\u9875\u4E4B\u540E\uFF1F\u586B 0 \u8868\u793A\u63D2\u5230\u6700\u524D\uFF0C\u7559\u7A7A\u8868\u793A\u63D2\u5230\u9009\u4E2D\u9875\u4E4B\u540E\u3002", String(defaultInsert + 1));
+    const raw = await showPromptModal({
+      actionLabel: "\u63D2\u5165",
+      defaultValue: String(defaultInsert + 1),
+      message: "\u63D2\u5165\u5230\u7B2C\u51E0\u9875\u4E4B\u540E\uFF1F\u586B 0 \u8868\u793A\u63D2\u5230\u6700\u524D\uFF0C\u7559\u7A7A\u8868\u793A\u63D2\u5230\u9009\u4E2D\u9875\u4E4B\u540E\u3002",
+      title: "\u5BFC\u5165 PDF"
+    });
     const insertAfter = raw?.trim() ? Math.max(0, Math.floor(Number(raw)) || 0) : defaultInsert + 1;
     const insertIndex = clamp(insertAfter, 0, pageCount);
     const currentBytes = await this.plugin.app.vault.readBinary(this.file);
@@ -54820,7 +54989,7 @@ var InkSession = class {
     this.redrawAll();
     this.scheduleAutoSave();
   }
-  clearUnsavedInk() {
+  async clearUnsavedInk() {
     if (this.selectedStrokeIds.size > 0) {
       const selected = new Set(this.selectedStrokeIds);
       const before = this.getEditableElements().length;
@@ -54850,7 +55019,11 @@ var InkSession = class {
     if (this.getEditableElements().length === 0) {
       return;
     }
-    if (!window.confirm("\u6E05\u7A7A\u672C\u63D2\u4EF6\u53EF\u7F16\u8F91\u6807\u6CE8\uFF1F\u4E0D\u4F1A\u76F4\u63A5\u5220\u9664\u539F PDF \u5185\u5BB9\uFF0C\u4F46\u4F1A\u79FB\u9664\u8986\u76D6\u5C42\u548C\u672C\u63D2\u4EF6\u6807\u6CE8\u3002")) {
+    if (!await showConfirmModal({
+      confirmLabel: "\u6E05\u7A7A",
+      message: "\u6E05\u7A7A\u672C\u63D2\u4EF6\u53EF\u7F16\u8F91\u6807\u6CE8\uFF1F\u4E0D\u4F1A\u76F4\u63A5\u5220\u9664\u539F PDF \u5185\u5BB9\uFF0C\u4F46\u4F1A\u79FB\u9664\u8986\u76D6\u5C42\u548C\u672C\u63D2\u4EF6\u6807\u6CE8\u3002",
+      title: "\u6E05\u7A7A\u6807\u6CE8"
+    })) {
       return;
     }
     this.currentStroke = null;
@@ -55160,7 +55333,7 @@ var InkSession = class {
     const scale2 = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight));
     const outputWidth = Math.max(1, Math.round(sourceWidth * scale2));
     const outputHeight = Math.max(1, Math.round(sourceHeight * scale2));
-    const canvas = document.createElement("canvas");
+    const canvas = activeDocument.createElement("canvas");
     canvas.width = outputWidth;
     canvas.height = outputHeight;
     const ctx = canvas.getContext("2d");
@@ -55281,7 +55454,11 @@ var InkSession = class {
       new import_obsidian.Notice("\u6CA1\u6709\u906E\u6321\u533A\u57DF\u53EF\u56FA\u5316\u3002");
       return;
     }
-    if (!window.confirm("\u56FA\u5316\u906E\u6321\u4F1A\u4FEE\u6539\u5F53\u524D PDF\uFF1A\u6709\u906E\u6321\u7684\u5DF2\u6E32\u67D3\u9875\u9762\u4F1A\u91CD\u5EFA\u4E3A\u56FE\u7247\u9875\uFF0C\u4ECE\u800C\u5220\u9664\u5E95\u5C42\u88AB\u906E\u6321\u6587\u5B57/\u56FE\u7247\u5BF9\u8C61\u3002\u7EE7\u7EED\uFF1F")) {
+    if (!await showConfirmModal({
+      confirmLabel: "\u56FA\u5316",
+      message: "\u56FA\u5316\u906E\u6321\u4F1A\u4FEE\u6539\u5F53\u524D PDF\uFF1A\u6709\u906E\u6321\u7684\u5DF2\u6E32\u67D3\u9875\u9762\u4F1A\u91CD\u5EFA\u4E3A\u56FE\u7247\u9875\uFF0C\u4ECE\u800C\u5220\u9664\u5E95\u5C42\u88AB\u906E\u6321\u6587\u5B57/\u56FE\u7247\u5BF9\u8C61\u3002\u7EE7\u7EED\uFF1F",
+      title: "\u56FA\u5316\u906E\u6321"
+    })) {
       return;
     }
     const binary = await this.plugin.app.vault.readBinary(this.file);
@@ -55322,7 +55499,7 @@ var InkSession = class {
     if (!pdfCanvas || pdfCanvas.width <= 0 || pdfCanvas.height <= 0) {
       return null;
     }
-    const canvas = document.createElement("canvas");
+    const canvas = activeDocument.createElement("canvas");
     canvas.width = pdfCanvas.width;
     canvas.height = pdfCanvas.height;
     const ctx = canvas.getContext("2d");
@@ -55578,7 +55755,7 @@ var InkSession = class {
     const scale2 = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight));
     const outputWidth = Math.max(1, Math.round(sourceWidth * scale2));
     const outputHeight = Math.max(1, Math.round(sourceHeight * scale2));
-    const canvas = document.createElement("canvas");
+    const canvas = activeDocument.createElement("canvas");
     canvas.width = outputWidth;
     canvas.height = outputHeight;
     const ctx = canvas.getContext("2d");
@@ -55633,7 +55810,11 @@ var InkSession = class {
     this.scheduleAutoSave();
   }
   async insertObsidianLinkInteractive() {
-    const raw = window.prompt("\u8F93\u5165 OB \u94FE\u63A5\u6216\u7B14\u8BB0\u540D\uFF0C\u4F8B\u5982 [[\u7B14\u8BB0]] / ![[\u56FE\u7247.png]]");
+    const raw = await showPromptModal({
+      actionLabel: "\u63D2\u5165",
+      message: "\u8F93\u5165 OB \u94FE\u63A5\u6216\u7B14\u8BB0\u540D\uFF0C\u4F8B\u5982 [[\u7B14\u8BB0]] / ![[\u56FE\u7247.png]]",
+      title: "\u63D2\u5165 OB \u94FE\u63A5"
+    });
     if (!raw) {
       return;
     }
@@ -55908,8 +56089,8 @@ var InkSession = class {
       if (regionPx && !(rect.right >= regionPx.left && rect.left <= regionPx.right && rect.bottom >= regionPx.top && rect.top <= regionPx.bottom)) {
         continue;
       }
-      const style = window.getComputedStyle(span);
-      const fontSize = Number.parseFloat(style.fontSize || "") || Math.max(4, rect.height * 0.82);
+      const computedStyle = activeWindow.getComputedStyle(span);
+      const fontSize = Number.parseFloat(computedStyle.fontSize || "") || Math.max(4, rect.height * 0.82);
       fragments.push({
         bottom: rect.bottom,
         fontSize,
@@ -55935,7 +56116,7 @@ var InkSession = class {
     return null;
   }
   getVisibleOverlay() {
-    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 1;
+    const viewportHeight = activeWindow.innerHeight || activeDocument.documentElement.clientHeight || 1;
     let best = null;
     for (const overlay of this.overlays.values()) {
       const rect = overlay.pageEl.getBoundingClientRect();
@@ -56455,7 +56636,7 @@ var InkSession = class {
       return;
     }
     this.clearAutoSaveTimer();
-    this.saveTimer = window.setTimeout(() => {
+    this.saveTimer = activeWindow.setTimeout(() => {
       this.saveTimer = null;
       void this.saveIntoPdf(true);
     }, delay);
@@ -56469,13 +56650,13 @@ var InkSession = class {
   }
   clearAutoSaveTimer() {
     if (this.saveTimer !== null) {
-      window.clearTimeout(this.saveTimer);
+      activeWindow.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
   }
   clearScanTimer() {
     if (this.scanTimer !== null) {
-      window.clearTimeout(this.scanTimer);
+      activeWindow.clearTimeout(this.scanTimer);
       this.scanTimer = null;
     }
   }
@@ -56491,7 +56672,7 @@ var InkSession = class {
   }
 };
 function createIconButton(icon, title2) {
-  const button = document.createElement("button");
+  const button = activeDocument.createElement("button");
   button.className = "clickable-icon";
   button.title = title2;
   button.type = "button";
@@ -56696,10 +56877,10 @@ function arrayBufferToDataUrl(buffer2, mime) {
   return `data:${mime};base64,${btoa(binary)}`;
 }
 function sleepMs(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+  return new Promise((resolve) => activeWindow.setTimeout(resolve, ms));
 }
 function waitForNextFrame() {
-  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+  return new Promise((resolve) => activeWindow.requestAnimationFrame(() => resolve()));
 }
 function loadDataUrlImage(dataUrl) {
   return new Promise((resolve, reject) => {
@@ -56737,12 +56918,12 @@ function buildDocxFromParagraphs(paragraphs, title2) {
   ];
   const body = content.map((paragraph) => `<w:p><w:r><w:t xml:space="preserve">${paragraph}</w:t></w:r></w:p>`).join("");
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
-  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/activeDocument.xml" ContentType="application/vnd.openxmlformats-officeactiveDocument.wordprocessingml.activeDocument.main+xml"/></Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/activeDocument.xml"/></Relationships>`;
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
     { name: "_rels/.rels", data: utf8Bytes(rels) },
-    { name: "word/document.xml", data: utf8Bytes(documentXml) }
+    { name: "word/activeDocument.xml", data: utf8Bytes(documentXml) }
   ]);
 }
 function buildVisualConversionMarkdown(file, pages, folderPath) {
@@ -56784,14 +56965,14 @@ function buildDocxFromPageImages(pages, title2) {
     );
   }
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
-  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/activeDocument.xml" ContentType="application/vnd.openxmlformats-officeactiveDocument.wordprocessingml.activeDocument.main+xml"/></Types>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/activeDocument.xml"/></Relationships>`;
   const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}</Relationships>`;
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
     { name: "_rels/.rels", data: utf8Bytes(relsXml) },
-    { name: "word/document.xml", data: utf8Bytes(documentXml) },
-    { name: "word/_rels/document.xml.rels", data: utf8Bytes(docRelsXml) },
+    { name: "word/activeDocument.xml", data: utf8Bytes(documentXml) },
+    { name: "word/_rels/activeDocument.xml.rels", data: utf8Bytes(docRelsXml) },
     ...mediaFiles
   ]);
 }
@@ -56897,7 +57078,7 @@ function dataUrlToBytes(dataUrl) {
 }
 function pickImageFile() {
   return new Promise((resolve) => {
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.type = "file";
     input.accept = "image/*";
     input.addEventListener("change", () => {
@@ -56916,7 +57097,7 @@ function readFileAsDataUrl(file) {
 }
 function pickPdfFile() {
   return new Promise((resolve) => {
-    const input = document.createElement("input");
+    const input = activeDocument.createElement("input");
     input.type = "file";
     input.accept = "application/pdf,.pdf";
     input.addEventListener("change", () => {
@@ -57124,17 +57305,17 @@ function findTouch(touches, identifier) {
 function findScrollableAncestor(start) {
   let element = start;
   while (element) {
-    const style = window.getComputedStyle(element);
+    const computedStyle = activeWindow.getComputedStyle(element);
     const canScrollY = element.scrollHeight > element.clientHeight + 2;
     const canScrollX = element.scrollWidth > element.clientWidth + 2;
-    const allowsScrollY = /auto|scroll|overlay/i.test(style.overflowY);
-    const allowsScrollX = /auto|scroll|overlay/i.test(style.overflowX);
+    const allowsScrollY = /auto|scroll|overlay/i.test(computedStyle.overflowY);
+    const allowsScrollX = /auto|scroll|overlay/i.test(computedStyle.overflowX);
     if (canScrollY && allowsScrollY || canScrollX && allowsScrollX) {
       return element;
     }
     element = element.parentElement;
   }
-  return document.scrollingElement ?? document.documentElement;
+  return activeDocument.scrollingElement ?? activeDocument.documentElement;
 }
 function drawStroke(ctx, stroke2, cssWidth, cssHeight, selected = false) {
   if (stroke2.points.length < 2) {
@@ -57774,8 +57955,8 @@ function safeAnnotationKey(path) {
 function focusTextEditor(editor) {
   editor.focus({ preventScroll: true });
   editor.select();
-  window.setTimeout(() => {
-    if (document.activeElement !== editor) {
+  activeWindow.setTimeout(() => {
+    if (activeDocument.activeElement !== editor) {
       editor.focus({ preventScroll: true });
     }
     editor.select();
@@ -57789,10 +57970,10 @@ async function fingerprintPdfBytes(buffer2, mtime) {
   };
 }
 async function sha256Hex(buffer2) {
-  if (!globalThis.crypto?.subtle) {
+  if (!activeWindow.crypto?.subtle) {
     return fallbackBufferHash(buffer2);
   }
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer2);
+  const digest = await activeWindow.crypto.subtle.digest("SHA-256", buffer2);
   return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 function fallbackBufferHash(buffer2) {

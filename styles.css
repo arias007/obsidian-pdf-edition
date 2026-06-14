@@ -1,8 +1,6 @@
 body.pdftion-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions,
-body.pdftion-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-actions,
-body.pdftion-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-actions,
-body.pdftion-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title,
-body.pdftion-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title {
+body.pdftion-menu-boost .pdftion-inline-actions,
+body.pdftion-menu-boost .pdftion-embed-actions {
   align-items: center;
   gap: 4px;
   overflow: visible;
@@ -11,10 +9,8 @@ body.pdftion-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title {
 }
 
 body.pdftion-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions .clickable-icon,
-body.pdftion-menu-boost .workspace-leaf-content:has(.pdf-viewer) .view-actions .clickable-icon,
-body.pdftion-menu-boost .workspace-leaf-content:has(.pdfViewer) .view-actions .clickable-icon,
-body.pdftion-menu-boost .internal-embed:has(.pdf-viewer) .file-embed-title .clickable-icon,
-body.pdftion-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .clickable-icon {
+body.pdftion-menu-boost .pdftion-inline-actions .clickable-icon,
+body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   min-height: 28px;
   min-width: 28px;
 }
@@ -53,8 +49,8 @@ body.pdftion-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .click
   color: var(--text-on-accent);
 }
 
-.pdftion-page {
-  position: relative !important;
+.pdftion-root .pdftion-page {
+  position: relative;
 }
 
 .pdftion-canvas {
@@ -337,6 +333,7 @@ body.pdftion-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .click
 }
 
 .pdftion-color {
+  background: var(--pdftion-swatch-color, transparent);
   border: 1px solid var(--background-modifier-border);
   border-radius: 50%;
   box-sizing: border-box;
@@ -421,4 +418,58 @@ body.pdftion-menu-boost .internal-embed:has(.pdfViewer) .file-embed-title .click
   border-width: 1.8px;
   box-shadow: inset 0 0 0 1px rgba(28, 126, 214, 0.14);
   overflow: auto;
+}
+
+.pdftion-dialog-backdrop {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.32);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 16px;
+  position: fixed;
+  z-index: 2147483604;
+}
+
+.pdftion-dialog {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-l);
+  color: var(--text-normal);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(420px, 100%);
+  padding: 14px;
+  width: 420px;
+}
+
+.pdftion-dialog-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.pdftion-dialog-message {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.pdftion-dialog-input {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  color: var(--text-normal);
+  font: inherit;
+  min-height: 70px;
+  padding: 8px;
+  resize: vertical;
+}
+
+.pdftion-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }
