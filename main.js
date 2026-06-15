@@ -52134,6 +52134,20 @@ var TEXT_FONTS = [
   { labelEn: "Serif", labelZh: "\u886C\u7EBF", value: "Georgia, serif" }
 ];
 var TEXT_SELECTION_HIGHLIGHT_COLORS = ["#ffe066", "#ff8787", "#69db7c", "#74c0fc"];
+var NATIVE_TEXT_SELECTION_DESKTOP_LIMITS = {
+  clearExcessive: false,
+  maxAreaRatio: 0.45,
+  maxChars: 1600,
+  maxHeightRatio: 0.68,
+  maxRects: 120
+};
+var NATIVE_TEXT_SELECTION_TOUCH_LIMITS = {
+  clearExcessive: true,
+  maxAreaRatio: 0.18,
+  maxChars: 360,
+  maxHeightRatio: 0.34,
+  maxRects: 36
+};
 var DEFAULT_SETTINGS = {
   openBurnedPdfAfterExport: true
 };
@@ -52174,6 +52188,20 @@ function hasCrossWindowInstanceCheck(value) {
 }
 function isHTMLElement(value) {
   return hasCrossWindowInstanceCheck(value) && value.instanceOf(HTMLElement);
+}
+function isTouchLikeViewport() {
+  return Boolean(activeWindow.matchMedia?.("(pointer: coarse)").matches) || activeWindow.innerWidth <= 820;
+}
+function getNativeSelectionLimits() {
+  return isTouchLikeViewport() ? NATIVE_TEXT_SELECTION_TOUCH_LIMITS : NATIVE_TEXT_SELECTION_DESKTOP_LIMITS;
+}
+function clearNativeSelectionSoon(selection) {
+  window.setTimeout(() => {
+    try {
+      selection.removeAllRanges();
+    } catch {
+    }
+  }, 0);
 }
 async function showPromptModal(options) {
   return new Promise((resolve) => {
@@ -53177,6 +53205,18 @@ var InkSession = class {
     overlay.canvas.height = Math.max(1, Math.round(cssHeight * dpr));
     this.redrawOverlay(overlay);
   }
+  getOverlayClientRect(overlay) {
+    const canvasRect = overlay.canvas.getBoundingClientRect();
+    if (canvasRect.width > 0 && canvasRect.height > 0) {
+      return canvasRect;
+    }
+    const visibleCanvas = overlay.pageEl.querySelector("canvas:not(.pdftion-canvas)");
+    const visibleRect = visibleCanvas?.getBoundingClientRect();
+    if (visibleRect && visibleRect.width > 0 && visibleRect.height > 0) {
+      return visibleRect;
+    }
+    return overlay.pageEl.getBoundingClientRect();
+  }
   ensureOverlayCanvasMounted(overlay) {
     if (!this.rootEl.contains(overlay.pageEl)) {
       return false;
@@ -53757,7 +53797,17 @@ var InkSession = class {
   }
   openNativeTextEditor(selection, overlay) {
     this.closeNativeTextEditor(false);
-    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const overlayRect = this.getOverlayClientRect(overlay);
+    const x = selection.x * overlay.cssWidth;
+    const y = selection.y * overlay.cssHeight;
+    const rawWidth = selection.width * overlay.cssWidth;
+    const rawHeight = selection.height * overlay.cssHeight;
+    const editorPadX = Math.max(4, Math.min(14, rawHeight * 0.35));
+    const editorPadY = Math.max(2, Math.min(8, rawHeight * 0.18));
+    const editorX = Math.max(0, x - editorPadX);
+    const editorY = Math.max(0, y - editorPadY * 0.65);
+    const editorWidth = Math.min(overlay.cssWidth - editorX, Math.max(42, rawWidth + editorPadX * 2.5));
+    const editorHeight = Math.min(overlay.cssHeight - editorY, Math.max(26, rawHeight + editorPadY * 2.4));
     const editor = activeDocument.createElement("textarea");
     editor.className = "pdftion-native-editor";
     editor.classList.add("is-native-text-editor");
@@ -53767,15 +53817,15 @@ var InkSession = class {
     this.redrawOverlay(overlay);
     editor.dataset.coverColor = sampledBackground;
     editor.setCssStyles({
-      backgroundColor: "rgba(255, 255, 255, 0.02)",
+      backgroundColor: sampledBackground,
       borderColor: "#1c7ed6",
       color: readableTextColor(sampledBackground),
-      fontSize: `${Math.max(8, selection.height * overlay.cssHeight * 0.82)}px`,
-      height: `${Math.max(24, selection.height * overlay.cssHeight)}px`,
-      left: `${pageRect.left + selection.x * overlay.cssWidth}px`,
+      fontSize: `${Math.max(8, rawHeight * 0.82)}px`,
+      height: `${editorHeight}px`,
+      left: `${overlayRect.left + editorX}px`,
       lineHeight: "1.15",
-      top: `${pageRect.top + selection.y * overlay.cssHeight}px`,
-      width: `${Math.max(32, selection.width * overlay.cssWidth)}px`
+      top: `${overlayRect.top + editorY}px`,
+      width: `${editorWidth}px`
     });
     const commit = () => {
       if (this.nativeTextEditor !== editor) {
@@ -53806,7 +53856,7 @@ var InkSession = class {
   }
   openExistingTextEditor(textElement, overlay) {
     this.closeNativeTextEditor(false);
-    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const overlayRect = this.getOverlayClientRect(overlay);
     const bounds = textBounds(textElement, overlay.cssWidth, overlay.cssHeight);
     const editor = activeDocument.createElement("textarea");
     editor.className = "pdftion-native-editor";
@@ -53818,10 +53868,10 @@ var InkSession = class {
       fontFamily: textElement.fontFamily ?? "sans-serif",
       fontSize: `${textElement.fontSize}px`,
       height: `${Math.max(24, bounds.maxY - bounds.minY + 8)}px`,
-      left: `${pageRect.left + bounds.minX}px`,
+      left: `${overlayRect.left + bounds.minX}px`,
       lineHeight: "1.15",
-      top: `${pageRect.top + bounds.minY}px`,
-      width: `${Math.min(Math.max(48, estimatedWidth + 24), Math.max(80, activeWindow.innerWidth - (pageRect.left + bounds.minX) - 12))}px`
+      top: `${overlayRect.top + bounds.minY}px`,
+      width: `${Math.min(Math.max(48, estimatedWidth + 24), Math.max(80, activeWindow.innerWidth - (overlayRect.left + bounds.minX) - 12))}px`
     });
     const commit = () => {
       if (this.nativeTextEditor !== editor) {
@@ -53920,6 +53970,7 @@ var InkSession = class {
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
       return null;
     }
+    const limits = getNativeSelectionLimits();
     const anchorNode = selection.anchorNode;
     const focusNode = selection.focusNode;
     if ((!anchorNode || !this.rootEl.contains(anchorNode)) && (!focusNode || !this.rootEl.contains(focusNode))) {
@@ -53929,16 +53980,22 @@ var InkSession = class {
     if (!text) {
       return null;
     }
+    if (text.length > limits.maxChars) {
+      if (limits.clearExcessive) {
+        clearNativeSelectionSoon(selection);
+      }
+      return null;
+    }
     const ranges = [];
     for (let index = 0; index < selection.rangeCount; index += 1) {
       ranges.push(selection.getRangeAt(index));
     }
     let best = null;
     for (const overlay of this.overlays.values()) {
-      const canvasRect = overlay.canvas.getBoundingClientRect();
-      const overlayRect = canvasRect.width > 0 && canvasRect.height > 0 ? canvasRect : overlay.pageEl.getBoundingClientRect();
+      const overlayRect = this.getOverlayClientRect(overlay);
       const rects = [];
       let score = 0;
+      let excessive = false;
       for (const range3 of ranges) {
         for (const rect of Array.from(range3.getClientRects())) {
           const area = rectIntersectionArea(rect, overlayRect);
@@ -53951,7 +54008,20 @@ var InkSession = class {
           }
           rects.push(clipped);
           score += area;
+          if (rects.length > limits.maxRects) {
+            excessive = true;
+            break;
+          }
         }
+        if (excessive) {
+          break;
+        }
+      }
+      if (excessive) {
+        if (limits.clearExcessive) {
+          clearNativeSelectionSoon(selection);
+        }
+        return null;
       }
       if (rects.length === 0 || best && score <= best.score) {
         continue;
@@ -53959,6 +54029,14 @@ var InkSession = class {
       const union = unionRects(rects);
       const normalizedWidth = Math.max(1, overlayRect.width);
       const normalizedHeight = Math.max(1, overlayRect.height);
+      const selectionAreaRatio = (union.right - union.left) * (union.bottom - union.top) / Math.max(1, normalizedWidth * normalizedHeight);
+      const selectionHeightRatio = (union.bottom - union.top) / normalizedHeight;
+      if (selectionAreaRatio > limits.maxAreaRatio || selectionHeightRatio > limits.maxHeightRatio) {
+        if (limits.clearExcessive) {
+          clearNativeSelectionSoon(selection);
+        }
+        return null;
+      }
       const objects = rects.map((rect, index) => ({
         height: clamp((rect.bottom - rect.top) / normalizedHeight, 1e-3, 1),
         id: `native-text-selection-${overlay.pageIndex}-${index}`,
@@ -54036,9 +54114,23 @@ var InkSession = class {
     return button;
   }
   positionNativeTextSelectionMenu(info, panel) {
+    if (isTouchLikeViewport()) {
+      panel.classList.add("is-mobile-bottom");
+      panel.setCssStyles({
+        bottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
+        left: "50%",
+        right: "auto",
+        top: "auto",
+        transform: "translateX(-50%)"
+      });
+      return;
+    }
+    panel.classList.remove("is-mobile-bottom");
     panel.setCssStyles({
+      bottom: "auto",
       left: `${clamp(info.rect.left, 8, Math.max(8, activeWindow.innerWidth - 8))}px`,
-      top: `${clamp(info.rect.top - 40, 8, Math.max(8, activeWindow.innerHeight - 8))}px`
+      top: `${clamp(info.rect.top - 40, 8, Math.max(8, activeWindow.innerHeight - 8))}px`,
+      transform: "none"
     });
     window.requestAnimationFrame(() => {
       const menuRect = panel.getBoundingClientRect();
@@ -54321,9 +54413,23 @@ var InkSession = class {
     const button = this.toolbar?.querySelector(".pdftion-palette-button");
     const gap = 8;
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + gap);
+    if (isTouchLikeViewport()) {
+      panel.classList.add("is-mobile-bottom");
+      panel.setCssStyles({
+        bottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
+        left: "50%",
+        right: "auto",
+        top: "auto",
+        transform: "translateX(-50%)"
+      });
+      return;
+    }
+    panel.classList.remove("is-mobile-bottom");
     panel.setCssStyles({
+      bottom: "auto",
       right: `${Math.max(8, activeWindow.innerWidth - (button?.getBoundingClientRect().right ?? activeWindow.innerWidth - 12))}px`,
-      top: `${fallbackTop}px`
+      top: `${fallbackTop}px`,
+      transform: "none"
     });
     window.requestAnimationFrame(() => {
       const rect = panel.getBoundingClientRect();
@@ -54336,9 +54442,11 @@ var InkSession = class {
       }
       top = clamp(top, 8, Math.max(8, activeWindow.innerHeight - rect.height - 8));
       panel.setCssStyles({
+        bottom: "auto",
         left: `${left}px`,
         right: "auto",
-        top: `${top}px`
+        top: `${top}px`,
+        transform: "none"
       });
     });
   }
@@ -55988,9 +56096,9 @@ var InkSession = class {
     return [...strokes, ...texts, ...images];
   }
   findNativeObjectAt(overlay, point) {
-    const pageRect = overlay.pageEl.getBoundingClientRect();
-    const clientX = pageRect.left + point.x * overlay.cssWidth;
-    const clientY = pageRect.top + point.y * overlay.cssHeight;
+    const overlayRect = this.getOverlayClientRect(overlay);
+    const clientX = overlayRect.left + point.x * overlay.cssWidth;
+    const clientY = overlayRect.top + point.y * overlay.cssHeight;
     const textSpans = Array.from(
       overlay.pageEl.querySelectorAll(".textLayer span, .textLayer .markedContent, [data-canvas-width]")
     );
@@ -56012,8 +56120,8 @@ var InkSession = class {
           pageIndex: overlay.pageIndex,
           text,
           width: clamp(rect.width / Math.max(1, overlay.cssWidth), 1e-3, 1),
-          x: clamp((rect.left - pageRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
-          y: clamp((rect.top - pageRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
+          x: clamp((rect.left - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+          y: clamp((rect.top - overlayRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
         };
       }
     }
@@ -56292,12 +56400,12 @@ var InkSession = class {
     }
   }
   extractNativeTextInRegion(overlay, x, y, width, height) {
-    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const overlayRect = this.getOverlayClientRect(overlay);
     const region = {
-      bottom: pageRect.top + (y + height) * overlay.cssHeight,
-      left: pageRect.left + x * overlay.cssWidth,
-      right: pageRect.left + (x + width) * overlay.cssWidth,
-      top: pageRect.top + y * overlay.cssHeight
+      bottom: overlayRect.top + (y + height) * overlay.cssHeight,
+      left: overlayRect.left + x * overlay.cssWidth,
+      right: overlayRect.left + (x + width) * overlay.cssWidth,
+      top: overlayRect.top + y * overlay.cssHeight
     };
     const parts = [];
     for (const span of Array.from(overlay.pageEl.querySelectorAll(".textLayer span, .textLayer .markedContent, [data-canvas-width]"))) {
@@ -56427,12 +56535,12 @@ var InkSession = class {
     return { covers: 1, skipped: 0, texts: 0 };
   }
   collectNativeTextBlocks(overlay, region) {
-    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const overlayRect = this.getOverlayClientRect(overlay);
     const regionPx = region ? {
-      bottom: pageRect.top + (region.y + region.height) * overlay.cssHeight,
-      left: pageRect.left + region.x * overlay.cssWidth,
-      right: pageRect.left + (region.x + region.width) * overlay.cssWidth,
-      top: pageRect.top + region.y * overlay.cssHeight
+      bottom: overlayRect.top + (region.y + region.height) * overlay.cssHeight,
+      left: overlayRect.left + region.x * overlay.cssWidth,
+      right: overlayRect.left + (region.x + region.width) * overlay.cssWidth,
+      top: overlayRect.top + region.y * overlay.cssHeight
     } : null;
     const fragments = [];
     for (const [index, span] of Array.from(overlay.pageEl.querySelectorAll(".textLayer span, .textLayer .markedContent, [data-canvas-width]")).entries()) {
@@ -56459,7 +56567,7 @@ var InkSession = class {
         top: rect.top
       });
     }
-    return mergeNativeTextFragmentsIntoLines(fragments, overlay, pageRect);
+    return mergeNativeTextFragmentsIntoLines(fragments, overlay, overlayRect);
   }
   hasConvertedNativeBlock(block) {
     const tolerance = 3e-3;
@@ -58070,12 +58178,12 @@ function normalizedCoverBounds(cover) {
   };
 }
 function expandCoverToHideNativeText(cover, overlay) {
-  const padLeft = Math.min(0.02, Math.max(2 / Math.max(1, overlay.cssWidth), cover.width * 0.06));
-  const padRight = Math.min(0.04, Math.max(6 / Math.max(1, overlay.cssWidth), cover.width * 0.16));
-  const padTop = Math.min(0.02, Math.max(2 / Math.max(1, overlay.cssHeight), cover.height * 0.18));
-  const padBottom = Math.min(0.035, Math.max(5 / Math.max(1, overlay.cssHeight), cover.height * 0.36));
+  const padLeft = Math.min(0.026, Math.max(3 / Math.max(1, overlay.cssWidth), cover.width * 0.12));
+  const padRight = Math.min(0.065, Math.max(10 / Math.max(1, overlay.cssWidth), cover.width * 0.28));
+  const padTop = Math.min(0.028, Math.max(3 / Math.max(1, overlay.cssHeight), cover.height * 0.24));
+  const padBottom = Math.min(0.055, Math.max(8 / Math.max(1, overlay.cssHeight), cover.height * 0.55));
   const x = clamp(cover.x - padLeft, 0, 1);
-  const y = clamp(cover.y - padTop * 0.45, 0, 1);
+  const y = clamp(cover.y - padTop * 0.7, 0, 1);
   const maxX = clamp(cover.x + cover.width + padRight, 0, 1);
   const maxY = clamp(cover.y + cover.height + padBottom, 0, 1);
   return {

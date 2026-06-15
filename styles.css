@@ -231,6 +231,11 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   z-index: 2147483605;
 }
 
+.pdftion-native-selection-menu.is-mobile-bottom {
+  max-width: min(360px, calc(100vw - 18px));
+  width: max-content;
+}
+
 .pdftion-native-selection-colors,
 .pdftion-native-selection-actions {
   align-items: center;
@@ -421,6 +426,12 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   z-index: 2147483601;
 }
 
+.pdftion-palette-panel.is-mobile-bottom {
+  max-height: min(360px, calc(100vh - 96px));
+  max-width: calc(100vw - 18px);
+  width: min(300px, calc(100vw - 18px));
+}
+
 .pdftion-palette-group {
   border-top: 1px solid var(--background-modifier-border);
   display: flex;
@@ -584,7 +595,7 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   min-height: 24px;
   outline: none;
   overflow: hidden;
-  padding: 1px 3px;
+  padding: 0 2px;
   position: fixed;
   resize: none;
   caret-color: currentColor;
@@ -597,6 +608,7 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   border-width: 1.8px;
   box-shadow: inset 0 0 0 1px rgba(28, 126, 214, 0.14);
   overflow: auto;
+  padding: 0 2px;
 }
 
 .pdftion-dialog-backdrop {
