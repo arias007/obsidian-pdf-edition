@@ -231,7 +231,7 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   z-index: 2147483605;
 }
 
-.pdftion-native-selection-menu.is-mobile-bottom {
+.pdftion-native-selection-menu.is-mobile-attached {
   max-width: min(360px, calc(100vw - 18px));
   width: max-content;
 }

@@ -54115,17 +54115,35 @@ var InkSession = class {
   }
   positionNativeTextSelectionMenu(info, panel) {
     if (isTouchLikeViewport()) {
-      panel.classList.add("is-mobile-bottom");
+      panel.classList.add("is-mobile-attached");
+      const centerX = info.rect.left + (info.rect.right - info.rect.left) / 2;
       panel.setCssStyles({
-        bottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
-        left: "50%",
+        bottom: "auto",
+        left: `${clamp(centerX, 8, Math.max(8, activeWindow.innerWidth - 8))}px`,
         right: "auto",
-        top: "auto",
+        top: `${clamp(info.rect.bottom + 8, 8, Math.max(8, activeWindow.innerHeight - 8))}px`,
         transform: "translateX(-50%)"
+      });
+      window.requestAnimationFrame(() => {
+        const menuRect = panel.getBoundingClientRect();
+        let left = centerX - menuRect.width / 2;
+        let top = info.rect.bottom + 8;
+        if (top + menuRect.height > activeWindow.innerHeight - 8) {
+          top = info.rect.top - menuRect.height - 8;
+        }
+        left = clamp(left, 8, Math.max(8, activeWindow.innerWidth - menuRect.width - 8));
+        top = clamp(top, 8, Math.max(8, activeWindow.innerHeight - menuRect.height - 8));
+        panel.setCssStyles({
+          bottom: "auto",
+          left: `${left}px`,
+          right: "auto",
+          top: `${top}px`,
+          transform: "none"
+        });
       });
       return;
     }
-    panel.classList.remove("is-mobile-bottom");
+    panel.classList.remove("is-mobile-attached");
     panel.setCssStyles({
       bottom: "auto",
       left: `${clamp(info.rect.left, 8, Math.max(8, activeWindow.innerWidth - 8))}px`,
