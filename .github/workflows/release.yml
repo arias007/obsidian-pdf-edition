@@ -59,6 +59,8 @@ jobs:
             manifest.json
             main.js
             styles.css
+            assets/alipay.png
+            assets/binance.png
 
       - name: Publish GitHub release
         env:
@@ -68,6 +70,8 @@ jobs:
             manifest.json \
             main.js \
             styles.css \
+            assets/alipay.png \
+            assets/binance.png \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$GITHUB_REF_NAME" \

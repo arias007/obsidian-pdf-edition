@@ -537,12 +537,43 @@ const NATIVE_TEXT_SELECTION_TOUCH_LIMITS = {
   maxRects: 36
 };
 
+const BUILTIN_ALIPAY_QR_PATH = ".obsidian/plugins/pdftion/assets/alipay.png";
+const BUILTIN_BINANCE_QR_PATH = ".obsidian/plugins/pdftion/assets/binance.png";
+
 interface PdftionSettings {
+  autoEnableAnnotationToolbar: boolean;
+  boostPdfMenus: boolean;
+  lastCropBottom: number;
+  lastCropLeft: number;
+  lastCropRight: number;
+  lastCropTop: number;
+  nativeTextSelectionMenuAttachedToText: boolean;
   openBurnedPdfAfterExport: boolean;
+  paymentQrOneLabel: string;
+  paymentQrOnePath: string;
+  paymentQrTwoLabel: string;
+  paymentQrTwoPath: string;
+  toolbarButtonSize: number;
+  toolbarMaxWidth: number;
+  toolbarTopOffset: number;
 }
 
 const DEFAULT_SETTINGS: PdftionSettings = {
-  openBurnedPdfAfterExport: true
+  autoEnableAnnotationToolbar: false,
+  boostPdfMenus: true,
+  lastCropBottom: 0.03,
+  lastCropLeft: 0.03,
+  lastCropRight: 0.03,
+  lastCropTop: 0.04,
+  nativeTextSelectionMenuAttachedToText: true,
+  openBurnedPdfAfterExport: true,
+  paymentQrOneLabel: "支付宝",
+  paymentQrOnePath: "builtin:alipay",
+  paymentQrTwoLabel: "币安",
+  paymentQrTwoPath: "builtin:binance",
+  toolbarButtonSize: 25,
+  toolbarMaxWidth: 640,
+  toolbarTopOffset: 0
 };
 
 function normalizePdftionLocale(language: string): PdftionLocale | null {
@@ -815,6 +846,142 @@ async function showConfirmModal(options: {
   });
 }
 
+async function showCropModal(
+  defaultCrop: PageCropMargins,
+  onPreview: (crop: PageCropMargins | null) => void
+): Promise<PageCropMargins | null> {
+  return new Promise((resolve) => {
+    const modal = createActiveElement("div");
+    modal.className = "pdftion-dialog-backdrop";
+
+    const panel = createActiveElement("div");
+    panel.className = "pdftion-dialog pdftion-crop-dialog";
+
+    const heading = createActiveElement("div");
+    heading.className = "pdftion-dialog-title";
+    heading.textContent = uiText("裁切页面", "Crop pages");
+    panel.appendChild(heading);
+
+    const message = createActiveElement("div");
+    message.className = "pdftion-dialog-message";
+    message.textContent = uiText("分别输入左、上、右、下四个边距。支持 0.05 或 5%。输入时会实时显示四边预览线。", "Enter left, top, right, and bottom margins separately. Use 0.05 or 5%. Preview lines update as you type.");
+    panel.appendChild(message);
+
+    const grid = createActiveElement("div");
+    grid.className = "pdftion-crop-grid";
+    const inputs: Record<keyof PageCropMargins, HTMLInputElement> = {
+      bottom: createCropInput(defaultCrop.bottom),
+      left: createCropInput(defaultCrop.left),
+      right: createCropInput(defaultCrop.right),
+      top: createCropInput(defaultCrop.top)
+    };
+
+    for (const item of [
+      { key: "left" as const, label: uiText("左", "Left") },
+      { key: "top" as const, label: uiText("上", "Top") },
+      { key: "right" as const, label: uiText("右", "Right") },
+      { key: "bottom" as const, label: uiText("下", "Bottom") }
+    ]) {
+      const label = createActiveElement("label");
+      label.className = "pdftion-crop-field";
+      const span = createActiveElement("span");
+      span.textContent = item.label;
+      label.appendChild(span);
+      label.appendChild(inputs[item.key]);
+      grid.appendChild(label);
+    }
+    panel.appendChild(grid);
+
+    const error = createActiveElement("div");
+    error.className = "pdftion-dialog-error";
+    panel.appendChild(error);
+
+    const actions = createActiveElement("div");
+    actions.className = "pdftion-dialog-actions";
+
+    const cancel = createActiveElement("button");
+    cancel.type = "button";
+    cancel.textContent = uiText("取消", "Cancel");
+    cancel.addEventListener("click", () => {
+      modal.remove();
+      resolve(null);
+    });
+    actions.appendChild(cancel);
+
+    const submit = createActiveElement("button");
+    submit.type = "button";
+    submit.textContent = uiText("应用裁切", "Apply crop");
+    submit.classList.add("mod-cta");
+    const previewCrop = (): PageCropMargins | null => {
+      const crop = readCropInputs(inputs);
+      onPreview(crop);
+      error.textContent = crop ? "" : uiText("裁切参数无效。四边相加不能裁掉整页。", "Invalid crop values. Margins cannot remove the whole page.");
+      return crop;
+    };
+    const submitCrop = (): void => {
+      const crop = previewCrop();
+      if (!crop) {
+        return;
+      }
+      modal.remove();
+      resolve(crop);
+    };
+    submit.addEventListener("click", submitCrop);
+    actions.appendChild(submit);
+
+    panel.appendChild(actions);
+    modal.appendChild(panel);
+    appendToActiveBody(modal);
+    inputs.left.focus({ preventScroll: true });
+    previewCrop();
+
+    for (const input of Object.values(inputs)) {
+      input.addEventListener("input", () => {
+        previewCrop();
+      });
+    }
+
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        modal.remove();
+        resolve(null);
+      }
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        submitCrop();
+      }
+    });
+  });
+}
+
+function createCropInput(value: number): HTMLInputElement {
+  const input = createActiveElement("input");
+  input.className = "pdftion-crop-input";
+  input.inputMode = "decimal";
+  input.type = "text";
+  input.value = formatCropValue(value);
+  return input;
+}
+
+function readCropInputs(inputs: Record<keyof PageCropMargins, HTMLInputElement>): PageCropMargins | null {
+  const left = parseCropValue(inputs.left.value.trim());
+  const top = parseCropValue(inputs.top.value.trim());
+  const right = parseCropValue(inputs.right.value.trim());
+  const bottom = parseCropValue(inputs.bottom.value.trim());
+  if (left === null || top === null || right === null || bottom === null) {
+    return null;
+  }
+  if (left + right >= 0.9 || top + bottom >= 0.9) {
+    return null;
+  }
+  return { bottom, left, right, top };
+}
+
+function formatCropValue(value: number): string {
+  return String(Math.round(value * 1000) / 1000);
+}
+
 interface PdfViewLike {
   containerEl?: HTMLElement;
   contentEl?: HTMLElement;
@@ -1041,6 +1208,26 @@ interface PdfElementStats {
   total: number;
 }
 
+interface PageCropMargins {
+  bottom: number;
+  left: number;
+  right: number;
+  top: number;
+}
+
+interface CropPreviewState {
+  crop: PageCropMargins;
+  pageIndexes: Set<number>;
+}
+
+interface PdfRewriteBackupRecord {
+  elements: InkElement[];
+  filePath: string;
+  pdfPath: string;
+  updatedAt: string;
+  version: number;
+}
+
 interface PdftionAiApi {
   addImage(input: Partial<InkImage> & Pick<InkImage, "dataUrl" | "pageIndex" | "x" | "y">): string | null;
   addCover(input: Partial<InkCover> & Pick<InkCover, "height" | "pageIndex" | "width" | "x" | "y">): string | null;
@@ -1089,7 +1276,7 @@ export default class PdftionPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
-    getActiveBody().classList.add("pdftion-menu-boost");
+    this.applyRuntimeSettings();
     this.addSettingTab(new PdftionSettingTab(this));
 
     this.addCommand({
@@ -1176,6 +1363,7 @@ export default class PdftionPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+    this.applyRuntimeSettings();
   }
 
   onunload(): void {
@@ -1184,11 +1372,22 @@ export default class PdftionPlugin extends Plugin {
     }
     delete (activeWindow as unknown as Record<string, unknown>)[PDFTION_AI_API_NAME];
     getActiveBody().classList.remove("pdftion-menu-boost");
+    getActiveBody().style.removeProperty("--pdftion-toolbar-button-size");
+    getActiveBody().style.removeProperty("--pdftion-toolbar-max-width");
+    getActiveBody().style.removeProperty("--pdftion-toolbar-top-offset");
     for (const session of this.sessions.values()) {
       session.destroy();
     }
     this.sessions.clear();
     this.clearSurfaceScanTimers();
+  }
+
+  applyRuntimeSettings(): void {
+    const body = getActiveBody();
+    body.classList.toggle("pdftion-menu-boost", this.settings.boostPdfMenus);
+    body.style.setProperty("--pdftion-toolbar-button-size", `${this.settings.toolbarButtonSize}px`);
+    body.style.setProperty("--pdftion-toolbar-max-width", `${this.settings.toolbarMaxWidth}px`);
+    body.style.setProperty("--pdftion-toolbar-top-offset", `${this.settings.toolbarTopOffset}px`);
   }
 
   private queuePdfSurfaceScans(): void {
@@ -1608,6 +1807,9 @@ class PdftionSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.replaceChildren();
 
+    containerEl.createEl("h2", { text: uiText("Pdftion 设置", "Pdftion settings") });
+
+    this.addSection(uiText("导出", "Export"));
     new Setting(containerEl)
       .setName(uiText("导出后自动打开", "Open after PDF export"))
       .setDesc(uiText("导出烧录 PDF 后自动打开生成的 PDF。", "Automatically open the generated burned-in PDF after export."))
@@ -1619,23 +1821,228 @@ class PdftionSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    this.addSection(uiText("工具栏", "Toolbar"));
+    this.addToggleSetting(
+      uiText("增强 PDF 顶部菜单", "Boost PDF top menu"),
+      uiText("提高 PDF 菜单层级和按钮可点区域，减少被复习卡片或嵌入视图夹住时点不到。", "Raises PDF menu stacking and button hit areas to help inside review cards and embeds."),
+      "boostPdfMenus"
+    );
+    this.addToggleSetting(
+      uiText("打开 PDF 时自动显示批注工具栏", "Show annotation toolbar when a PDF opens"),
+      uiText("适合主要用 Pdftion 批注 PDF 的工作流；关闭后仍可点 PDF 菜单里的笔按钮。", "Useful when most PDFs are annotated with Pdftion; the pen button still works when disabled."),
+      "autoEnableAnnotationToolbar"
+    );
+    this.addNumberSetting(
+      uiText("工具栏按钮大小", "Toolbar button size"),
+      uiText("单位 px。建议 22-32，手机可适当加大。", "Pixels. 22-32 is recommended; use larger values on touch screens."),
+      "toolbarButtonSize",
+      18,
+      44
+    );
+    this.addNumberSetting(
+      uiText("工具栏最大宽度", "Toolbar max width"),
+      uiText("单位 px。屏幕窄时仍会自动压到屏幕内。", "Pixels. It is still clamped to the viewport on narrow screens."),
+      "toolbarMaxWidth",
+      360,
+      1200
+    );
+    this.addNumberSetting(
+      uiText("工具栏下移距离", "Toolbar top offset"),
+      uiText("单位 px。顶部被挡时调大；不想留空就设为 0。", "Pixels. Increase when the top is covered; use 0 for no extra gap."),
+      "toolbarTopOffset",
+      0,
+      160
+    );
+
+    this.addSection(uiText("选择与触控", "Selection and touch"));
+    this.addToggleSetting(
+      uiText("手机文字菜单贴近选中文字", "Attach mobile text menu to selected text"),
+      uiText("开启后高亮/复制菜单跟随选中文字；关闭后使用旧的屏幕边缘定位。", "When enabled, highlight/copy actions follow the selected text; disable to use the older edge placement."),
+      "nativeTextSelectionMenuAttachedToText"
+    );
+
+    this.addSection(uiText("数据与 AI", "Data and AI"));
+    const apiNote = containerEl.createDiv({ cls: "pdftion-settings-note" });
+    apiNote.textContent = uiText(
+      "Pdftion 会自动保存可编辑批注数据，并在窗口暴露 PdftionAI / __PDftionAI__，方便本地脚本或 AI 读取、统计和操作当前 PDF 批注。",
+      "Pdftion auto-saves editable annotation data and exposes PdftionAI / __PDftionAI__ on the window for local scripts or AI agents to inspect, summarize, and operate the active PDF annotations."
+    );
+
+    this.addSection(uiText("支持作者", "Support the author"));
+    this.renderPaymentQrCodes(containerEl);
+  }
+
+  private addSection(title: string): void {
+    this.containerEl.createEl("h3", { cls: "pdftion-settings-section", text: title });
+  }
+
+  private addToggleSetting(
+    name: string,
+    desc: string,
+    key: { [K in keyof PdftionSettings]: PdftionSettings[K] extends boolean ? K : never }[keyof PdftionSettings]
+  ): void {
+    new Setting(this.containerEl)
+      .setName(name)
+      .setDesc(desc)
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings[key])
+          .onChange(async (value) => {
+            this.plugin.settings[key] = value;
+            await this.plugin.saveSettings();
+          });
+      });
+  }
+
+  private addNumberSetting(
+    name: string,
+    desc: string,
+    key: { [K in keyof PdftionSettings]: PdftionSettings[K] extends number ? K : never }[keyof PdftionSettings],
+    min: number,
+    max: number
+  ): void {
+    new Setting(this.containerEl)
+      .setName(name)
+      .setDesc(desc)
+      .addText((text) => {
+        text
+          .setValue(String(this.plugin.settings[key]))
+          .onChange(async (value) => {
+            const next = clamp(Math.round(Number(value)), min, max);
+            if (!Number.isFinite(next)) {
+              return;
+            }
+            this.plugin.settings[key] = next;
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.type = "number";
+        text.inputEl.min = String(min);
+        text.inputEl.max = String(max);
+      });
+  }
+
+  private addTextSetting(
+    name: string,
+    placeholder: string,
+    key: { [K in keyof PdftionSettings]: PdftionSettings[K] extends string ? K : never }[keyof PdftionSettings]
+  ): void {
+    new Setting(this.containerEl)
+      .setName(name)
+      .addText((text) => {
+        text
+          .setPlaceholder(placeholder)
+          .setValue(this.plugin.settings[key])
+          .onChange(async (value) => {
+            this.plugin.settings[key] = value.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+  }
+
+  private renderPaymentQrCodes(containerEl: HTMLElement): void {
+    const wrap = containerEl.createDiv({ cls: "pdftion-payment-grid" });
+    this.renderPaymentQrCode(wrap, this.plugin.settings.paymentQrOneLabel, this.plugin.settings.paymentQrOnePath);
+    this.renderPaymentQrCode(wrap, this.plugin.settings.paymentQrTwoLabel, this.plugin.settings.paymentQrTwoPath);
+  }
+
+  private renderPaymentQrCode(containerEl: HTMLElement, label: string, rawPath: string): void {
+    const card = containerEl.createDiv({ cls: "pdftion-payment-card" });
+    const title = card.createDiv({ cls: "pdftion-payment-title" });
+    title.textContent = label || uiText("收款码", "Payment QR");
+    const src = this.getPaymentImageSource(rawPath);
+    if (src) {
+      const image = card.createEl("img", {
+        attr: {
+          alt: title.textContent,
+          loading: "lazy",
+          src
+        },
+        cls: "pdftion-payment-image"
+      });
+      image.addEventListener("error", () => {
+        image.remove();
+        this.renderPaymentPlaceholder(card, uiText("图片无法加载", "Image could not be loaded"));
+      });
+      return;
+    }
+    this.renderPaymentPlaceholder(card, uiText("未配置图片", "No image configured"));
+  }
+
+  private renderPaymentPlaceholder(card: HTMLElement, message: string): void {
+    const placeholder = card.createDiv({ cls: "pdftion-payment-placeholder" });
+    setIcon(placeholder, "qr-code");
+    placeholder.createSpan({ text: message });
+  }
+
+  private getPaymentImageSource(rawPath: string): string | null {
+    const path = rawPath.trim();
+    if (!path) {
+      return null;
+    }
+    if (path === "builtin:alipay") {
+      return this.plugin.app.vault.adapter.getResourcePath(BUILTIN_ALIPAY_QR_PATH);
+    }
+    if (path === "builtin:binance") {
+      return this.plugin.app.vault.adapter.getResourcePath(BUILTIN_BINANCE_QR_PATH);
+    }
+    if (/^(https?:|data:image\/)/i.test(path)) {
+      return path;
+    }
+    if (/^[a-z]:[\\/]/i.test(path)) {
+      return `file:///${path.replace(/\\/g, "/")}`;
+    }
+    return this.plugin.app.vault.adapter.getResourcePath(path.replace(/\\/g, "/").replace(/^\/+/, ""));
   }
 }
 
 function normalizeSettings(data: unknown): PdftionSettings {
   const record = data && typeof data === "object" ? data as Partial<PdftionSettings> : {};
   return {
+    autoEnableAnnotationToolbar: typeof record.autoEnableAnnotationToolbar === "boolean"
+      ? record.autoEnableAnnotationToolbar
+      : DEFAULT_SETTINGS.autoEnableAnnotationToolbar,
+    boostPdfMenus: typeof record.boostPdfMenus === "boolean"
+      ? record.boostPdfMenus
+      : DEFAULT_SETTINGS.boostPdfMenus,
+    lastCropBottom: normalizeNumberSetting(record.lastCropBottom, DEFAULT_SETTINGS.lastCropBottom, 0, 0.45, 0.001),
+    lastCropLeft: normalizeNumberSetting(record.lastCropLeft, DEFAULT_SETTINGS.lastCropLeft, 0, 0.45, 0.001),
+    lastCropRight: normalizeNumberSetting(record.lastCropRight, DEFAULT_SETTINGS.lastCropRight, 0, 0.45, 0.001),
+    lastCropTop: normalizeNumberSetting(record.lastCropTop, DEFAULT_SETTINGS.lastCropTop, 0, 0.45, 0.001),
+    nativeTextSelectionMenuAttachedToText: typeof record.nativeTextSelectionMenuAttachedToText === "boolean"
+      ? record.nativeTextSelectionMenuAttachedToText
+      : DEFAULT_SETTINGS.nativeTextSelectionMenuAttachedToText,
     openBurnedPdfAfterExport: typeof record.openBurnedPdfAfterExport === "boolean"
       ? record.openBurnedPdfAfterExport
-      : DEFAULT_SETTINGS.openBurnedPdfAfterExport
+      : DEFAULT_SETTINGS.openBurnedPdfAfterExport,
+    paymentQrOneLabel: normalizeStringSetting(record.paymentQrOneLabel, DEFAULT_SETTINGS.paymentQrOneLabel),
+    paymentQrOnePath: normalizeStringSetting(record.paymentQrOnePath, DEFAULT_SETTINGS.paymentQrOnePath),
+    paymentQrTwoLabel: normalizeStringSetting(record.paymentQrTwoLabel, DEFAULT_SETTINGS.paymentQrTwoLabel),
+    paymentQrTwoPath: normalizeStringSetting(record.paymentQrTwoPath, DEFAULT_SETTINGS.paymentQrTwoPath),
+    toolbarButtonSize: normalizeNumberSetting(record.toolbarButtonSize, DEFAULT_SETTINGS.toolbarButtonSize, 18, 44),
+    toolbarMaxWidth: normalizeNumberSetting(record.toolbarMaxWidth, DEFAULT_SETTINGS.toolbarMaxWidth, 360, 1200),
+    toolbarTopOffset: normalizeNumberSetting(record.toolbarTopOffset, DEFAULT_SETTINGS.toolbarTopOffset, 0, 160)
   };
 }
 
+function normalizeNumberSetting(value: unknown, fallback: number, min: number, max: number, step = 1): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return clamp(Math.round(numeric / step) * step, min, max);
+}
+
+function normalizeStringSetting(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
 class InkSession {
-  private cropByPage = new Map<number, { bottom: number; left: number; right: number; top: number }>();
+  private cropByPage = new Map<number, PageCropMargins>();
   private button: HTMLElement | null = null;
   private currentCover: InkCover | null = null;
   private currentStroke: InkStroke | null = null;
+  private cropPreview: CropPreviewState | null = null;
   private dirty = false;
   private enabled = false;
   private imageCache = new Map<string, HTMLImageElement>();
@@ -1698,6 +2105,9 @@ class InkSession {
     this.rootEl.classList.add("pdftion-root");
     this.injectButton();
     void this.loadEditableAnnotations();
+    if (this.plugin.settings.autoEnableAnnotationToolbar) {
+      window.setTimeout(() => this.setEnabled(true, { notice: false }), 0);
+    }
     this.scanPages();
 
     this.mutationObserver = new MutationObserver((mutations) => {
@@ -2222,7 +2632,7 @@ class InkSession {
     this.scheduleScanPages(0);
   }
 
-  private setEnabled(enabled: boolean): void {
+  private setEnabled(enabled: boolean, options: { notice?: boolean } = {}): void {
     this.enabled = enabled;
     this.rootEl.classList.toggle("pdftion-enabled", this.enabled);
     this.rootEl.classList.toggle("pdftion-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
@@ -2232,7 +2642,9 @@ class InkSession {
       this.showToolbar();
       this.scanPages();
       this.startOverlayHealthCheck();
-      new Notice(uiText("PDF 批注已开启。", "PDF annotation enabled."));
+      if (options.notice !== false) {
+        new Notice(uiText("PDF 批注已开启。", "PDF annotation enabled."));
+      }
     } else {
       this.stopOverlayHealthCheck();
       this.currentStroke = null;
@@ -3182,7 +3594,7 @@ class InkSession {
   }
 
   private positionNativeTextSelectionMenu(info: NativeTextSelectionInfo, panel: HTMLElement): void {
-    if (isTouchLikeViewport()) {
+    if (isTouchLikeViewport() && this.plugin.settings.nativeTextSelectionMenuAttachedToText) {
       panel.classList.add("is-mobile-attached");
       const centerX = info.rect.left + (info.rect.right - info.rect.left) / 2;
       panel.setCssStyles({
@@ -3912,6 +4324,10 @@ class InkSession {
     crop.addEventListener("click", () => void this.cropSelectedPagesByPrompt());
     actions.appendChild(crop);
 
+    const undoRewrite = createIconButton("rotate-ccw", uiText("回退上次 PDF 改写", "Revert last PDF rewrite"));
+    undoRewrite.addEventListener("click", () => void this.restoreLastPdfRewrite());
+    actions.appendChild(undoRewrite);
+
     const deletePages = createIconButton("file-minus", uiText("删页", "Delete pages"));
     deletePages.addEventListener("click", () => void this.deleteSelectedPages());
     actions.appendChild(deletePages);
@@ -4096,19 +4512,27 @@ class InkSession {
   private async cropSelectedPagesByPrompt(): Promise<void> {
     const pageCount = await this.getCurrentPdfPageCount();
     const selected = this.getSelectedPageIndexes(pageCount);
-    const raw = await showPromptModal({
-      actionLabel: uiText("裁切", "Crop"),
-      message: uiText("输入裁切比例：左,上,右,下。可填 0.05 或 5%，例如 0.03,0.04,0.03,0.04", "Enter crop margins: left,top,right,bottom. Use 0.05 or 5%, for example 0.03,0.04,0.03,0.04."),
-      title: uiText("裁切页面", "Crop pages")
+    const selectedSet = new Set(selected);
+    const crop = await showCropModal({
+      bottom: this.plugin.settings.lastCropBottom,
+      left: this.plugin.settings.lastCropLeft,
+      right: this.plugin.settings.lastCropRight,
+      top: this.plugin.settings.lastCropTop
+    }, (previewCrop) => {
+      this.cropPreview = previewCrop ? { crop: previewCrop, pageIndexes: selectedSet } : null;
+      this.redrawAll();
     });
-    if (!raw) {
-      return;
-    }
-    const crop = parseCropInput(raw);
     if (!crop) {
-      new Notice(uiText("裁切参数无效。", "Invalid crop values."));
+      this.cropPreview = null;
+      this.redrawAll();
       return;
     }
+    this.plugin.settings.lastCropBottom = crop.bottom;
+    this.plugin.settings.lastCropLeft = crop.left;
+    this.plugin.settings.lastCropRight = crop.right;
+    this.plugin.settings.lastCropTop = crop.top;
+    await this.plugin.saveSettings();
+
     const binary = await this.plugin.app.vault.readBinary(this.file);
     const pdf = await PDFDocument.load(binary, { ignoreEncryption: true });
     for (const pageIndex of selected) {
@@ -4120,6 +4544,7 @@ class InkSession {
     }
     const cropped = this.getEditableElements().map((element) => selected.includes(element.pageIndex) ? cropElement(element, crop) : cloneElement(element));
     const saved = await pdf.save({ useObjectStreams: true });
+    this.cropPreview = null;
     await this.persistPdfRewrite(saved, cropped, uiText("已裁切选中页面", "Selected pages cropped"));
   }
 
@@ -4199,6 +4624,7 @@ class InkSession {
   }
 
   private async persistPdfRewrite(saved: Uint8Array, elements: InkElement[], message: string): Promise<void> {
+    await this.savePdfRewriteBackup();
     const buffer = new ArrayBuffer(saved.byteLength);
     new Uint8Array(buffer).set(saved);
     await this.plugin.app.vault.modifyBinary(this.file, buffer);
@@ -4216,6 +4642,7 @@ class InkSession {
     this.imageHistory = elements.filter((element): element is InkImage => element.kind === "image");
     this.currentStroke = null;
     this.currentCover = null;
+    this.cropPreview = null;
     this.redoStack = [];
     this.selectedStrokeIds.clear();
     this.nativeSelection = null;
@@ -4223,6 +4650,65 @@ class InkSession {
     this.redrawAll();
     this.refreshPageNavigator();
     this.scheduleQuietScan();
+  }
+
+  private getPdfRewriteBackupPdfPath(): string {
+    return `${this.plugin.manifest.dir}/data/rewrite-backups/${safeAnnotationKey(this.file.path)}.pdf`;
+  }
+
+  private getPdfRewriteBackupJsonPath(): string {
+    return `${this.plugin.manifest.dir}/data/rewrite-backups/${safeAnnotationKey(this.file.path)}.json`;
+  }
+
+  private async savePdfRewriteBackup(): Promise<void> {
+    const pdfPath = this.getPdfRewriteBackupPdfPath();
+    const jsonPath = this.getPdfRewriteBackupJsonPath();
+    await this.ensureVaultFolder(pdfPath.substring(0, pdfPath.lastIndexOf("/")));
+    const currentBytes = await this.plugin.app.vault.readBinary(this.file);
+    await this.plugin.app.vault.adapter.writeBinary(pdfPath, currentBytes);
+    const record: PdfRewriteBackupRecord = {
+      elements: this.getEditableElements().map(cloneElement),
+      filePath: this.file.path,
+      pdfPath,
+      updatedAt: new Date().toISOString(),
+      version: 1
+    };
+    await this.plugin.app.vault.adapter.write(jsonPath, JSON.stringify(record, null, 2));
+  }
+
+  private async restoreLastPdfRewrite(): Promise<void> {
+    const jsonPath = this.getPdfRewriteBackupJsonPath();
+    let record: PdfRewriteBackupRecord;
+    try {
+      record = JSON.parse(await this.plugin.app.vault.adapter.read(jsonPath)) as PdfRewriteBackupRecord;
+    } catch {
+      new Notice(uiText("没有可回退的 PDF 改写备份。", "No PDF rewrite backup is available."));
+      return;
+    }
+    if (record.filePath !== this.file.path || !record.pdfPath) {
+      new Notice(uiText("回退备份与当前 PDF 不匹配。", "The rewrite backup does not match the current PDF."));
+      return;
+    }
+    if (!(await showConfirmModal({
+      confirmLabel: uiText("回退", "Revert"),
+      message: uiText("回退到上次 PDF 改写前？当前 PDF 文件和可编辑批注都会恢复到备份状态。", "Revert to the state before the last PDF rewrite? The current PDF file and editable annotations will be restored from backup."),
+      title: uiText("回退上次 PDF 改写", "Revert last PDF rewrite")
+    }))) {
+      return;
+    }
+    try {
+      const backupBytes = await this.plugin.app.vault.adapter.readBinary(record.pdfPath);
+      await this.plugin.app.vault.modifyBinary(this.file, backupBytes);
+      const basePdf = await this.plugin.ensureBasePdfBytes(this.file, backupBytes);
+      const elements = Array.isArray(record.elements) ? record.elements.filter(isInkElement).map((element) => markElementSaved(cloneElement(element))) : [];
+      await this.plugin.saveAnnotationState(this.file, elements, basePdf.fingerprint, backupBytes);
+      this.cropPreview = null;
+      this.applyLocalElementsAfterPdfRewrite(elements);
+      new Notice(uiText("已回退上次 PDF 改写。", "Reverted the last PDF rewrite."));
+    } catch (error) {
+      console.error(error);
+      new Notice(uiText("回退失败，请查看控制台。", "Could not revert. Check the console."));
+    }
   }
 
   private getToolColor(tool: "pen" | "highlight"): string {
@@ -4845,6 +5331,10 @@ class InkSession {
 
     if (!editingText && this.nativeSelection?.pageIndex === overlay.pageIndex) {
       drawNativeSelection(ctx, this.nativeSelection, overlay.cssWidth, overlay.cssHeight);
+    }
+
+    if (this.cropPreview?.pageIndexes.has(overlay.pageIndex)) {
+      drawCropPreview(ctx, this.cropPreview.crop, overlay.cssWidth, overlay.cssHeight);
     }
   }
 
@@ -6062,8 +6552,9 @@ class InkSession {
       return false;
     }
 
-    const padX = Math.max(8 / overlay.cssWidth, 0.01);
-    const padY = Math.max(8 / overlay.cssHeight, 0.01);
+    // Give the move region a wider hit area so casual taps land on drag instead of resize.
+    const padX = Math.max(14 / overlay.cssWidth, 0.014);
+    const padY = Math.max(14 / overlay.cssHeight, 0.014);
     return (
       point.x >= bounds.minX - padX &&
       point.x <= bounds.maxX + padX &&
@@ -6080,7 +6571,7 @@ class InkSession {
     }
 
     const textOnly = selected.length > 0 && selected.every((element) => element.kind === "text");
-    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, textOnly ? 16 : 8, textOnly ? 18 : 0);
+    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, textOnly ? 10 : 5, textOnly ? 12 : 0);
   }
 
   private resizeSelectedElements(drag: SelectionDragState, point: InkPoint): void {
@@ -7541,6 +8032,49 @@ function drawNativeSelection(ctx: CanvasRenderingContext2D, selection: PdfNative
   ctx.setLineDash([5, 4]);
   ctx.fillRect(x, y, width, height);
   ctx.strokeRect(x, y, width, height);
+  ctx.restore();
+}
+
+function drawCropPreview(ctx: CanvasRenderingContext2D, crop: PageCropMargins, cssWidth: number, cssHeight: number): void {
+  const left = crop.left * cssWidth;
+  const right = (1 - crop.right) * cssWidth;
+  const top = crop.top * cssHeight;
+  const bottom = (1 - crop.bottom) * cssHeight;
+
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(255, 193, 7, 0.13)";
+  if (left > 0) {
+    ctx.fillRect(0, 0, left, cssHeight);
+  }
+  if (right < cssWidth) {
+    ctx.fillRect(right, 0, cssWidth - right, cssHeight);
+  }
+  if (top > 0) {
+    ctx.fillRect(left, 0, Math.max(0, right - left), top);
+  }
+  if (bottom < cssHeight) {
+    ctx.fillRect(left, bottom, Math.max(0, right - left), cssHeight - bottom);
+  }
+
+  ctx.strokeStyle = "#f08c00";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([10, 5]);
+  ctx.beginPath();
+  ctx.moveTo(left, 0);
+  ctx.lineTo(left, cssHeight);
+  ctx.moveTo(right, 0);
+  ctx.lineTo(right, cssHeight);
+  ctx.moveTo(0, top);
+  ctx.lineTo(cssWidth, top);
+  ctx.moveTo(0, bottom);
+  ctx.lineTo(cssWidth, bottom);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = "#e67700";
+  ctx.lineWidth = 2.5;
+  ctx.strokeRect(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
   ctx.restore();
 }
 

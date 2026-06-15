@@ -26,9 +26,9 @@ The plugin is designed for quick annotation inside a note vault: open a PDF, pre
 
 Pdftion requires app version `1.8.7` or newer.
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the GitHub release whose tag matches the plugin version.
+1. Download `main.js`, `manifest.json`, `styles.css`, and the optional `assets/` payment QR images from the GitHub release whose tag matches the plugin version.
 2. Create a folder named `pdftion` inside your vault's `.obsidian/plugins/` folder.
-3. Copy the three downloaded files into `.obsidian/plugins/pdftion/`.
+3. Copy the downloaded files into `.obsidian/plugins/pdftion/`. If you want the built-in support QR codes, also copy `alipay.png` and `binance.png` into `.obsidian/plugins/pdftion/assets/`.
 4. Restart the app or reload community plugins.
 5. Enable `Pdftion` in Settings -> Community plugins.
 
@@ -41,6 +41,10 @@ Pdftion requires app version `1.8.7` or newer.
 5. Use the palette icon to adjust the current tool. The palette is icon-first: color swatches, size, opacity, font, and eraser width are exposed through compact controls and tooltips.
 6. Edits are saved automatically as editable annotation data.
 7. Use the share menu to export a burned-in PDF copy when you need a file that looks like the current annotated view.
+
+## Settings
+
+Pdftion includes grouped settings for export behavior, PDF menu boosting, automatic toolbar display, toolbar size and offset, mobile text-selection menu placement, local AI/API notes, and two configurable payment QR code previews. The payment QR fields accept vault image paths, plugin resource paths, `data:image` URLs, or `https` image URLs.
 
 ## Data Model
 

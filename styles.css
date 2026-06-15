@@ -15,6 +15,70 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   min-width: 28px;
 }
 
+.pdftion-settings-section {
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: 1.05em;
+  margin: 22px 0 8px;
+  padding-top: 14px;
+}
+
+.pdftion-settings-note {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+  margin: 6px 0 12px;
+}
+
+.pdftion-payment-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin: 12px 0 4px;
+}
+
+.pdftion-payment-card {
+  align-items: center;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 190px;
+  padding: 12px;
+}
+
+.pdftion-payment-title {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.pdftion-payment-image {
+  aspect-ratio: 1;
+  border-radius: 6px;
+  max-height: 168px;
+  max-width: 168px;
+  object-fit: contain;
+  width: 100%;
+}
+
+.pdftion-payment-placeholder {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  font-size: var(--font-ui-small);
+  gap: 8px;
+  justify-content: center;
+  min-height: 130px;
+  text-align: center;
+}
+
+.pdftion-payment-placeholder svg {
+  height: 34px;
+  width: 34px;
+}
+
 .pdftion-inline-actions {
   align-items: center;
   background: var(--background-primary);
@@ -88,12 +152,12 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
 .pdftion-toolbar-host {
   align-items: center;
   display: none;
-  height: 34px;
+  height: calc(var(--pdftion-toolbar-button-size, 25px) + 9px);
   justify-content: center;
   padding: 2px 14px;
   pointer-events: none;
   position: sticky;
-  top: 0;
+  top: var(--pdftion-toolbar-top-offset, 0px);
   z-index: 2147483600;
 }
 
@@ -129,7 +193,7 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   flex-wrap: nowrap;
   gap: 3px;
   justify-content: center;
-  max-width: min(640px, calc(100vw - 8px));
+  max-width: min(var(--pdftion-toolbar-max-width, 640px), calc(100vw - 8px));
   overflow: visible;
   padding: 4px 8px;
   pointer-events: auto;
@@ -140,9 +204,9 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
 
 .pdftion-toolbar .clickable-icon {
   flex: 0 0 auto;
-  height: 25px;
+  height: var(--pdftion-toolbar-button-size, 25px);
   position: relative;
-  width: 25px;
+  width: var(--pdftion-toolbar-button-size, 25px);
 }
 
 .pdftion-toolbar .pdftion-color-tool {
@@ -659,8 +723,49 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   resize: vertical;
 }
 
+.pdftion-crop-dialog {
+  width: min(440px, 100%);
+}
+
+.pdftion-crop-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.pdftion-crop-field {
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 4px;
+}
+
+.pdftion-crop-input {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  color: var(--text-normal);
+  font: inherit;
+  height: 32px;
+  padding: 4px 8px;
+  width: 100%;
+}
+
+.pdftion-dialog-error {
+  color: var(--text-error);
+  font-size: 12px;
+  min-height: 16px;
+}
+
 .pdftion-dialog-actions {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+@media (max-width: 420px) {
+  .pdftion-crop-grid {
+    grid-template-columns: 1fr;
+  }
 }

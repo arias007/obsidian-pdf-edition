@@ -52645,8 +52645,24 @@ var NATIVE_TEXT_SELECTION_TOUCH_LIMITS = {
   maxHeightRatio: 0.34,
   maxRects: 36
 };
+var BUILTIN_ALIPAY_QR_PATH = ".obsidian/plugins/pdftion/assets/alipay.png";
+var BUILTIN_BINANCE_QR_PATH = ".obsidian/plugins/pdftion/assets/binance.png";
 var DEFAULT_SETTINGS = {
-  openBurnedPdfAfterExport: true
+  autoEnableAnnotationToolbar: false,
+  boostPdfMenus: true,
+  lastCropBottom: 0.03,
+  lastCropLeft: 0.03,
+  lastCropRight: 0.03,
+  lastCropTop: 0.04,
+  nativeTextSelectionMenuAttachedToText: true,
+  openBurnedPdfAfterExport: true,
+  paymentQrOneLabel: "\u652F\u4ED8\u5B9D",
+  paymentQrOnePath: "builtin:alipay",
+  paymentQrTwoLabel: "\u5E01\u5B89",
+  paymentQrTwoPath: "builtin:binance",
+  toolbarButtonSize: 25,
+  toolbarMaxWidth: 640,
+  toolbarTopOffset: 0
 };
 function normalizePdftionLocale(language) {
   const normalized = language.toLowerCase().replace("_", "-").trim();
@@ -52868,6 +52884,123 @@ async function showConfirmModal(options) {
     });
   });
 }
+async function showCropModal(defaultCrop, onPreview) {
+  return new Promise((resolve) => {
+    const modal = createActiveElement("div");
+    modal.className = "pdftion-dialog-backdrop";
+    const panel = createActiveElement("div");
+    panel.className = "pdftion-dialog pdftion-crop-dialog";
+    const heading = createActiveElement("div");
+    heading.className = "pdftion-dialog-title";
+    heading.textContent = uiText("\u88C1\u5207\u9875\u9762", "Crop pages");
+    panel.appendChild(heading);
+    const message = createActiveElement("div");
+    message.className = "pdftion-dialog-message";
+    message.textContent = uiText("\u5206\u522B\u8F93\u5165\u5DE6\u3001\u4E0A\u3001\u53F3\u3001\u4E0B\u56DB\u4E2A\u8FB9\u8DDD\u3002\u652F\u6301 0.05 \u6216 5%\u3002\u8F93\u5165\u65F6\u4F1A\u5B9E\u65F6\u663E\u793A\u56DB\u8FB9\u9884\u89C8\u7EBF\u3002", "Enter left, top, right, and bottom margins separately. Use 0.05 or 5%. Preview lines update as you type.");
+    panel.appendChild(message);
+    const grid = createActiveElement("div");
+    grid.className = "pdftion-crop-grid";
+    const inputs = {
+      bottom: createCropInput(defaultCrop.bottom),
+      left: createCropInput(defaultCrop.left),
+      right: createCropInput(defaultCrop.right),
+      top: createCropInput(defaultCrop.top)
+    };
+    for (const item of [
+      { key: "left", label: uiText("\u5DE6", "Left") },
+      { key: "top", label: uiText("\u4E0A", "Top") },
+      { key: "right", label: uiText("\u53F3", "Right") },
+      { key: "bottom", label: uiText("\u4E0B", "Bottom") }
+    ]) {
+      const label = createActiveElement("label");
+      label.className = "pdftion-crop-field";
+      const span = createActiveElement("span");
+      span.textContent = item.label;
+      label.appendChild(span);
+      label.appendChild(inputs[item.key]);
+      grid.appendChild(label);
+    }
+    panel.appendChild(grid);
+    const error2 = createActiveElement("div");
+    error2.className = "pdftion-dialog-error";
+    panel.appendChild(error2);
+    const actions = createActiveElement("div");
+    actions.className = "pdftion-dialog-actions";
+    const cancel = createActiveElement("button");
+    cancel.type = "button";
+    cancel.textContent = uiText("\u53D6\u6D88", "Cancel");
+    cancel.addEventListener("click", () => {
+      modal.remove();
+      resolve(null);
+    });
+    actions.appendChild(cancel);
+    const submit = createActiveElement("button");
+    submit.type = "button";
+    submit.textContent = uiText("\u5E94\u7528\u88C1\u5207", "Apply crop");
+    submit.classList.add("mod-cta");
+    const previewCrop = () => {
+      const crop = readCropInputs(inputs);
+      onPreview(crop);
+      error2.textContent = crop ? "" : uiText("\u88C1\u5207\u53C2\u6570\u65E0\u6548\u3002\u56DB\u8FB9\u76F8\u52A0\u4E0D\u80FD\u88C1\u6389\u6574\u9875\u3002", "Invalid crop values. Margins cannot remove the whole page.");
+      return crop;
+    };
+    const submitCrop = () => {
+      const crop = previewCrop();
+      if (!crop) {
+        return;
+      }
+      modal.remove();
+      resolve(crop);
+    };
+    submit.addEventListener("click", submitCrop);
+    actions.appendChild(submit);
+    panel.appendChild(actions);
+    modal.appendChild(panel);
+    appendToActiveBody(modal);
+    inputs.left.focus({ preventScroll: true });
+    previewCrop();
+    for (const input of Object.values(inputs)) {
+      input.addEventListener("input", () => {
+        previewCrop();
+      });
+    }
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        modal.remove();
+        resolve(null);
+      }
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        submitCrop();
+      }
+    });
+  });
+}
+function createCropInput(value) {
+  const input = createActiveElement("input");
+  input.className = "pdftion-crop-input";
+  input.inputMode = "decimal";
+  input.type = "text";
+  input.value = formatCropValue(value);
+  return input;
+}
+function readCropInputs(inputs) {
+  const left = parseCropValue(inputs.left.value.trim());
+  const top = parseCropValue(inputs.top.value.trim());
+  const right = parseCropValue(inputs.right.value.trim());
+  const bottom = parseCropValue(inputs.bottom.value.trim());
+  if (left === null || top === null || right === null || bottom === null) {
+    return null;
+  }
+  if (left + right >= 0.9 || top + bottom >= 0.9) {
+    return null;
+  }
+  return { bottom, left, right, top };
+}
+function formatCropValue(value) {
+  return String(Math.round(value * 1e3) / 1e3);
+}
 var PdftionPlugin = class extends import_obsidian.Plugin {
   annotationFontBytes = null;
   sessions = /* @__PURE__ */ new Map();
@@ -52875,7 +53008,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   settings = { ...DEFAULT_SETTINGS };
   async onload() {
     await this.loadSettings();
-    getActiveBody().classList.add("pdftion-menu-boost");
+    this.applyRuntimeSettings();
     this.addSettingTab(new PdftionSettingTab(this));
     this.addCommand({
       id: "toggle",
@@ -52953,6 +53086,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    this.applyRuntimeSettings();
   }
   onunload() {
     if (activeWindow.PdftionAI) {
@@ -52960,11 +53094,21 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     }
     delete activeWindow[PDFTION_AI_API_NAME];
     getActiveBody().classList.remove("pdftion-menu-boost");
+    getActiveBody().style.removeProperty("--pdftion-toolbar-button-size");
+    getActiveBody().style.removeProperty("--pdftion-toolbar-max-width");
+    getActiveBody().style.removeProperty("--pdftion-toolbar-top-offset");
     for (const session of this.sessions.values()) {
       session.destroy();
     }
     this.sessions.clear();
     this.clearSurfaceScanTimers();
+  }
+  applyRuntimeSettings() {
+    const body = getActiveBody();
+    body.classList.toggle("pdftion-menu-boost", this.settings.boostPdfMenus);
+    body.style.setProperty("--pdftion-toolbar-button-size", `${this.settings.toolbarButtonSize}px`);
+    body.style.setProperty("--pdftion-toolbar-max-width", `${this.settings.toolbarMaxWidth}px`);
+    body.style.setProperty("--pdftion-toolbar-top-offset", `${this.settings.toolbarTopOffset}px`);
   }
   queuePdfSurfaceScans() {
     this.clearSurfaceScanTimers();
@@ -53324,19 +53468,176 @@ var PdftionSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.replaceChildren();
+    containerEl.createEl("h2", { text: uiText("Pdftion \u8BBE\u7F6E", "Pdftion settings") });
+    this.addSection(uiText("\u5BFC\u51FA", "Export"));
     new import_obsidian.Setting(containerEl).setName(uiText("\u5BFC\u51FA\u540E\u81EA\u52A8\u6253\u5F00", "Open after PDF export")).setDesc(uiText("\u5BFC\u51FA\u70E7\u5F55 PDF \u540E\u81EA\u52A8\u6253\u5F00\u751F\u6210\u7684 PDF\u3002", "Automatically open the generated burned-in PDF after export.")).addToggle((toggle) => {
       toggle.setValue(this.plugin.settings.openBurnedPdfAfterExport).onChange(async (value) => {
         this.plugin.settings.openBurnedPdfAfterExport = value;
         await this.plugin.saveSettings();
       });
     });
+    this.addSection(uiText("\u5DE5\u5177\u680F", "Toolbar"));
+    this.addToggleSetting(
+      uiText("\u589E\u5F3A PDF \u9876\u90E8\u83DC\u5355", "Boost PDF top menu"),
+      uiText("\u63D0\u9AD8 PDF \u83DC\u5355\u5C42\u7EA7\u548C\u6309\u94AE\u53EF\u70B9\u533A\u57DF\uFF0C\u51CF\u5C11\u88AB\u590D\u4E60\u5361\u7247\u6216\u5D4C\u5165\u89C6\u56FE\u5939\u4F4F\u65F6\u70B9\u4E0D\u5230\u3002", "Raises PDF menu stacking and button hit areas to help inside review cards and embeds."),
+      "boostPdfMenus"
+    );
+    this.addToggleSetting(
+      uiText("\u6253\u5F00 PDF \u65F6\u81EA\u52A8\u663E\u793A\u6279\u6CE8\u5DE5\u5177\u680F", "Show annotation toolbar when a PDF opens"),
+      uiText("\u9002\u5408\u4E3B\u8981\u7528 Pdftion \u6279\u6CE8 PDF \u7684\u5DE5\u4F5C\u6D41\uFF1B\u5173\u95ED\u540E\u4ECD\u53EF\u70B9 PDF \u83DC\u5355\u91CC\u7684\u7B14\u6309\u94AE\u3002", "Useful when most PDFs are annotated with Pdftion; the pen button still works when disabled."),
+      "autoEnableAnnotationToolbar"
+    );
+    this.addNumberSetting(
+      uiText("\u5DE5\u5177\u680F\u6309\u94AE\u5927\u5C0F", "Toolbar button size"),
+      uiText("\u5355\u4F4D px\u3002\u5EFA\u8BAE 22-32\uFF0C\u624B\u673A\u53EF\u9002\u5F53\u52A0\u5927\u3002", "Pixels. 22-32 is recommended; use larger values on touch screens."),
+      "toolbarButtonSize",
+      18,
+      44
+    );
+    this.addNumberSetting(
+      uiText("\u5DE5\u5177\u680F\u6700\u5927\u5BBD\u5EA6", "Toolbar max width"),
+      uiText("\u5355\u4F4D px\u3002\u5C4F\u5E55\u7A84\u65F6\u4ECD\u4F1A\u81EA\u52A8\u538B\u5230\u5C4F\u5E55\u5185\u3002", "Pixels. It is still clamped to the viewport on narrow screens."),
+      "toolbarMaxWidth",
+      360,
+      1200
+    );
+    this.addNumberSetting(
+      uiText("\u5DE5\u5177\u680F\u4E0B\u79FB\u8DDD\u79BB", "Toolbar top offset"),
+      uiText("\u5355\u4F4D px\u3002\u9876\u90E8\u88AB\u6321\u65F6\u8C03\u5927\uFF1B\u4E0D\u60F3\u7559\u7A7A\u5C31\u8BBE\u4E3A 0\u3002", "Pixels. Increase when the top is covered; use 0 for no extra gap."),
+      "toolbarTopOffset",
+      0,
+      160
+    );
+    this.addSection(uiText("\u9009\u62E9\u4E0E\u89E6\u63A7", "Selection and touch"));
+    this.addToggleSetting(
+      uiText("\u624B\u673A\u6587\u5B57\u83DC\u5355\u8D34\u8FD1\u9009\u4E2D\u6587\u5B57", "Attach mobile text menu to selected text"),
+      uiText("\u5F00\u542F\u540E\u9AD8\u4EAE/\u590D\u5236\u83DC\u5355\u8DDF\u968F\u9009\u4E2D\u6587\u5B57\uFF1B\u5173\u95ED\u540E\u4F7F\u7528\u65E7\u7684\u5C4F\u5E55\u8FB9\u7F18\u5B9A\u4F4D\u3002", "When enabled, highlight/copy actions follow the selected text; disable to use the older edge placement."),
+      "nativeTextSelectionMenuAttachedToText"
+    );
+    this.addSection(uiText("\u6570\u636E\u4E0E AI", "Data and AI"));
+    const apiNote = containerEl.createDiv({ cls: "pdftion-settings-note" });
+    apiNote.textContent = uiText(
+      "Pdftion \u4F1A\u81EA\u52A8\u4FDD\u5B58\u53EF\u7F16\u8F91\u6279\u6CE8\u6570\u636E\uFF0C\u5E76\u5728\u7A97\u53E3\u66B4\u9732 PdftionAI / __PDftionAI__\uFF0C\u65B9\u4FBF\u672C\u5730\u811A\u672C\u6216 AI \u8BFB\u53D6\u3001\u7EDF\u8BA1\u548C\u64CD\u4F5C\u5F53\u524D PDF \u6279\u6CE8\u3002",
+      "Pdftion auto-saves editable annotation data and exposes PdftionAI / __PDftionAI__ on the window for local scripts or AI agents to inspect, summarize, and operate the active PDF annotations."
+    );
+    this.addSection(uiText("\u652F\u6301\u4F5C\u8005", "Support the author"));
+    this.renderPaymentQrCodes(containerEl);
+  }
+  addSection(title2) {
+    this.containerEl.createEl("h3", { cls: "pdftion-settings-section", text: title2 });
+  }
+  addToggleSetting(name5, desc, key2) {
+    new import_obsidian.Setting(this.containerEl).setName(name5).setDesc(desc).addToggle((toggle) => {
+      toggle.setValue(this.plugin.settings[key2]).onChange(async (value) => {
+        this.plugin.settings[key2] = value;
+        await this.plugin.saveSettings();
+      });
+    });
+  }
+  addNumberSetting(name5, desc, key2, min, max2) {
+    new import_obsidian.Setting(this.containerEl).setName(name5).setDesc(desc).addText((text) => {
+      text.setValue(String(this.plugin.settings[key2])).onChange(async (value) => {
+        const next = clamp(Math.round(Number(value)), min, max2);
+        if (!Number.isFinite(next)) {
+          return;
+        }
+        this.plugin.settings[key2] = next;
+        await this.plugin.saveSettings();
+      });
+      text.inputEl.type = "number";
+      text.inputEl.min = String(min);
+      text.inputEl.max = String(max2);
+    });
+  }
+  addTextSetting(name5, placeholder, key2) {
+    new import_obsidian.Setting(this.containerEl).setName(name5).addText((text) => {
+      text.setPlaceholder(placeholder).setValue(this.plugin.settings[key2]).onChange(async (value) => {
+        this.plugin.settings[key2] = value.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+  }
+  renderPaymentQrCodes(containerEl) {
+    const wrap = containerEl.createDiv({ cls: "pdftion-payment-grid" });
+    this.renderPaymentQrCode(wrap, this.plugin.settings.paymentQrOneLabel, this.plugin.settings.paymentQrOnePath);
+    this.renderPaymentQrCode(wrap, this.plugin.settings.paymentQrTwoLabel, this.plugin.settings.paymentQrTwoPath);
+  }
+  renderPaymentQrCode(containerEl, label, rawPath) {
+    const card = containerEl.createDiv({ cls: "pdftion-payment-card" });
+    const title2 = card.createDiv({ cls: "pdftion-payment-title" });
+    title2.textContent = label || uiText("\u6536\u6B3E\u7801", "Payment QR");
+    const src2 = this.getPaymentImageSource(rawPath);
+    if (src2) {
+      const image = card.createEl("img", {
+        attr: {
+          alt: title2.textContent,
+          loading: "lazy",
+          src: src2
+        },
+        cls: "pdftion-payment-image"
+      });
+      image.addEventListener("error", () => {
+        image.remove();
+        this.renderPaymentPlaceholder(card, uiText("\u56FE\u7247\u65E0\u6CD5\u52A0\u8F7D", "Image could not be loaded"));
+      });
+      return;
+    }
+    this.renderPaymentPlaceholder(card, uiText("\u672A\u914D\u7F6E\u56FE\u7247", "No image configured"));
+  }
+  renderPaymentPlaceholder(card, message) {
+    const placeholder = card.createDiv({ cls: "pdftion-payment-placeholder" });
+    (0, import_obsidian.setIcon)(placeholder, "qr-code");
+    placeholder.createSpan({ text: message });
+  }
+  getPaymentImageSource(rawPath) {
+    const path = rawPath.trim();
+    if (!path) {
+      return null;
+    }
+    if (path === "builtin:alipay") {
+      return this.plugin.app.vault.adapter.getResourcePath(BUILTIN_ALIPAY_QR_PATH);
+    }
+    if (path === "builtin:binance") {
+      return this.plugin.app.vault.adapter.getResourcePath(BUILTIN_BINANCE_QR_PATH);
+    }
+    if (/^(https?:|data:image\/)/i.test(path)) {
+      return path;
+    }
+    if (/^[a-z]:[\\/]/i.test(path)) {
+      return `file:///${path.replace(/\\/g, "/")}`;
+    }
+    return this.plugin.app.vault.adapter.getResourcePath(path.replace(/\\/g, "/").replace(/^\/+/, ""));
   }
 };
 function normalizeSettings(data2) {
   const record = data2 && typeof data2 === "object" ? data2 : {};
   return {
-    openBurnedPdfAfterExport: typeof record.openBurnedPdfAfterExport === "boolean" ? record.openBurnedPdfAfterExport : DEFAULT_SETTINGS.openBurnedPdfAfterExport
+    autoEnableAnnotationToolbar: typeof record.autoEnableAnnotationToolbar === "boolean" ? record.autoEnableAnnotationToolbar : DEFAULT_SETTINGS.autoEnableAnnotationToolbar,
+    boostPdfMenus: typeof record.boostPdfMenus === "boolean" ? record.boostPdfMenus : DEFAULT_SETTINGS.boostPdfMenus,
+    lastCropBottom: normalizeNumberSetting(record.lastCropBottom, DEFAULT_SETTINGS.lastCropBottom, 0, 0.45, 1e-3),
+    lastCropLeft: normalizeNumberSetting(record.lastCropLeft, DEFAULT_SETTINGS.lastCropLeft, 0, 0.45, 1e-3),
+    lastCropRight: normalizeNumberSetting(record.lastCropRight, DEFAULT_SETTINGS.lastCropRight, 0, 0.45, 1e-3),
+    lastCropTop: normalizeNumberSetting(record.lastCropTop, DEFAULT_SETTINGS.lastCropTop, 0, 0.45, 1e-3),
+    nativeTextSelectionMenuAttachedToText: typeof record.nativeTextSelectionMenuAttachedToText === "boolean" ? record.nativeTextSelectionMenuAttachedToText : DEFAULT_SETTINGS.nativeTextSelectionMenuAttachedToText,
+    openBurnedPdfAfterExport: typeof record.openBurnedPdfAfterExport === "boolean" ? record.openBurnedPdfAfterExport : DEFAULT_SETTINGS.openBurnedPdfAfterExport,
+    paymentQrOneLabel: normalizeStringSetting(record.paymentQrOneLabel, DEFAULT_SETTINGS.paymentQrOneLabel),
+    paymentQrOnePath: normalizeStringSetting(record.paymentQrOnePath, DEFAULT_SETTINGS.paymentQrOnePath),
+    paymentQrTwoLabel: normalizeStringSetting(record.paymentQrTwoLabel, DEFAULT_SETTINGS.paymentQrTwoLabel),
+    paymentQrTwoPath: normalizeStringSetting(record.paymentQrTwoPath, DEFAULT_SETTINGS.paymentQrTwoPath),
+    toolbarButtonSize: normalizeNumberSetting(record.toolbarButtonSize, DEFAULT_SETTINGS.toolbarButtonSize, 18, 44),
+    toolbarMaxWidth: normalizeNumberSetting(record.toolbarMaxWidth, DEFAULT_SETTINGS.toolbarMaxWidth, 360, 1200),
+    toolbarTopOffset: normalizeNumberSetting(record.toolbarTopOffset, DEFAULT_SETTINGS.toolbarTopOffset, 0, 160)
   };
+}
+function normalizeNumberSetting(value, fallback, min, max2, step = 1) {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return clamp(Math.round(numeric / step) * step, min, max2);
+}
+function normalizeStringSetting(value, fallback) {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 var InkSession = class {
   constructor(plugin, leaf, file, rootEl) {
@@ -53347,6 +53648,9 @@ var InkSession = class {
     this.rootEl.classList.add("pdftion-root");
     this.injectButton();
     void this.loadEditableAnnotations();
+    if (this.plugin.settings.autoEnableAnnotationToolbar) {
+      window.setTimeout(() => this.setEnabled(true, { notice: false }), 0);
+    }
     this.scanPages();
     this.mutationObserver = new MutationObserver((mutations) => {
       if (this.shouldScanForMutations(mutations)) {
@@ -53375,6 +53679,7 @@ var InkSession = class {
   button = null;
   currentCover = null;
   currentStroke = null;
+  cropPreview = null;
   dirty = false;
   enabled = false;
   imageCache = /* @__PURE__ */ new Map();
@@ -53821,7 +54126,7 @@ var InkSession = class {
     }
     this.scheduleScanPages(0);
   }
-  setEnabled(enabled) {
+  setEnabled(enabled, options = {}) {
     this.enabled = enabled;
     this.rootEl.classList.toggle("pdftion-enabled", this.enabled);
     this.rootEl.classList.toggle("pdftion-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
@@ -53830,7 +54135,9 @@ var InkSession = class {
       this.showToolbar();
       this.scanPages();
       this.startOverlayHealthCheck();
-      new import_obsidian.Notice(uiText("PDF \u6279\u6CE8\u5DF2\u5F00\u542F\u3002", "PDF annotation enabled."));
+      if (options.notice !== false) {
+        new import_obsidian.Notice(uiText("PDF \u6279\u6CE8\u5DF2\u5F00\u542F\u3002", "PDF annotation enabled."));
+      }
     } else {
       this.stopOverlayHealthCheck();
       this.currentStroke = null;
@@ -54672,7 +54979,7 @@ var InkSession = class {
     return button;
   }
   positionNativeTextSelectionMenu(info, panel) {
-    if (isTouchLikeViewport()) {
+    if (isTouchLikeViewport() && this.plugin.settings.nativeTextSelectionMenuAttachedToText) {
       panel.classList.add("is-mobile-attached");
       const centerX = info.rect.left + (info.rect.right - info.rect.left) / 2;
       panel.setCssStyles({
@@ -55301,6 +55608,9 @@ var InkSession = class {
     const crop = createIconButton("crop", uiText("\u88C1\u5207", "Crop"));
     crop.addEventListener("click", () => void this.cropSelectedPagesByPrompt());
     actions.appendChild(crop);
+    const undoRewrite = createIconButton("rotate-ccw", uiText("\u56DE\u9000\u4E0A\u6B21 PDF \u6539\u5199", "Revert last PDF rewrite"));
+    undoRewrite.addEventListener("click", () => void this.restoreLastPdfRewrite());
+    actions.appendChild(undoRewrite);
     const deletePages = createIconButton("file-minus", uiText("\u5220\u9875", "Delete pages"));
     deletePages.addEventListener("click", () => void this.deleteSelectedPages());
     actions.appendChild(deletePages);
@@ -55464,19 +55774,26 @@ var InkSession = class {
   async cropSelectedPagesByPrompt() {
     const pageCount = await this.getCurrentPdfPageCount();
     const selected = this.getSelectedPageIndexes(pageCount);
-    const raw = await showPromptModal({
-      actionLabel: uiText("\u88C1\u5207", "Crop"),
-      message: uiText("\u8F93\u5165\u88C1\u5207\u6BD4\u4F8B\uFF1A\u5DE6,\u4E0A,\u53F3,\u4E0B\u3002\u53EF\u586B 0.05 \u6216 5%\uFF0C\u4F8B\u5982 0.03,0.04,0.03,0.04", "Enter crop margins: left,top,right,bottom. Use 0.05 or 5%, for example 0.03,0.04,0.03,0.04."),
-      title: uiText("\u88C1\u5207\u9875\u9762", "Crop pages")
+    const selectedSet = new Set(selected);
+    const crop = await showCropModal({
+      bottom: this.plugin.settings.lastCropBottom,
+      left: this.plugin.settings.lastCropLeft,
+      right: this.plugin.settings.lastCropRight,
+      top: this.plugin.settings.lastCropTop
+    }, (previewCrop) => {
+      this.cropPreview = previewCrop ? { crop: previewCrop, pageIndexes: selectedSet } : null;
+      this.redrawAll();
     });
-    if (!raw) {
-      return;
-    }
-    const crop = parseCropInput(raw);
     if (!crop) {
-      new import_obsidian.Notice(uiText("\u88C1\u5207\u53C2\u6570\u65E0\u6548\u3002", "Invalid crop values."));
+      this.cropPreview = null;
+      this.redrawAll();
       return;
     }
+    this.plugin.settings.lastCropBottom = crop.bottom;
+    this.plugin.settings.lastCropLeft = crop.left;
+    this.plugin.settings.lastCropRight = crop.right;
+    this.plugin.settings.lastCropTop = crop.top;
+    await this.plugin.saveSettings();
     const binary = await this.plugin.app.vault.readBinary(this.file);
     const pdf = await PDFDocument_default.load(binary, { ignoreEncryption: true });
     for (const pageIndex of selected) {
@@ -55488,6 +55805,7 @@ var InkSession = class {
     }
     const cropped = this.getEditableElements().map((element) => selected.includes(element.pageIndex) ? cropElement(element, crop) : cloneElement(element));
     const saved = await pdf.save({ useObjectStreams: true });
+    this.cropPreview = null;
     await this.persistPdfRewrite(saved, cropped, uiText("\u5DF2\u88C1\u5207\u9009\u4E2D\u9875\u9762", "Selected pages cropped"));
   }
   async importPdfByPrompt() {
@@ -55557,6 +55875,7 @@ var InkSession = class {
     await this.persistPdfRewrite(saved, remapped, message);
   }
   async persistPdfRewrite(saved, elements, message) {
+    await this.savePdfRewriteBackup();
     const buffer2 = new ArrayBuffer(saved.byteLength);
     new Uint8Array(buffer2).set(saved);
     await this.plugin.app.vault.modifyBinary(this.file, buffer2);
@@ -55573,6 +55892,7 @@ var InkSession = class {
     this.imageHistory = elements.filter((element) => element.kind === "image");
     this.currentStroke = null;
     this.currentCover = null;
+    this.cropPreview = null;
     this.redoStack = [];
     this.selectedStrokeIds.clear();
     this.nativeSelection = null;
@@ -55580,6 +55900,61 @@ var InkSession = class {
     this.redrawAll();
     this.refreshPageNavigator();
     this.scheduleQuietScan();
+  }
+  getPdfRewriteBackupPdfPath() {
+    return `${this.plugin.manifest.dir}/data/rewrite-backups/${safeAnnotationKey(this.file.path)}.pdf`;
+  }
+  getPdfRewriteBackupJsonPath() {
+    return `${this.plugin.manifest.dir}/data/rewrite-backups/${safeAnnotationKey(this.file.path)}.json`;
+  }
+  async savePdfRewriteBackup() {
+    const pdfPath = this.getPdfRewriteBackupPdfPath();
+    const jsonPath = this.getPdfRewriteBackupJsonPath();
+    await this.ensureVaultFolder(pdfPath.substring(0, pdfPath.lastIndexOf("/")));
+    const currentBytes = await this.plugin.app.vault.readBinary(this.file);
+    await this.plugin.app.vault.adapter.writeBinary(pdfPath, currentBytes);
+    const record = {
+      elements: this.getEditableElements().map(cloneElement),
+      filePath: this.file.path,
+      pdfPath,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      version: 1
+    };
+    await this.plugin.app.vault.adapter.write(jsonPath, JSON.stringify(record, null, 2));
+  }
+  async restoreLastPdfRewrite() {
+    const jsonPath = this.getPdfRewriteBackupJsonPath();
+    let record;
+    try {
+      record = JSON.parse(await this.plugin.app.vault.adapter.read(jsonPath));
+    } catch {
+      new import_obsidian.Notice(uiText("\u6CA1\u6709\u53EF\u56DE\u9000\u7684 PDF \u6539\u5199\u5907\u4EFD\u3002", "No PDF rewrite backup is available."));
+      return;
+    }
+    if (record.filePath !== this.file.path || !record.pdfPath) {
+      new import_obsidian.Notice(uiText("\u56DE\u9000\u5907\u4EFD\u4E0E\u5F53\u524D PDF \u4E0D\u5339\u914D\u3002", "The rewrite backup does not match the current PDF."));
+      return;
+    }
+    if (!await showConfirmModal({
+      confirmLabel: uiText("\u56DE\u9000", "Revert"),
+      message: uiText("\u56DE\u9000\u5230\u4E0A\u6B21 PDF \u6539\u5199\u524D\uFF1F\u5F53\u524D PDF \u6587\u4EF6\u548C\u53EF\u7F16\u8F91\u6279\u6CE8\u90FD\u4F1A\u6062\u590D\u5230\u5907\u4EFD\u72B6\u6001\u3002", "Revert to the state before the last PDF rewrite? The current PDF file and editable annotations will be restored from backup."),
+      title: uiText("\u56DE\u9000\u4E0A\u6B21 PDF \u6539\u5199", "Revert last PDF rewrite")
+    })) {
+      return;
+    }
+    try {
+      const backupBytes = await this.plugin.app.vault.adapter.readBinary(record.pdfPath);
+      await this.plugin.app.vault.modifyBinary(this.file, backupBytes);
+      const basePdf = await this.plugin.ensureBasePdfBytes(this.file, backupBytes);
+      const elements = Array.isArray(record.elements) ? record.elements.filter(isInkElement).map((element) => markElementSaved(cloneElement(element))) : [];
+      await this.plugin.saveAnnotationState(this.file, elements, basePdf.fingerprint, backupBytes);
+      this.cropPreview = null;
+      this.applyLocalElementsAfterPdfRewrite(elements);
+      new import_obsidian.Notice(uiText("\u5DF2\u56DE\u9000\u4E0A\u6B21 PDF \u6539\u5199\u3002", "Reverted the last PDF rewrite."));
+    } catch (error2) {
+      console.error(error2);
+      new import_obsidian.Notice(uiText("\u56DE\u9000\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0\u3002", "Could not revert. Check the console."));
+    }
   }
   getToolColor(tool) {
     return tool === "highlight" ? this.highlightColor : this.penColor;
@@ -56112,6 +56487,9 @@ var InkSession = class {
     }
     if (!editingText && this.nativeSelection?.pageIndex === overlay.pageIndex) {
       drawNativeSelection(ctx, this.nativeSelection, overlay.cssWidth, overlay.cssHeight);
+    }
+    if (this.cropPreview?.pageIndexes.has(overlay.pageIndex)) {
+      drawCropPreview(ctx, this.cropPreview.crop, overlay.cssWidth, overlay.cssHeight);
     }
   }
   drawImageElement(ctx, image, cssWidth, cssHeight, selected = false) {
@@ -57203,8 +57581,8 @@ var InkSession = class {
     if (!bounds) {
       return false;
     }
-    const padX = Math.max(8 / overlay.cssWidth, 0.01);
-    const padY = Math.max(8 / overlay.cssHeight, 0.01);
+    const padX = Math.max(14 / overlay.cssWidth, 0.014);
+    const padY = Math.max(14 / overlay.cssHeight, 0.014);
     return point.x >= bounds.minX - padX && point.x <= bounds.maxX + padX && point.y >= bounds.minY - padY && point.y <= bounds.maxY + padY;
   }
   findSelectionHandleAt(overlay, point) {
@@ -57214,7 +57592,7 @@ var InkSession = class {
       return null;
     }
     const textOnly = selected.length > 0 && selected.every((element) => element.kind === "text");
-    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, textOnly ? 16 : 8, textOnly ? 18 : 0);
+    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, textOnly ? 10 : 5, textOnly ? 12 : 0);
   }
   resizeSelectedElements(drag, point) {
     if (!drag.handle || !drag.originalBounds || !drag.originalElements) {
@@ -58228,21 +58606,6 @@ function parsePageOrder(raw, pageCount) {
   }
   return result;
 }
-function parseCropInput(raw) {
-  const parts = raw.split(/[,\s]+/).map((part) => part.trim()).filter(Boolean);
-  if (parts.length !== 4) {
-    return null;
-  }
-  const values2 = parts.map(parseCropValue);
-  if (values2.some((value) => value === null)) {
-    return null;
-  }
-  const [left, top, right, bottom] = values2;
-  if (left + right >= 0.9 || top + bottom >= 0.9) {
-    return null;
-  }
-  return { bottom, left, right, top };
-}
 function parseCropValue(raw) {
   const value = raw.endsWith("%") ? Number(raw.slice(0, -1)) / 100 : Number(raw);
   if (!Number.isFinite(value)) {
@@ -58530,6 +58893,45 @@ function drawNativeSelection(ctx, selection, cssWidth, cssHeight) {
   ctx.setLineDash([5, 4]);
   ctx.fillRect(x, y, width, height);
   ctx.strokeRect(x, y, width, height);
+  ctx.restore();
+}
+function drawCropPreview(ctx, crop, cssWidth, cssHeight) {
+  const left = crop.left * cssWidth;
+  const right = (1 - crop.right) * cssWidth;
+  const top = crop.top * cssHeight;
+  const bottom = (1 - crop.bottom) * cssHeight;
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(255, 193, 7, 0.13)";
+  if (left > 0) {
+    ctx.fillRect(0, 0, left, cssHeight);
+  }
+  if (right < cssWidth) {
+    ctx.fillRect(right, 0, cssWidth - right, cssHeight);
+  }
+  if (top > 0) {
+    ctx.fillRect(left, 0, Math.max(0, right - left), top);
+  }
+  if (bottom < cssHeight) {
+    ctx.fillRect(left, bottom, Math.max(0, right - left), cssHeight - bottom);
+  }
+  ctx.strokeStyle = "#f08c00";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([10, 5]);
+  ctx.beginPath();
+  ctx.moveTo(left, 0);
+  ctx.lineTo(left, cssHeight);
+  ctx.moveTo(right, 0);
+  ctx.lineTo(right, cssHeight);
+  ctx.moveTo(0, top);
+  ctx.lineTo(cssWidth, top);
+  ctx.moveTo(0, bottom);
+  ctx.lineTo(cssWidth, bottom);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "#e67700";
+  ctx.lineWidth = 2.5;
+  ctx.strokeRect(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
   ctx.restore();
 }
 function mergeNativeTextFragmentsIntoLines(fragments, overlay, pageRect) {
