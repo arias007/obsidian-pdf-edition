@@ -611,10 +611,6 @@ function getPdftionLocale(): PdftionLocale {
   return "en";
 }
 
-function isChineseUi(): boolean {
-  return getPdftionLocale() === "zh";
-}
-
 function uiText(zh: string, en: string): string {
   const locale = getPdftionLocale();
   if (locale === "zh") {

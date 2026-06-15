@@ -24,6 +24,8 @@ The plugin is designed for quick annotation inside a note vault: open a PDF, pre
 
 ## Installation
 
+Pdftion requires app version `1.8.7` or newer.
+
 1. Download `main.js`, `manifest.json`, and `styles.css` from the GitHub release whose tag matches the plugin version.
 2. Create a folder named `pdftion` inside your vault's `.obsidian/plugins/` folder.
 3. Copy the three downloaded files into `.obsidian/plugins/pdftion/`.
