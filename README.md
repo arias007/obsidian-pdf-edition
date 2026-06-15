@@ -13,6 +13,8 @@ The plugin is designed for quick annotation inside a note vault: open a PDF, pre
 - Select, move, resize, delete, undo, and redo plugin-created annotation elements.
 - Keep pen, highlighter, text, and eraser settings separate.
 - Use an icon-first toolbar and palette that works across language environments.
+- Select native PDF text to show an icon-only quick menu for text highlighting and copying a note link.
+- Copy a page-aware wiki link whose alias contains the selected text and PDF name.
 - Auto-detect the interface language and show Chinese or English notices without a manual language switch.
 - Attach the annotation button to normal PDF views and embedded PDF previews where possible.
 - Save editable annotation data automatically without modifying the source PDF on every stroke.
@@ -31,11 +33,12 @@ The plugin is designed for quick annotation inside a note vault: open a PDF, pre
 ## Usage
 
 1. Open a PDF file or an embedded PDF preview.
-2. Click the pen button in the PDF toolbar.
-3. Use the toolbar icons to select, draw, highlight, add text, add images, erase, undo, redo, export, or open the page navigator.
-4. Use the palette icon to adjust the current tool. The palette is icon-first: color swatches, size, opacity, font, and eraser width are exposed through compact controls and tooltips.
-5. Edits are saved automatically as editable annotation data.
-6. Use the share menu to export a burned-in PDF copy when you need a file that looks like the current annotated view.
+2. Select PDF text directly to highlight it or copy a page-aware note link.
+3. Click the pen button in the PDF toolbar when you want the full annotation toolbar.
+4. Use the toolbar icons to select, draw, highlight, add text, add images, erase, undo, redo, export, or open the page navigator.
+5. Use the palette icon to adjust the current tool. The palette is icon-first: color swatches, size, opacity, font, and eraser width are exposed through compact controls and tooltips.
+6. Edits are saved automatically as editable annotation data.
+7. Use the share menu to export a burned-in PDF copy when you need a file that looks like the current annotated view.
 
 ## Data Model
 
@@ -61,6 +64,6 @@ This API is meant for local automation inside the current app context. It does n
 
 Pdftion 是面向笔记工作流的 PDF 批注插件。它支持手写、高亮、文字、遮挡块、图片叠加、自动保存、烧录 PDF 导出、Markdown/DOCX 辅助导出，以及给本地脚本或 AI agent 使用的操作接口。
 
-基本用法：打开 PDF 后点击 PDF 工具栏里的笔头按钮，在页面上批注；调色板和工具栏尽量图标化，中文/英文界面会自动适配；需要分享时从分享菜单导出烧录 PDF 副本。
+基本用法：打开 PDF 后可直接选择原生文字，弹出图标菜单进行高亮或复制带页码的 OB 链接；需要完整批注工具时再点击 PDF 工具栏里的笔头按钮。调色板和工具栏尽量图标化，中文/英文界面会自动适配；需要分享时从分享菜单导出烧录 PDF 副本。
 
 注意：平时编辑会保存为可继续修改的标注数据，不会每一笔都改写原 PDF；只有分享/导出烧录 PDF 时才生成所见即所得副本。

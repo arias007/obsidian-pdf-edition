@@ -23,6 +23,7 @@ const TEXT_FONTS = [
   { labelEn: "Mono", labelZh: "等宽", value: "Consolas, monospace" },
   { labelEn: "Serif", labelZh: "衬线", value: "Georgia, serif" }
 ];
+const TEXT_SELECTION_HIGHLIGHT_COLORS = ["#ffe066", "#ffd43b", "#ff8787", "#69db7c", "#74c0fc"];
 
 function isChineseUi(): boolean {
   const languages = new Set<string>();
@@ -359,6 +360,13 @@ interface PdfNativeObject {
   width: number;
   x: number;
   y: number;
+}
+
+interface NativeTextSelectionInfo {
+  objects: PdfNativeObject[];
+  overlay: PageOverlay;
+  rect: { bottom: number; left: number; right: number; top: number };
+  text: string;
 }
 
 interface PageOverlay {
@@ -885,12 +893,7 @@ export default class PdftionPlugin extends Plugin {
       return direct;
     }
 
-    const fileName = normalized.split("/").pop()?.toLowerCase();
-    if (!fileName) {
-      return null;
-    }
-
-    return this.app.vault.getFiles().find((file) => file.extension === "pdf" && file.name.toLowerCase() === fileName) ?? null;
+    return null;
   }
 
   private getActivePdfSession(): InkSession | null {
@@ -1013,6 +1016,10 @@ class InkSession {
   private pageNavigator: HTMLElement | null = null;
   private selectedPageIndexes = new Set<number>();
   private selectedStrokeIds = new Set<string>();
+  private nativeTextSelectionMenu: HTMLElement | null = null;
+  private nativeTextSelectionInfo: NativeTextSelectionInfo | null = null;
+  private nativeTextSelectionTimer: number | null = null;
+  private nativeTextSelectionAbort = new AbortController();
   private saving = false;
   private strokeHistory: InkStroke[] = [];
   private textHistory: InkText[] = [];
@@ -1048,6 +1055,15 @@ class InkSession {
       childList: true,
       subtree: true
     });
+    activeDocument.addEventListener("selectionchange", () => this.scheduleNativeTextSelectionMenu(), {
+      signal: this.nativeTextSelectionAbort.signal
+    });
+    this.rootEl.addEventListener("pointerup", () => this.scheduleNativeTextSelectionMenu(20), {
+      signal: this.nativeTextSelectionAbort.signal
+    });
+    this.rootEl.addEventListener("keyup", () => this.scheduleNativeTextSelectionMenu(20), {
+      signal: this.nativeTextSelectionAbort.signal
+    });
   }
 
   destroy(): void {
@@ -1059,6 +1075,9 @@ class InkSession {
     this.button?.remove();
     this.closeNativeTextEditor(false);
     this.palette?.remove();
+    this.hideNativeTextSelectionMenu();
+    this.clearNativeTextSelectionTimer();
+    this.nativeTextSelectionAbort.abort();
     this.pageNavigator?.remove();
     this.imageMenu?.remove();
     this.shareMenu?.remove();
@@ -1091,6 +1110,7 @@ class InkSession {
     this.selectionDrag = null;
     this.selectedStrokeIds.clear();
     this.nativeSelection = null;
+    this.hideNativeTextSelectionMenu();
     this.pendingImageCrop = null;
     this.strokeHistory = [];
     this.textHistory = [];
@@ -2283,6 +2303,210 @@ class InkSession {
       return;
     }
     editor.blur();
+  }
+
+  private clearNativeTextSelectionTimer(): void {
+    if (this.nativeTextSelectionTimer !== null) {
+      window.clearTimeout(this.nativeTextSelectionTimer);
+      this.nativeTextSelectionTimer = null;
+    }
+  }
+
+  private scheduleNativeTextSelectionMenu(delay = 100): void {
+    this.clearNativeTextSelectionTimer();
+    this.nativeTextSelectionTimer = window.setTimeout(() => {
+      this.nativeTextSelectionTimer = null;
+      this.updateNativeTextSelectionMenu();
+    }, delay);
+  }
+
+  private updateNativeTextSelectionMenu(): void {
+    if (this.nativeTextEditor) {
+      this.hideNativeTextSelectionMenu();
+      return;
+    }
+
+    const info = this.getNativeTextSelectionInfo();
+    if (!info) {
+      this.hideNativeTextSelectionMenu();
+      return;
+    }
+    this.showNativeTextSelectionMenu(info);
+  }
+
+  private getNativeTextSelectionInfo(): NativeTextSelectionInfo | null {
+    const selection = activeDocument.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      return null;
+    }
+
+    const anchorNode = selection.anchorNode;
+    const focusNode = selection.focusNode;
+    if ((!anchorNode || !this.rootEl.contains(anchorNode)) && (!focusNode || !this.rootEl.contains(focusNode))) {
+      return null;
+    }
+
+    const text = selection.toString().replace(/\s+/g, " ").trim();
+    if (!text) {
+      return null;
+    }
+
+    const ranges: Range[] = [];
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      ranges.push(selection.getRangeAt(index));
+    }
+
+    let best: { objects: PdfNativeObject[]; overlay: PageOverlay; rect: NativeTextSelectionInfo["rect"]; score: number } | null = null;
+    for (const overlay of this.overlays.values()) {
+      const pageRect = overlay.pageEl.getBoundingClientRect();
+      const rects: Array<{ bottom: number; left: number; right: number; top: number }> = [];
+      let score = 0;
+
+      for (const range of ranges) {
+        for (const rect of Array.from(range.getClientRects())) {
+          const area = rectIntersectionArea(rect, pageRect);
+          if (area < 4) {
+            continue;
+          }
+          const clipped = clipRectToBounds(rect, pageRect);
+          if (clipped.right - clipped.left < 2 || clipped.bottom - clipped.top < 2) {
+            continue;
+          }
+          rects.push(clipped);
+          score += area;
+        }
+      }
+
+      if (rects.length === 0 || (best && score <= best.score)) {
+        continue;
+      }
+
+      const union = unionRects(rects);
+      const objects = rects.map((rect, index): PdfNativeObject => ({
+        height: clamp((rect.bottom - rect.top) / Math.max(1, overlay.cssHeight), 0.001, 1),
+        id: `native-text-selection-${overlay.pageIndex}-${index}`,
+        kind: "text",
+        pageIndex: overlay.pageIndex,
+        text,
+        width: clamp((rect.right - rect.left) / Math.max(1, overlay.cssWidth), 0.001, 1),
+        x: clamp((rect.left - pageRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+        y: clamp((rect.top - pageRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
+      }));
+
+      best = { objects, overlay, rect: union, score };
+    }
+
+    return best ? { objects: best.objects, overlay: best.overlay, rect: best.rect, text } : null;
+  }
+
+  private showNativeTextSelectionMenu(info: NativeTextSelectionInfo): void {
+    this.nativeTextSelectionInfo = info;
+    this.nativeTextSelectionMenu?.remove();
+
+    const panel = activeDocument.createElement("div");
+    panel.className = "pdftion-native-selection-menu";
+    panel.addEventListener("pointerdown", (event: PointerEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    panel.addEventListener("click", (event: MouseEvent) => event.stopPropagation());
+
+    for (const color of TEXT_SELECTION_HIGHLIGHT_COLORS) {
+      const button = activeDocument.createElement("button");
+      button.className = "pdftion-native-selection-color";
+      button.type = "button";
+      button.title = uiText("高亮", "Highlight");
+      button.setAttribute("aria-label", uiText("高亮", "Highlight"));
+      button.setCssProps({ "--pdftion-selection-color": color });
+      const swatch = activeDocument.createElement("span");
+      swatch.setAttribute("aria-hidden", "true");
+      button.appendChild(swatch);
+      button.addEventListener("click", () => this.applyNativeTextHighlight(color));
+      panel.appendChild(button);
+    }
+
+    const copyLink = createIconButton("copy", uiText("复制 OB 链接", "Copy note link"));
+    copyLink.classList.add("pdftion-native-selection-copy");
+    copyLink.addEventListener("click", () => void this.copyNativeTextSelectionLink());
+    panel.appendChild(copyLink);
+
+    appendToActiveBody(panel);
+    this.nativeTextSelectionMenu = panel;
+    this.positionNativeTextSelectionMenu(info, panel);
+  }
+
+  private positionNativeTextSelectionMenu(info: NativeTextSelectionInfo, panel: HTMLElement): void {
+    panel.setCssStyles({
+      left: `${clamp(info.rect.left, 8, Math.max(8, activeWindow.innerWidth - 8))}px`,
+      top: `${clamp(info.rect.top - 40, 8, Math.max(8, activeWindow.innerHeight - 8))}px`
+    });
+
+    window.requestAnimationFrame(() => {
+      const menuRect = panel.getBoundingClientRect();
+      let left = info.rect.left + (info.rect.right - info.rect.left) / 2 - menuRect.width / 2;
+      let top = info.rect.top - menuRect.height - 8;
+      if (top < 8) {
+        top = info.rect.bottom + 8;
+      }
+      left = clamp(left, 8, Math.max(8, activeWindow.innerWidth - menuRect.width - 8));
+      top = clamp(top, 8, Math.max(8, activeWindow.innerHeight - menuRect.height - 8));
+      panel.setCssStyles({ left: `${left}px`, top: `${top}px` });
+    });
+  }
+
+  private hideNativeTextSelectionMenu(): void {
+    this.nativeTextSelectionMenu?.remove();
+    this.nativeTextSelectionMenu = null;
+    this.nativeTextSelectionInfo = null;
+  }
+
+  private applyNativeTextHighlight(color: string): void {
+    const info = this.nativeTextSelectionInfo;
+    if (!info) {
+      return;
+    }
+
+    for (const object of info.objects) {
+      this.coverHistory.push({
+        color: normalizeHexColor(color),
+        height: object.height,
+        id: makeStrokeId(),
+        kind: "cover",
+        opacity: 0.36,
+        pageCssHeight: info.overlay.cssHeight,
+        pageCssWidth: info.overlay.cssWidth,
+        pageIndex: info.overlay.pageIndex,
+        saved: false,
+        source: "native-text",
+        width: object.width,
+        x: object.x,
+        y: object.y
+      });
+    }
+
+    this.redoStack = [];
+    this.markDirty();
+    this.redrawOverlay(info.overlay);
+    this.scheduleAutoSave();
+    activeDocument.getSelection()?.removeAllRanges();
+    this.hideNativeTextSelectionMenu();
+  }
+
+  private async copyNativeTextSelectionLink(): Promise<void> {
+    const info = this.nativeTextSelectionInfo;
+    if (!info) {
+      return;
+    }
+
+    const link = buildPdfSelectionWikilink(this.file, info.overlay.pageIndex, info.text);
+    const copied = await writeClipboardText(link);
+    if (copied) {
+      new Notice(uiText("已复制 PDF 文字链接。", "Copied PDF text link."));
+    } else {
+      new Notice(uiText("复制失败。", "Could not copy link."));
+    }
+    activeDocument.getSelection()?.removeAllRanges();
+    this.hideNativeTextSelectionMenu();
   }
 
   private replaceNativeSelectionWithText(selection: PdfNativeObject, overlay: PageOverlay, text: string, backgroundColor: string): void {
@@ -5743,6 +5967,32 @@ function formatElementForMarkdown(element: InkElement): string {
   return `Cover (${element.id}): x=${element.x.toFixed(3)}, y=${element.y.toFixed(3)}, w=${element.width.toFixed(3)}, h=${element.height.toFixed(3)}`;
 }
 
+function rectIntersectionArea(a: DOMRectReadOnly, b: DOMRectReadOnly): number {
+  const left = Math.max(a.left, b.left);
+  const right = Math.min(a.right, b.right);
+  const top = Math.max(a.top, b.top);
+  const bottom = Math.min(a.bottom, b.bottom);
+  return Math.max(0, right - left) * Math.max(0, bottom - top);
+}
+
+function clipRectToBounds(rect: DOMRectReadOnly, bounds: DOMRectReadOnly): { bottom: number; left: number; right: number; top: number } {
+  return {
+    bottom: clamp(rect.bottom, bounds.top, bounds.bottom),
+    left: clamp(rect.left, bounds.left, bounds.right),
+    right: clamp(rect.right, bounds.left, bounds.right),
+    top: clamp(rect.top, bounds.top, bounds.bottom)
+  };
+}
+
+function unionRects(rects: Array<{ bottom: number; left: number; right: number; top: number }>): { bottom: number; left: number; right: number; top: number } {
+  return rects.reduce((union, rect) => ({
+    bottom: Math.max(union.bottom, rect.bottom),
+    left: Math.min(union.left, rect.left),
+    right: Math.max(union.right, rect.right),
+    top: Math.min(union.top, rect.top)
+  }), rects[0]);
+}
+
 function normalizeObsidianLink(raw: string): { embed: boolean; target: string; wikilink: string } | null {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -5759,6 +6009,55 @@ function normalizeObsidianLink(raw: string): { embed: boolean; target: string; w
     target,
     wikilink: match ? trimmed : `[[${target}]]`
   };
+}
+
+function buildPdfSelectionWikilink(file: TFile, pageIndex: number, text: string): string {
+  const target = sanitizeWikilinkTarget(`${file.path}#page=${pageIndex + 1}`);
+  const alias = sanitizeWikilinkAlias(`${truncateForLinkAlias(text)} - ${file.basename}`);
+  return `[[${target}|${alias}]]`;
+}
+
+function sanitizeWikilinkTarget(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/]/g, "");
+}
+
+function sanitizeWikilinkAlias(value: string): string {
+  return value.replace(/\s+/g, " ").replace(/[|\[\]]/g, " ").trim();
+}
+
+function truncateForLinkAlias(value: string): string {
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  return cleaned.length > 96 ? `${cleaned.slice(0, 95)}…` : cleaned;
+}
+
+async function writeClipboardText(value: string): Promise<boolean> {
+  try {
+    if (activeWindow.navigator.clipboard?.writeText) {
+      await activeWindow.navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // Fall back to the legacy copy path below.
+  }
+
+  const textarea = createActiveElement("textarea");
+  textarea.value = value;
+  textarea.setCssStyles({
+    height: "1px",
+    left: "-9999px",
+    opacity: "0",
+    position: "fixed",
+    top: "-9999px",
+    width: "1px"
+  });
+  appendToActiveBody(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    return activeDocument.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
 }
 
 function stripObsidianLinkSyntax(value: string): string {
