@@ -1,4 +1,4 @@
-import { Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import { Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, getLanguage, setIcon } from "obsidian";
 import * as fontkitModule from "@pdf-lib/fontkit";
 import { PDFDocument, degrees, rgb } from "pdf-lib";
 
@@ -24,6 +24,504 @@ const TEXT_FONTS = [
   { labelEn: "Serif", labelZh: "衬线", value: "Georgia, serif" }
 ];
 const TEXT_SELECTION_HIGHLIGHT_COLORS = ["#ffe066", "#ff8787", "#69db7c", "#74c0fc"];
+type PdftionLocale = "ar" | "de" | "en" | "es" | "fr" | "id" | "ja" | "ko" | "pt" | "ru" | "tr" | "vi" | "zh";
+const PDFTION_TRANSLATIONS: Partial<Record<PdftionLocale, Record<string, string>>> = {
+  ar: {
+    "Alpha": "الشفافية",
+    "Cancel": "إلغاء",
+    "Close": "إغلاق",
+    "Color and size": "اللون والحجم",
+    "Confirm": "تأكيد",
+    "Convert docs": "تحويل المستندات",
+    "Copied PDF text link.": "تم نسخ رابط نص PDF.",
+    "Copied PDF text.": "تم نسخ نص PDF.",
+    "Copy PDF link": "نسخ رابط PDF",
+    "Copy text": "نسخ النص",
+    "Could not copy link.": "تعذر نسخ الرابط.",
+    "Could not copy text.": "تعذر نسخ النص.",
+    "Crop": "قص",
+    "Custom color": "لون مخصص",
+    "Custom highlight": "تمييز مخصص",
+    "Delete pages": "حذف الصفحات",
+    "Delete selection/clear annotations": "حذف التحديد/مسح التعليقات",
+    "Eraser": "ممحاة",
+    "Export DOCX": "تصدير DOCX",
+    "Export MD": "تصدير MD",
+    "Export PDF": "تصدير PDF",
+    "Font": "الخط",
+    "Highlight": "تمييز",
+    "Highlighter": "قلم تمييز",
+    "Image": "صورة",
+    "Import PDF": "استيراد PDF",
+    "Insert image": "إدراج صورة",
+    "Insert link": "إدراج رابط",
+    "Loading pages...": "جار تحميل الصفحات...",
+    "Move toolbar": "نقل شريط الأدوات",
+    "Open a PDF first.": "افتح ملف PDF أولا.",
+    "PDF annotation": "تعليقات PDF",
+    "PDF annotation enabled.": "تم تفعيل تعليقات PDF.",
+    "Page/annotation navigator": "تنقل الصفحات/التعليقات",
+    "Pen": "قلم",
+    "Redo": "إعادة",
+    "Reorder": "إعادة ترتيب",
+    "Rotate": "تدوير",
+    "Select": "تحديد",
+    "Share/export": "مشاركة/تصدير",
+    "Size": "الحجم",
+    "Text": "نص",
+    "Undo": "تراجع"
+  },
+  de: {
+    "Alpha": "Deckkraft",
+    "Cancel": "Abbrechen",
+    "Close": "Schließen",
+    "Color and size": "Farbe und Größe",
+    "Confirm": "Bestätigen",
+    "Convert docs": "Dokumente umwandeln",
+    "Copied PDF text link.": "PDF-Textlink kopiert.",
+    "Copied PDF text.": "PDF-Text kopiert.",
+    "Copy PDF link": "PDF-Link kopieren",
+    "Copy text": "Text kopieren",
+    "Could not copy link.": "Link konnte nicht kopiert werden.",
+    "Could not copy text.": "Text konnte nicht kopiert werden.",
+    "Crop": "Zuschneiden",
+    "Custom color": "Eigene Farbe",
+    "Custom highlight": "Eigene Markierung",
+    "Delete pages": "Seiten löschen",
+    "Delete selection/clear annotations": "Auswahl löschen/Anmerkungen leeren",
+    "Eraser": "Radierer",
+    "Export DOCX": "DOCX exportieren",
+    "Export MD": "MD exportieren",
+    "Export PDF": "PDF exportieren",
+    "Font": "Schrift",
+    "Highlight": "Markieren",
+    "Highlighter": "Marker",
+    "Image": "Bild",
+    "Import PDF": "PDF importieren",
+    "Insert image": "Bild einfügen",
+    "Insert link": "Link einfügen",
+    "Loading pages...": "Seiten werden geladen...",
+    "Move toolbar": "Werkzeugleiste verschieben",
+    "Open a PDF first.": "Öffne zuerst ein PDF.",
+    "PDF annotation": "PDF-Anmerkung",
+    "PDF annotation enabled.": "PDF-Anmerkung aktiviert.",
+    "Page/annotation navigator": "Seiten-/Anmerkungsnavigator",
+    "Pen": "Stift",
+    "Redo": "Wiederholen",
+    "Reorder": "Neu anordnen",
+    "Rotate": "Drehen",
+    "Select": "Auswählen",
+    "Share/export": "Teilen/exportieren",
+    "Size": "Größe",
+    "Text": "Text",
+    "Undo": "Rückgängig"
+  },
+  es: {
+    "Alpha": "Opacidad",
+    "Cancel": "Cancelar",
+    "Close": "Cerrar",
+    "Color and size": "Color y tamaño",
+    "Confirm": "Confirmar",
+    "Convert docs": "Convertir documentos",
+    "Copied PDF text link.": "Enlace de texto PDF copiado.",
+    "Copied PDF text.": "Texto PDF copiado.",
+    "Copy PDF link": "Copiar enlace PDF",
+    "Copy text": "Copiar texto",
+    "Could not copy link.": "No se pudo copiar el enlace.",
+    "Could not copy text.": "No se pudo copiar el texto.",
+    "Crop": "Recortar",
+    "Custom color": "Color personalizado",
+    "Custom highlight": "Resaltado personalizado",
+    "Delete pages": "Eliminar páginas",
+    "Delete selection/clear annotations": "Eliminar selección/borrar anotaciones",
+    "Eraser": "Borrador",
+    "Export DOCX": "Exportar DOCX",
+    "Export MD": "Exportar MD",
+    "Export PDF": "Exportar PDF",
+    "Font": "Fuente",
+    "Highlight": "Resaltar",
+    "Highlighter": "Marcador",
+    "Image": "Imagen",
+    "Import PDF": "Importar PDF",
+    "Insert image": "Insertar imagen",
+    "Insert link": "Insertar enlace",
+    "Loading pages...": "Cargando páginas...",
+    "Move toolbar": "Mover barra",
+    "Open a PDF first.": "Abre primero un PDF.",
+    "PDF annotation": "Anotación PDF",
+    "PDF annotation enabled.": "Anotación PDF activada.",
+    "Page/annotation navigator": "Navegador de páginas/anotaciones",
+    "Pen": "Lápiz",
+    "Redo": "Rehacer",
+    "Reorder": "Reordenar",
+    "Rotate": "Rotar",
+    "Select": "Seleccionar",
+    "Share/export": "Compartir/exportar",
+    "Size": "Tamaño",
+    "Text": "Texto",
+    "Undo": "Deshacer"
+  },
+  fr: {
+    "Alpha": "Opacité",
+    "Cancel": "Annuler",
+    "Close": "Fermer",
+    "Color and size": "Couleur et taille",
+    "Confirm": "Confirmer",
+    "Convert docs": "Convertir les documents",
+    "Copied PDF text link.": "Lien du texte PDF copié.",
+    "Copied PDF text.": "Texte PDF copié.",
+    "Copy PDF link": "Copier le lien PDF",
+    "Copy text": "Copier le texte",
+    "Could not copy link.": "Impossible de copier le lien.",
+    "Could not copy text.": "Impossible de copier le texte.",
+    "Crop": "Rogner",
+    "Custom color": "Couleur personnalisée",
+    "Custom highlight": "Surlignage personnalisé",
+    "Delete pages": "Supprimer les pages",
+    "Delete selection/clear annotations": "Supprimer la sélection/effacer les annotations",
+    "Eraser": "Gomme",
+    "Export DOCX": "Exporter DOCX",
+    "Export MD": "Exporter MD",
+    "Export PDF": "Exporter PDF",
+    "Font": "Police",
+    "Highlight": "Surligner",
+    "Highlighter": "Surligneur",
+    "Image": "Image",
+    "Import PDF": "Importer PDF",
+    "Insert image": "Insérer une image",
+    "Insert link": "Insérer un lien",
+    "Loading pages...": "Chargement des pages...",
+    "Move toolbar": "Déplacer la barre",
+    "Open a PDF first.": "Ouvrez d'abord un PDF.",
+    "PDF annotation": "Annotation PDF",
+    "PDF annotation enabled.": "Annotation PDF activée.",
+    "Page/annotation navigator": "Navigation pages/annotations",
+    "Pen": "Stylo",
+    "Redo": "Rétablir",
+    "Reorder": "Réordonner",
+    "Rotate": "Pivoter",
+    "Select": "Sélectionner",
+    "Share/export": "Partager/exporter",
+    "Size": "Taille",
+    "Text": "Texte",
+    "Undo": "Annuler"
+  },
+  id: {
+    "Alpha": "Opasitas",
+    "Cancel": "Batal",
+    "Close": "Tutup",
+    "Color and size": "Warna dan ukuran",
+    "Confirm": "Konfirmasi",
+    "Convert docs": "Konversi dokumen",
+    "Copied PDF text link.": "Tautan teks PDF disalin.",
+    "Copied PDF text.": "Teks PDF disalin.",
+    "Copy PDF link": "Salin tautan PDF",
+    "Copy text": "Salin teks",
+    "Could not copy link.": "Gagal menyalin tautan.",
+    "Could not copy text.": "Gagal menyalin teks.",
+    "Crop": "Pangkas",
+    "Custom color": "Warna khusus",
+    "Custom highlight": "Sorotan khusus",
+    "Delete pages": "Hapus halaman",
+    "Delete selection/clear annotations": "Hapus pilihan/bersihkan anotasi",
+    "Eraser": "Penghapus",
+    "Export DOCX": "Ekspor DOCX",
+    "Export MD": "Ekspor MD",
+    "Export PDF": "Ekspor PDF",
+    "Font": "Font",
+    "Highlight": "Sorot",
+    "Highlighter": "Penyorot",
+    "Image": "Gambar",
+    "Import PDF": "Impor PDF",
+    "Insert image": "Sisipkan gambar",
+    "Insert link": "Sisipkan tautan",
+    "Loading pages...": "Memuat halaman...",
+    "Move toolbar": "Pindahkan bilah alat",
+    "Open a PDF first.": "Buka PDF terlebih dahulu.",
+    "PDF annotation": "Anotasi PDF",
+    "PDF annotation enabled.": "Anotasi PDF aktif.",
+    "Page/annotation navigator": "Navigasi halaman/anotasi",
+    "Pen": "Pena",
+    "Redo": "Ulangi",
+    "Reorder": "Susun ulang",
+    "Rotate": "Putar",
+    "Select": "Pilih",
+    "Share/export": "Bagikan/ekspor",
+    "Size": "Ukuran",
+    "Text": "Teks",
+    "Undo": "Urungkan"
+  },
+  ja: {
+    "Alpha": "不透明度",
+    "Cancel": "キャンセル",
+    "Close": "閉じる",
+    "Color and size": "色とサイズ",
+    "Confirm": "確認",
+    "Convert docs": "文書変換",
+    "Copied PDF text link.": "PDFテキストリンクをコピーしました。",
+    "Copied PDF text.": "PDFテキストをコピーしました。",
+    "Copy PDF link": "PDFリンクをコピー",
+    "Copy text": "テキストをコピー",
+    "Could not copy link.": "リンクをコピーできません。",
+    "Could not copy text.": "テキストをコピーできません。",
+    "Crop": "切り抜き",
+    "Custom color": "カスタム色",
+    "Custom highlight": "カスタムハイライト",
+    "Delete pages": "ページ削除",
+    "Delete selection/clear annotations": "選択削除/注釈クリア",
+    "Eraser": "消しゴム",
+    "Export DOCX": "DOCX出力",
+    "Export MD": "MD出力",
+    "Export PDF": "PDF出力",
+    "Font": "フォント",
+    "Highlight": "ハイライト",
+    "Highlighter": "蛍光ペン",
+    "Image": "画像",
+    "Import PDF": "PDF取り込み",
+    "Insert image": "画像を挿入",
+    "Insert link": "リンクを挿入",
+    "Loading pages...": "ページを読み込み中...",
+    "Move toolbar": "ツールバーを移動",
+    "Open a PDF first.": "先にPDFを開いてください。",
+    "PDF annotation": "PDF注釈",
+    "PDF annotation enabled.": "PDF注釈を有効にしました。",
+    "Page/annotation navigator": "ページ/注釈ナビ",
+    "Pen": "ペン",
+    "Redo": "やり直し",
+    "Reorder": "並べ替え",
+    "Rotate": "回転",
+    "Select": "選択",
+    "Share/export": "共有/出力",
+    "Size": "サイズ",
+    "Text": "テキスト",
+    "Undo": "元に戻す"
+  },
+  ko: {
+    "Alpha": "투명도",
+    "Cancel": "취소",
+    "Close": "닫기",
+    "Color and size": "색상과 크기",
+    "Confirm": "확인",
+    "Convert docs": "문서 변환",
+    "Copied PDF text link.": "PDF 텍스트 링크를 복사했습니다.",
+    "Copied PDF text.": "PDF 텍스트를 복사했습니다.",
+    "Copy PDF link": "PDF 링크 복사",
+    "Copy text": "텍스트 복사",
+    "Could not copy link.": "링크를 복사할 수 없습니다.",
+    "Could not copy text.": "텍스트를 복사할 수 없습니다.",
+    "Crop": "자르기",
+    "Custom color": "사용자 색상",
+    "Custom highlight": "사용자 하이라이트",
+    "Delete pages": "페이지 삭제",
+    "Delete selection/clear annotations": "선택 삭제/주석 지우기",
+    "Eraser": "지우개",
+    "Export DOCX": "DOCX 내보내기",
+    "Export MD": "MD 내보내기",
+    "Export PDF": "PDF 내보내기",
+    "Font": "글꼴",
+    "Highlight": "하이라이트",
+    "Highlighter": "형광펜",
+    "Image": "이미지",
+    "Import PDF": "PDF 가져오기",
+    "Insert image": "이미지 삽입",
+    "Insert link": "링크 삽입",
+    "Loading pages...": "페이지 로드 중...",
+    "Move toolbar": "도구막대 이동",
+    "Open a PDF first.": "먼저 PDF를 여세요.",
+    "PDF annotation": "PDF 주석",
+    "PDF annotation enabled.": "PDF 주석이 켜졌습니다.",
+    "Page/annotation navigator": "페이지/주석 탐색",
+    "Pen": "펜",
+    "Redo": "다시 실행",
+    "Reorder": "재정렬",
+    "Rotate": "회전",
+    "Select": "선택",
+    "Share/export": "공유/내보내기",
+    "Size": "크기",
+    "Text": "텍스트",
+    "Undo": "실행 취소"
+  },
+  pt: {
+    "Alpha": "Opacidade",
+    "Cancel": "Cancelar",
+    "Close": "Fechar",
+    "Color and size": "Cor e tamanho",
+    "Confirm": "Confirmar",
+    "Convert docs": "Converter documentos",
+    "Copied PDF text link.": "Link de texto PDF copiado.",
+    "Copied PDF text.": "Texto PDF copiado.",
+    "Copy PDF link": "Copiar link PDF",
+    "Copy text": "Copiar texto",
+    "Could not copy link.": "Não foi possível copiar o link.",
+    "Could not copy text.": "Não foi possível copiar o texto.",
+    "Crop": "Recortar",
+    "Custom color": "Cor personalizada",
+    "Custom highlight": "Destaque personalizado",
+    "Delete pages": "Excluir páginas",
+    "Delete selection/clear annotations": "Excluir seleção/limpar anotações",
+    "Eraser": "Borracha",
+    "Export DOCX": "Exportar DOCX",
+    "Export MD": "Exportar MD",
+    "Export PDF": "Exportar PDF",
+    "Font": "Fonte",
+    "Highlight": "Destacar",
+    "Highlighter": "Marcador",
+    "Image": "Imagem",
+    "Import PDF": "Importar PDF",
+    "Insert image": "Inserir imagem",
+    "Insert link": "Inserir link",
+    "Loading pages...": "Carregando páginas...",
+    "Move toolbar": "Mover barra",
+    "Open a PDF first.": "Abra um PDF primeiro.",
+    "PDF annotation": "Anotação PDF",
+    "PDF annotation enabled.": "Anotação PDF ativada.",
+    "Page/annotation navigator": "Navegador de páginas/anotações",
+    "Pen": "Caneta",
+    "Redo": "Refazer",
+    "Reorder": "Reordenar",
+    "Rotate": "Girar",
+    "Select": "Selecionar",
+    "Share/export": "Compartilhar/exportar",
+    "Size": "Tamanho",
+    "Text": "Texto",
+    "Undo": "Desfazer"
+  },
+  ru: {
+    "Alpha": "Прозрачность",
+    "Cancel": "Отмена",
+    "Close": "Закрыть",
+    "Color and size": "Цвет и размер",
+    "Confirm": "Подтвердить",
+    "Convert docs": "Конвертировать документы",
+    "Copied PDF text link.": "Ссылка на текст PDF скопирована.",
+    "Copied PDF text.": "Текст PDF скопирован.",
+    "Copy PDF link": "Копировать ссылку PDF",
+    "Copy text": "Копировать текст",
+    "Could not copy link.": "Не удалось скопировать ссылку.",
+    "Could not copy text.": "Не удалось скопировать текст.",
+    "Crop": "Обрезать",
+    "Custom color": "Свой цвет",
+    "Custom highlight": "Своя подсветка",
+    "Delete pages": "Удалить страницы",
+    "Delete selection/clear annotations": "Удалить выбор/очистить аннотации",
+    "Eraser": "Ластик",
+    "Export DOCX": "Экспорт DOCX",
+    "Export MD": "Экспорт MD",
+    "Export PDF": "Экспорт PDF",
+    "Font": "Шрифт",
+    "Highlight": "Подсветить",
+    "Highlighter": "Маркер",
+    "Image": "Изображение",
+    "Import PDF": "Импорт PDF",
+    "Insert image": "Вставить изображение",
+    "Insert link": "Вставить ссылку",
+    "Loading pages...": "Загрузка страниц...",
+    "Move toolbar": "Переместить панель",
+    "Open a PDF first.": "Сначала откройте PDF.",
+    "PDF annotation": "Аннотация PDF",
+    "PDF annotation enabled.": "Аннотация PDF включена.",
+    "Page/annotation navigator": "Навигация страниц/аннотаций",
+    "Pen": "Перо",
+    "Redo": "Повторить",
+    "Reorder": "Переупорядочить",
+    "Rotate": "Повернуть",
+    "Select": "Выбрать",
+    "Share/export": "Поделиться/экспорт",
+    "Size": "Размер",
+    "Text": "Текст",
+    "Undo": "Отменить"
+  },
+  tr: {
+    "Alpha": "Opaklık",
+    "Cancel": "İptal",
+    "Close": "Kapat",
+    "Color and size": "Renk ve boyut",
+    "Confirm": "Onayla",
+    "Convert docs": "Belgeleri dönüştür",
+    "Copied PDF text link.": "PDF metin bağlantısı kopyalandı.",
+    "Copied PDF text.": "PDF metni kopyalandı.",
+    "Copy PDF link": "PDF bağlantısını kopyala",
+    "Copy text": "Metni kopyala",
+    "Could not copy link.": "Bağlantı kopyalanamadı.",
+    "Could not copy text.": "Metin kopyalanamadı.",
+    "Crop": "Kırp",
+    "Custom color": "Özel renk",
+    "Custom highlight": "Özel vurgulama",
+    "Delete pages": "Sayfaları sil",
+    "Delete selection/clear annotations": "Seçimi sil/notları temizle",
+    "Eraser": "Silgi",
+    "Export DOCX": "DOCX dışa aktar",
+    "Export MD": "MD dışa aktar",
+    "Export PDF": "PDF dışa aktar",
+    "Font": "Yazı tipi",
+    "Highlight": "Vurgula",
+    "Highlighter": "Fosforlu kalem",
+    "Image": "Görsel",
+    "Import PDF": "PDF içe aktar",
+    "Insert image": "Görsel ekle",
+    "Insert link": "Bağlantı ekle",
+    "Loading pages...": "Sayfalar yükleniyor...",
+    "Move toolbar": "Araç çubuğunu taşı",
+    "Open a PDF first.": "Önce bir PDF açın.",
+    "PDF annotation": "PDF notu",
+    "PDF annotation enabled.": "PDF notu etkin.",
+    "Page/annotation navigator": "Sayfa/not gezgini",
+    "Pen": "Kalem",
+    "Redo": "Yinele",
+    "Reorder": "Yeniden sırala",
+    "Rotate": "Döndür",
+    "Select": "Seç",
+    "Share/export": "Paylaş/dışa aktar",
+    "Size": "Boyut",
+    "Text": "Metin",
+    "Undo": "Geri al"
+  },
+  vi: {
+    "Alpha": "Độ mờ",
+    "Cancel": "Hủy",
+    "Close": "Đóng",
+    "Color and size": "Màu và cỡ",
+    "Confirm": "Xác nhận",
+    "Convert docs": "Chuyển đổi tài liệu",
+    "Copied PDF text link.": "Đã sao chép liên kết văn bản PDF.",
+    "Copied PDF text.": "Đã sao chép văn bản PDF.",
+    "Copy PDF link": "Sao chép liên kết PDF",
+    "Copy text": "Sao chép văn bản",
+    "Could not copy link.": "Không thể sao chép liên kết.",
+    "Could not copy text.": "Không thể sao chép văn bản.",
+    "Crop": "Cắt",
+    "Custom color": "Màu tùy chỉnh",
+    "Custom highlight": "Tô sáng tùy chỉnh",
+    "Delete pages": "Xóa trang",
+    "Delete selection/clear annotations": "Xóa lựa chọn/xóa chú thích",
+    "Eraser": "Tẩy",
+    "Export DOCX": "Xuất DOCX",
+    "Export MD": "Xuất MD",
+    "Export PDF": "Xuất PDF",
+    "Font": "Phông",
+    "Highlight": "Tô sáng",
+    "Highlighter": "Bút tô sáng",
+    "Image": "Ảnh",
+    "Import PDF": "Nhập PDF",
+    "Insert image": "Chèn ảnh",
+    "Insert link": "Chèn liên kết",
+    "Loading pages...": "Đang tải trang...",
+    "Move toolbar": "Di chuyển thanh công cụ",
+    "Open a PDF first.": "Mở PDF trước.",
+    "PDF annotation": "Chú thích PDF",
+    "PDF annotation enabled.": "Đã bật chú thích PDF.",
+    "Page/annotation navigator": "Điều hướng trang/chú thích",
+    "Pen": "Bút",
+    "Redo": "Làm lại",
+    "Reorder": "Sắp xếp lại",
+    "Rotate": "Xoay",
+    "Select": "Chọn",
+    "Share/export": "Chia sẻ/xuất",
+    "Size": "Cỡ",
+    "Text": "Văn bản",
+    "Undo": "Hoàn tác"
+  }
+};
 const NATIVE_TEXT_SELECTION_DESKTOP_LIMITS = {
   clearExcessive: false,
   maxAreaRatio: 0.45,
@@ -47,17 +545,85 @@ const DEFAULT_SETTINGS: PdftionSettings = {
   openBurnedPdfAfterExport: true
 };
 
-function isChineseUi(): boolean {
-  const languages = new Set<string>();
-  languages.add(activeWindow.navigator.language);
-  for (const language of activeWindow.navigator.languages ?? []) {
-    languages.add(language);
+function normalizePdftionLocale(language: string): PdftionLocale | null {
+  const normalized = language.toLowerCase().replace("_", "-").trim();
+  if (!normalized) {
+    return null;
   }
-  return Array.from(languages).some((language) => /^zh\b|中文|cn/i.test(language));
+  if (normalized.startsWith("zh") || normalized.includes("中文")) {
+    return "zh";
+  }
+  if (normalized.startsWith("ja") || normalized.startsWith("jp")) {
+    return "ja";
+  }
+  if (normalized.startsWith("ko")) {
+    return "ko";
+  }
+  if (normalized.startsWith("es")) {
+    return "es";
+  }
+  if (normalized.startsWith("fr")) {
+    return "fr";
+  }
+  if (normalized.startsWith("de")) {
+    return "de";
+  }
+  if (normalized.startsWith("ru")) {
+    return "ru";
+  }
+  if (normalized.startsWith("pt")) {
+    return "pt";
+  }
+  if (normalized.startsWith("tr")) {
+    return "tr";
+  }
+  if (normalized.startsWith("ar")) {
+    return "ar";
+  }
+  if (normalized.startsWith("id") || normalized.startsWith("in")) {
+    return "id";
+  }
+  if (normalized.startsWith("vi")) {
+    return "vi";
+  }
+  if (normalized.startsWith("en")) {
+    return "en";
+  }
+  return null;
+}
+
+function getPdftionLocale(): PdftionLocale {
+  const languages: string[] = [];
+  try {
+    languages.push(getLanguage());
+  } catch {
+    // Fall back to browser language when Obsidian language is unavailable.
+  }
+  languages.push(activeWindow.navigator.language);
+  languages.push(...(activeWindow.navigator.languages ?? []));
+
+  for (const language of languages) {
+    const locale = normalizePdftionLocale(language);
+    if (locale) {
+      return locale;
+    }
+  }
+  return "en";
+}
+
+function isChineseUi(): boolean {
+  return getPdftionLocale() === "zh";
 }
 
 function uiText(zh: string, en: string): string {
-  return isChineseUi() ? zh : en;
+  const locale = getPdftionLocale();
+  if (locale === "zh") {
+    return zh;
+  }
+  if (locale === "en") {
+    return en;
+  }
+  return PDFTION_TRANSLATIONS[locale]?.[en] ?? en;
 }
 
 function toArrayBufferCopy(bytes: Uint8Array): ArrayBuffer {

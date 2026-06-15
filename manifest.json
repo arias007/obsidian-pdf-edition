@@ -1,7 +1,7 @@
 {
   "id": "pdftion",
   "name": "Pdftion",
-  "version": "0.3.32",
+  "version": "0.3.33",
   "minAppVersion": "1.8.0",
   "description": "AI-open PDF annotation, editing, export, and note integration tools.",
   "author": "Murat / Codex",

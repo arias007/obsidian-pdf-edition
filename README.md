@@ -15,7 +15,7 @@ The plugin is designed for quick annotation inside a note vault: open a PDF, pre
 - Use an icon-first toolbar and palette that works across language environments.
 - Select native PDF text to show an icon-only quick menu for text highlighting and copying a note link.
 - Copy a page-aware wiki link whose alias contains the selected text and PDF name.
-- Auto-detect the interface language and show Chinese or English notices without a manual language switch.
+- Auto-detect the interface language from Obsidian and localize common tooltips, buttons, and notices across multiple languages, with English fallback.
 - Attach the annotation button to normal PDF views and embedded PDF previews where possible.
 - Save editable annotation data automatically without modifying the source PDF on every stroke.
 - Export a visible burned-in PDF copy for sharing.
