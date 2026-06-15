@@ -6170,7 +6170,7 @@ function sanitizeWikilinkTarget(value: string): string {
 }
 
 function sanitizeWikilinkAlias(value: string): string {
-  return value.replace(/\s+/g, " ").replace(/[|\[\]]/g, " ").trim();
+  return value.replace(/\s+/g, " ").replaceAll("|", " ").replaceAll("[", " ").replaceAll("]", " ").trim();
 }
 
 function truncateForLinkAlias(value: string): string {
@@ -6185,27 +6185,9 @@ async function writeClipboardText(value: string): Promise<boolean> {
       return true;
     }
   } catch {
-    // Fall back to the legacy copy path below.
+    return false;
   }
-
-  const textarea = createActiveElement("textarea");
-  textarea.value = value;
-  textarea.setCssStyles({
-    height: "1px",
-    left: "-9999px",
-    opacity: "0",
-    position: "fixed",
-    top: "-9999px",
-    width: "1px"
-  });
-  appendToActiveBody(textarea);
-  textarea.focus();
-  textarea.select();
-  try {
-    return activeDocument.execCommand("copy");
-  } finally {
-    textarea.remove();
-  }
+  return false;
 }
 
 function stripObsidianLinkSyntax(value: string): string {
