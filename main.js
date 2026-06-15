@@ -52133,7 +52133,7 @@ var TEXT_FONTS = [
   { labelEn: "Mono", labelZh: "\u7B49\u5BBD", value: "Consolas, monospace" },
   { labelEn: "Serif", labelZh: "\u886C\u7EBF", value: "Georgia, serif" }
 ];
-var TEXT_SELECTION_HIGHLIGHT_COLORS = ["#ffe066", "#ffd43b", "#ff8787", "#69db7c", "#74c0fc"];
+var TEXT_SELECTION_HIGHLIGHT_COLORS = ["#ffe066", "#ff8787", "#69db7c", "#74c0fc"];
 function isChineseUi() {
   const languages = /* @__PURE__ */ new Set();
   languages.add(activeWindow.navigator.language);
@@ -52798,6 +52798,7 @@ var InkSession = class {
   highlightColor = "#fab005";
   highlightOpacity = 0.36;
   highlightWidth = 9;
+  nativeTextHighlightColor = "#ffd43b";
   destroy() {
     this.flushSoon();
     this.clearAutoSaveTimer();
@@ -53892,16 +53893,17 @@ var InkSession = class {
     }
     let best = null;
     for (const overlay of this.overlays.values()) {
-      const pageRect = overlay.pageEl.getBoundingClientRect();
+      const canvasRect = overlay.canvas.getBoundingClientRect();
+      const overlayRect = canvasRect.width > 0 && canvasRect.height > 0 ? canvasRect : overlay.pageEl.getBoundingClientRect();
       const rects = [];
       let score = 0;
       for (const range3 of ranges) {
         for (const rect of Array.from(range3.getClientRects())) {
-          const area = rectIntersectionArea(rect, pageRect);
+          const area = rectIntersectionArea(rect, overlayRect);
           if (area < 4) {
             continue;
           }
-          const clipped = clipRectToBounds(rect, pageRect);
+          const clipped = clipRectToBounds(rect, overlayRect);
           if (clipped.right - clipped.left < 2 || clipped.bottom - clipped.top < 2) {
             continue;
           }
@@ -53913,15 +53915,17 @@ var InkSession = class {
         continue;
       }
       const union = unionRects(rects);
+      const normalizedWidth = Math.max(1, overlayRect.width);
+      const normalizedHeight = Math.max(1, overlayRect.height);
       const objects = rects.map((rect, index) => ({
-        height: clamp((rect.bottom - rect.top) / Math.max(1, overlay.cssHeight), 1e-3, 1),
+        height: clamp((rect.bottom - rect.top) / normalizedHeight, 1e-3, 1),
         id: `native-text-selection-${overlay.pageIndex}-${index}`,
         kind: "text",
         pageIndex: overlay.pageIndex,
         text,
-        width: clamp((rect.right - rect.left) / Math.max(1, overlay.cssWidth), 1e-3, 1),
-        x: clamp((rect.left - pageRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
-        y: clamp((rect.top - pageRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
+        width: clamp((rect.right - rect.left) / normalizedWidth, 1e-3, 1),
+        x: clamp((rect.left - overlayRect.left) / normalizedWidth, 0, 1),
+        y: clamp((rect.top - overlayRect.top) / normalizedHeight, 0, 1)
       }));
       best = { objects, overlay, rect: union, score };
     }
@@ -53937,6 +53941,8 @@ var InkSession = class {
       event.stopPropagation();
     });
     panel.addEventListener("click", (event) => event.stopPropagation());
+    const colorRow = activeDocument.createElement("div");
+    colorRow.className = "pdftion-native-selection-colors";
     for (const color of TEXT_SELECTION_HIGHLIGHT_COLORS) {
       const button = activeDocument.createElement("button");
       button.className = "pdftion-native-selection-color";
@@ -53948,15 +53954,40 @@ var InkSession = class {
       swatch.setAttribute("aria-hidden", "true");
       button.appendChild(swatch);
       button.addEventListener("click", () => this.applyNativeTextHighlight(color));
-      panel.appendChild(button);
+      colorRow.appendChild(button);
     }
+    colorRow.appendChild(this.createNativeTextAdvancedColorButton());
+    panel.appendChild(colorRow);
+    const actionRow = activeDocument.createElement("div");
+    actionRow.className = "pdftion-native-selection-actions";
     const copyLink = createIconButton("copy", uiText("\u590D\u5236 OB \u94FE\u63A5", "Copy note link"));
     copyLink.classList.add("pdftion-native-selection-copy");
     copyLink.addEventListener("click", () => void this.copyNativeTextSelectionLink());
-    panel.appendChild(copyLink);
+    actionRow.appendChild(copyLink);
+    panel.appendChild(actionRow);
     appendToActiveBody(panel);
     this.nativeTextSelectionMenu = panel;
     this.positionNativeTextSelectionMenu(info, panel);
+  }
+  createNativeTextAdvancedColorButton() {
+    const button = activeDocument.createElement("button");
+    button.className = "pdftion-native-selection-color pdftion-native-selection-color-advanced";
+    button.type = "button";
+    button.title = uiText("\u81EA\u5B9A\u4E49\u9AD8\u4EAE", "Custom highlight");
+    button.setAttribute("aria-label", uiText("\u81EA\u5B9A\u4E49\u9AD8\u4EAE", "Custom highlight"));
+    button.setCssProps({ "--pdftion-selection-current-color": normalizeHexColor(this.nativeTextHighlightColor) });
+    const input = activeDocument.createElement("input");
+    input.type = "color";
+    input.value = normalizeHexColor(this.nativeTextHighlightColor);
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("input", () => {
+      const color = normalizeHexColor(input.value);
+      this.nativeTextHighlightColor = color;
+      this.applyNativeTextHighlight(color);
+    });
+    button.addEventListener("click", () => input.click());
+    button.appendChild(input);
+    return button;
   }
   positionNativeTextSelectionMenu(info, panel) {
     panel.setCssStyles({
@@ -53985,6 +54016,7 @@ var InkSession = class {
     if (!info) {
       return;
     }
+    this.nativeTextHighlightColor = normalizeHexColor(color);
     for (const object of info.objects) {
       this.coverHistory.push({
         color: normalizeHexColor(color),

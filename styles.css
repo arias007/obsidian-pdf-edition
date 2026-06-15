@@ -224,10 +224,19 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   border-radius: 6px;
   box-shadow: var(--shadow-s);
   display: flex;
-  gap: 4px;
+  flex-direction: column;
+  gap: 5px;
   padding: 5px;
   position: fixed;
   z-index: 2147483605;
+}
+
+.pdftion-native-selection-colors,
+.pdftion-native-selection-actions {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  justify-content: center;
 }
 
 .pdftion-native-selection-menu button {
@@ -256,9 +265,48 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   width: 18px;
 }
 
+.pdftion-native-selection-color-advanced {
+  background: var(--background-secondary);
+  overflow: hidden;
+  position: relative;
+}
+
+.pdftion-native-selection-color-advanced input[type="color"] {
+  border: 0;
+  cursor: pointer;
+  height: 100%;
+  inset: 0;
+  opacity: 0;
+  padding: 0;
+  position: absolute;
+  width: 100%;
+}
+
+.pdftion-native-selection-color-advanced::before {
+  background: conic-gradient(#e03131, #fab005, #2f9e44, #1971c2, #7048e8, #c2255c, #e03131);
+  border-radius: 50%;
+  content: "";
+  height: 18px;
+  width: 18px;
+}
+
+.pdftion-native-selection-color-advanced::after {
+  background: var(--pdftion-selection-current-color, #ffd43b);
+  border: 1px solid var(--background-primary);
+  border-radius: 50%;
+  bottom: 3px;
+  content: "";
+  height: 8px;
+  pointer-events: none;
+  position: absolute;
+  right: 3px;
+  width: 8px;
+}
+
 .pdftion-native-selection-copy {
   border-radius: 6px;
   color: var(--text-normal);
+  width: 88px;
 }
 
 .pdftion-panel {

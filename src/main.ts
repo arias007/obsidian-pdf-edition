@@ -23,7 +23,7 @@ const TEXT_FONTS = [
   { labelEn: "Mono", labelZh: "等宽", value: "Consolas, monospace" },
   { labelEn: "Serif", labelZh: "衬线", value: "Georgia, serif" }
 ];
-const TEXT_SELECTION_HIGHLIGHT_COLORS = ["#ffe066", "#ffd43b", "#ff8787", "#69db7c", "#74c0fc"];
+const TEXT_SELECTION_HIGHLIGHT_COLORS = ["#ffe066", "#ff8787", "#69db7c", "#74c0fc"];
 
 function isChineseUi(): boolean {
   const languages = new Set<string>();
@@ -1034,6 +1034,7 @@ class InkSession {
   private highlightColor = "#fab005";
   private highlightOpacity = 0.36;
   private highlightWidth = 9;
+  private nativeTextHighlightColor = "#ffd43b";
 
   constructor(
     private plugin: PdftionPlugin,
@@ -2358,17 +2359,18 @@ class InkSession {
 
     let best: { objects: PdfNativeObject[]; overlay: PageOverlay; rect: NativeTextSelectionInfo["rect"]; score: number } | null = null;
     for (const overlay of this.overlays.values()) {
-      const pageRect = overlay.pageEl.getBoundingClientRect();
+      const canvasRect = overlay.canvas.getBoundingClientRect();
+      const overlayRect = canvasRect.width > 0 && canvasRect.height > 0 ? canvasRect : overlay.pageEl.getBoundingClientRect();
       const rects: Array<{ bottom: number; left: number; right: number; top: number }> = [];
       let score = 0;
 
       for (const range of ranges) {
         for (const rect of Array.from(range.getClientRects())) {
-          const area = rectIntersectionArea(rect, pageRect);
+          const area = rectIntersectionArea(rect, overlayRect);
           if (area < 4) {
             continue;
           }
-          const clipped = clipRectToBounds(rect, pageRect);
+          const clipped = clipRectToBounds(rect, overlayRect);
           if (clipped.right - clipped.left < 2 || clipped.bottom - clipped.top < 2) {
             continue;
           }
@@ -2382,15 +2384,17 @@ class InkSession {
       }
 
       const union = unionRects(rects);
+      const normalizedWidth = Math.max(1, overlayRect.width);
+      const normalizedHeight = Math.max(1, overlayRect.height);
       const objects = rects.map((rect, index): PdfNativeObject => ({
-        height: clamp((rect.bottom - rect.top) / Math.max(1, overlay.cssHeight), 0.001, 1),
+        height: clamp((rect.bottom - rect.top) / normalizedHeight, 0.001, 1),
         id: `native-text-selection-${overlay.pageIndex}-${index}`,
         kind: "text",
         pageIndex: overlay.pageIndex,
         text,
-        width: clamp((rect.right - rect.left) / Math.max(1, overlay.cssWidth), 0.001, 1),
-        x: clamp((rect.left - pageRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
-        y: clamp((rect.top - pageRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
+        width: clamp((rect.right - rect.left) / normalizedWidth, 0.001, 1),
+        x: clamp((rect.left - overlayRect.left) / normalizedWidth, 0, 1),
+        y: clamp((rect.top - overlayRect.top) / normalizedHeight, 0, 1)
       }));
 
       best = { objects, overlay, rect: union, score };
@@ -2411,6 +2415,8 @@ class InkSession {
     });
     panel.addEventListener("click", (event: MouseEvent) => event.stopPropagation());
 
+    const colorRow = activeDocument.createElement("div");
+    colorRow.className = "pdftion-native-selection-colors";
     for (const color of TEXT_SELECTION_HIGHLIGHT_COLORS) {
       const button = activeDocument.createElement("button");
       button.className = "pdftion-native-selection-color";
@@ -2422,17 +2428,45 @@ class InkSession {
       swatch.setAttribute("aria-hidden", "true");
       button.appendChild(swatch);
       button.addEventListener("click", () => this.applyNativeTextHighlight(color));
-      panel.appendChild(button);
+      colorRow.appendChild(button);
     }
+    colorRow.appendChild(this.createNativeTextAdvancedColorButton());
+    panel.appendChild(colorRow);
 
+    const actionRow = activeDocument.createElement("div");
+    actionRow.className = "pdftion-native-selection-actions";
     const copyLink = createIconButton("copy", uiText("复制 OB 链接", "Copy note link"));
     copyLink.classList.add("pdftion-native-selection-copy");
     copyLink.addEventListener("click", () => void this.copyNativeTextSelectionLink());
-    panel.appendChild(copyLink);
+    actionRow.appendChild(copyLink);
+    panel.appendChild(actionRow);
 
     appendToActiveBody(panel);
     this.nativeTextSelectionMenu = panel;
     this.positionNativeTextSelectionMenu(info, panel);
+  }
+
+  private createNativeTextAdvancedColorButton(): HTMLElement {
+    const button = activeDocument.createElement("button");
+    button.className = "pdftion-native-selection-color pdftion-native-selection-color-advanced";
+    button.type = "button";
+    button.title = uiText("自定义高亮", "Custom highlight");
+    button.setAttribute("aria-label", uiText("自定义高亮", "Custom highlight"));
+    button.setCssProps({ "--pdftion-selection-current-color": normalizeHexColor(this.nativeTextHighlightColor) });
+
+    const input = activeDocument.createElement("input");
+    input.type = "color";
+    input.value = normalizeHexColor(this.nativeTextHighlightColor);
+    input.addEventListener("click", (event: MouseEvent) => event.stopPropagation());
+    input.addEventListener("input", () => {
+      const color = normalizeHexColor(input.value);
+      this.nativeTextHighlightColor = color;
+      this.applyNativeTextHighlight(color);
+    });
+    button.addEventListener("click", () => input.click());
+    button.appendChild(input);
+
+    return button;
   }
 
   private positionNativeTextSelectionMenu(info: NativeTextSelectionInfo, panel: HTMLElement): void {
@@ -2466,6 +2500,7 @@ class InkSession {
       return;
     }
 
+    this.nativeTextHighlightColor = normalizeHexColor(color);
     for (const object of info.objects) {
       this.coverHistory.push({
         color: normalizeHexColor(color),
