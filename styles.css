@@ -29,56 +29,6 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   margin: 6px 0 12px;
 }
 
-.pdftion-payment-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  margin: 12px 0 4px;
-}
-
-.pdftion-payment-card {
-  align-items: center;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 190px;
-  padding: 12px;
-}
-
-.pdftion-payment-title {
-  color: var(--text-normal);
-  font-weight: 600;
-}
-
-.pdftion-payment-image {
-  aspect-ratio: 1;
-  border-radius: 6px;
-  max-height: 168px;
-  max-width: 168px;
-  object-fit: contain;
-  width: 100%;
-}
-
-.pdftion-payment-placeholder {
-  align-items: center;
-  color: var(--text-muted);
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  font-size: var(--font-ui-small);
-  gap: 8px;
-  justify-content: center;
-  min-height: 130px;
-  text-align: center;
-}
-
-.pdftion-payment-placeholder svg {
-  height: 34px;
-  width: 34px;
-}
-
 .pdftion-inline-actions {
   align-items: center;
   background: var(--background-primary);
