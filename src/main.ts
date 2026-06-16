@@ -2911,6 +2911,9 @@ class InkSession {
   }
 
   private getCurrentPaletteColor(): string {
+    if (this.hasEditableSelection()) {
+      return this.getSelectedPaletteColor();
+    }
     if (this.tool === "highlight") {
       return normalizeHexColor(this.highlightColor);
     }
@@ -2921,6 +2924,9 @@ class InkSession {
   }
 
   private getPaletteColorForTarget(target: string | undefined): string {
+    if (target === "selection") {
+      return this.getSelectedPaletteColor();
+    }
     if (target === "highlight") {
       return normalizeHexColor(this.highlightColor);
     }
@@ -2937,7 +2943,9 @@ class InkSession {
       this.selectionDrag = null;
       this.nativeSelection = null;
       this.pendingImageCrop = null;
-      this.selectedStrokeIds.clear();
+      if (tool === "eraser" || tool === "cover") {
+        this.selectedStrokeIds.clear();
+      }
       this.redrawAll();
     }
     if (tool === "select" || tool === "image-crop") {
@@ -3150,9 +3158,9 @@ class InkSession {
     }
 
     const tool = this.tool;
-    const drawingTool = tool === "pen" || tool === "highlight";
     if (
-      !drawingTool &&
+      tool !== "eraser" &&
+      tool !== "cover" &&
       this.hasEditableSelection(overlay.pageIndex) &&
       (this.findSelectionHandleAt(overlay, point) || this.selectionBoxContainsPoint(overlay, point))
     ) {
@@ -3160,7 +3168,7 @@ class InkSession {
       return;
     }
 
-    if (hitElement && !drawingTool && tool !== "eraser" && tool !== "cover") {
+    if (hitElement && tool !== "eraser" && tool !== "cover") {
       this.beginSelectionInteraction(point, overlay);
       return;
     }
@@ -3921,7 +3929,9 @@ class InkSession {
     panel.addEventListener("pointerdown", (event: PointerEvent) => event.stopPropagation());
     panel.addEventListener("click", (event: MouseEvent) => event.stopPropagation());
 
-    if (this.tool === "eraser") {
+    if (this.hasEditableSelection()) {
+      panel.appendChild(this.createPaletteSelectionGroup());
+    } else if (this.tool === "eraser") {
       panel.appendChild(
         this.createPaletteRange(uiText("橡皮", "Eraser"), "eraser", "pdftion-width-eraser", 2, 120, 1, this.eraserWidth, (value) => {
           this.eraserWidth = value;
@@ -3946,18 +3956,6 @@ class InkSession {
     const button = this.toolbar?.querySelector<HTMLElement>(".pdftion-palette-button");
     const gap = 8;
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + gap);
-
-    if (isTouchLikeViewport()) {
-      panel.classList.add("is-mobile-bottom");
-      panel.setCssStyles({
-        bottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
-        left: "50%",
-        right: "auto",
-        top: "auto",
-        transform: "translateX(-50%)"
-      });
-      return;
-    }
 
     panel.classList.remove("is-mobile-bottom");
     panel.setCssStyles({
@@ -4083,7 +4081,29 @@ class InkSession {
     button.setAttribute("aria-label", title);
   }
 
-  private createPaletteColorButton(swatch: string, target: "pen" | "highlight" | "text"): HTMLElement {
+  private createPaletteSelectionGroup(): HTMLElement {
+    const group = activeDocument.createElement("div");
+    group.className = "pdftion-palette-group";
+    group.setAttribute("aria-label", uiText("选中元素", "Selection"));
+    group.title = uiText("选中元素", "Selection");
+
+    const colorRow = activeDocument.createElement("div");
+    colorRow.className = "pdftion-palette-colors";
+    for (const swatch of PALETTE_COLORS) {
+      const colorButton = this.createPaletteColorButton(swatch, "selection");
+      colorButton.addEventListener("click", () => {
+        this.setSelectedPaletteColor(swatch);
+        this.updateToolbarState();
+      });
+      colorRow.appendChild(colorButton);
+    }
+    colorRow.appendChild(this.createAdvancedColorInput("selection", this.getSelectedPaletteColor(), (color) => this.setSelectedPaletteColor(color)));
+    group.appendChild(colorRow);
+
+    return group;
+  }
+
+  private createPaletteColorButton(swatch: string, target: "pen" | "highlight" | "text" | "selection"): HTMLElement {
     const colorButton = activeDocument.createElement("button");
     colorButton.className = "pdftion-color";
     colorButton.dataset.color = swatch;
@@ -4102,7 +4122,7 @@ class InkSession {
     return colorButton;
   }
 
-  private createAdvancedColorInput(target: "pen" | "highlight" | "text", value: string, onInput: (color: string) => void): HTMLElement {
+  private createAdvancedColorInput(target: "pen" | "highlight" | "text" | "selection", value: string, onInput: (color: string) => void): HTMLElement {
     const row = activeDocument.createElement("button");
     row.className = "pdftion-color pdftion-color-advanced";
     row.dataset.target = target;
@@ -4722,6 +4742,32 @@ class InkSession {
     } else {
       this.penColor = color;
     }
+  }
+
+  private getSelectedPaletteColor(): string {
+    const selected = this.getSelectedEditableElements();
+    const colored = selected.find((element): element is InkStroke | InkText | InkCover => "color" in element);
+    return normalizeHexColor(colored?.color ?? this.penColor);
+  }
+
+  private setSelectedPaletteColor(color: string): void {
+    color = normalizeHexColor(color);
+    let changed = false;
+    for (const element of this.getSelectedEditableElements()) {
+      if (!("color" in element) || normalizeHexColor(element.color) === color) {
+        continue;
+      }
+      element.color = color;
+      element.saved = false;
+      changed = true;
+    }
+    if (!changed) {
+      return;
+    }
+    this.redoStack = [];
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
   }
 
   private getToolOpacity(tool: "pen" | "highlight"): number {
@@ -7931,32 +7977,6 @@ function drawStroke(
   ctx.stroke();
   ctx.restore();
 
-  if (selected) {
-    drawSelectionBox(ctx, stroke, cssWidth, cssHeight);
-  }
-}
-
-function drawSelectionBox(ctx: CanvasRenderingContext2D, stroke: InkStroke, cssWidth: number, cssHeight: number): void {
-  const box = strokeBounds(stroke, cssWidth, cssHeight);
-  if (!box) {
-    return;
-  }
-
-  const pad = Math.max(8, stroke.width * 1.8);
-  const x = Math.max(0, box.minX - pad);
-  const y = Math.max(0, box.minY - pad);
-  const width = Math.min(cssWidth - x, box.maxX - box.minX + pad * 2);
-  const height = Math.min(cssHeight - y, box.maxY - box.minY + pad * 2);
-
-  ctx.save();
-  ctx.globalAlpha = 1;
-  ctx.strokeStyle = "#228be6";
-  ctx.fillStyle = "rgba(34, 139, 230, 0.08)";
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 4]);
-  ctx.fillRect(x, y, width, height);
-  ctx.strokeRect(x, y, width, height);
-  ctx.restore();
 }
 
 function drawTextElement(ctx: CanvasRenderingContext2D, text: InkText, cssWidth: number, cssHeight: number, selected = false): void {

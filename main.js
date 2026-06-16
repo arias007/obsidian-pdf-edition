@@ -54363,6 +54363,9 @@ var InkSession = class {
     });
   }
   getCurrentPaletteColor() {
+    if (this.hasEditableSelection()) {
+      return this.getSelectedPaletteColor();
+    }
     if (this.tool === "highlight") {
       return normalizeHexColor(this.highlightColor);
     }
@@ -54372,6 +54375,9 @@ var InkSession = class {
     return normalizeHexColor(this.penColor);
   }
   getPaletteColorForTarget(target) {
+    if (target === "selection") {
+      return this.getSelectedPaletteColor();
+    }
     if (target === "highlight") {
       return normalizeHexColor(this.highlightColor);
     }
@@ -54387,7 +54393,9 @@ var InkSession = class {
       this.selectionDrag = null;
       this.nativeSelection = null;
       this.pendingImageCrop = null;
-      this.selectedStrokeIds.clear();
+      if (tool === "eraser" || tool === "cover") {
+        this.selectedStrokeIds.clear();
+      }
       this.redrawAll();
     }
     if (tool === "select" || tool === "image-crop") {
@@ -54583,12 +54591,11 @@ var InkSession = class {
       return;
     }
     const tool = this.tool;
-    const drawingTool = tool === "pen" || tool === "highlight";
-    if (!drawingTool && this.hasEditableSelection(overlay.pageIndex) && (this.findSelectionHandleAt(overlay, point) || this.selectionBoxContainsPoint(overlay, point))) {
+    if (tool !== "eraser" && tool !== "cover" && this.hasEditableSelection(overlay.pageIndex) && (this.findSelectionHandleAt(overlay, point) || this.selectionBoxContainsPoint(overlay, point))) {
       this.beginSelectionInteraction(point, overlay);
       return;
     }
-    if (hitElement && !drawingTool && tool !== "eraser" && tool !== "cover") {
+    if (hitElement && tool !== "eraser" && tool !== "cover") {
       this.beginSelectionInteraction(point, overlay);
       return;
     }
@@ -55272,7 +55279,9 @@ var InkSession = class {
     panel.className = "pdftion-palette-panel";
     panel.addEventListener("pointerdown", (event) => event.stopPropagation());
     panel.addEventListener("click", (event) => event.stopPropagation());
-    if (this.tool === "eraser") {
+    if (this.hasEditableSelection()) {
+      panel.appendChild(this.createPaletteSelectionGroup());
+    } else if (this.tool === "eraser") {
       panel.appendChild(
         this.createPaletteRange(uiText("\u6A61\u76AE", "Eraser"), "eraser", "pdftion-width-eraser", 2, 120, 1, this.eraserWidth, (value) => {
           this.eraserWidth = value;
@@ -55296,17 +55305,6 @@ var InkSession = class {
     const button = this.toolbar?.querySelector(".pdftion-palette-button");
     const gap = 8;
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + gap);
-    if (isTouchLikeViewport()) {
-      panel.classList.add("is-mobile-bottom");
-      panel.setCssStyles({
-        bottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
-        left: "50%",
-        right: "auto",
-        top: "auto",
-        transform: "translateX(-50%)"
-      });
-      return;
-    }
     panel.classList.remove("is-mobile-bottom");
     panel.setCssStyles({
       bottom: "auto",
@@ -55414,6 +55412,25 @@ var InkSession = class {
     const title2 = `${uiText("\u5B57\u4F53", "Font")}: ${uiText(font.labelZh, font.labelEn)}`;
     button.title = title2;
     button.setAttribute("aria-label", title2);
+  }
+  createPaletteSelectionGroup() {
+    const group = activeDocument.createElement("div");
+    group.className = "pdftion-palette-group";
+    group.setAttribute("aria-label", uiText("\u9009\u4E2D\u5143\u7D20", "Selection"));
+    group.title = uiText("\u9009\u4E2D\u5143\u7D20", "Selection");
+    const colorRow = activeDocument.createElement("div");
+    colorRow.className = "pdftion-palette-colors";
+    for (const swatch of PALETTE_COLORS) {
+      const colorButton = this.createPaletteColorButton(swatch, "selection");
+      colorButton.addEventListener("click", () => {
+        this.setSelectedPaletteColor(swatch);
+        this.updateToolbarState();
+      });
+      colorRow.appendChild(colorButton);
+    }
+    colorRow.appendChild(this.createAdvancedColorInput("selection", this.getSelectedPaletteColor(), (color) => this.setSelectedPaletteColor(color)));
+    group.appendChild(colorRow);
+    return group;
   }
   createPaletteColorButton(swatch, target) {
     const colorButton = activeDocument.createElement("button");
@@ -55966,6 +55983,30 @@ var InkSession = class {
     } else {
       this.penColor = color;
     }
+  }
+  getSelectedPaletteColor() {
+    const selected = this.getSelectedEditableElements();
+    const colored = selected.find((element) => "color" in element);
+    return normalizeHexColor(colored?.color ?? this.penColor);
+  }
+  setSelectedPaletteColor(color) {
+    color = normalizeHexColor(color);
+    let changed = false;
+    for (const element of this.getSelectedEditableElements()) {
+      if (!("color" in element) || normalizeHexColor(element.color) === color) {
+        continue;
+      }
+      element.color = color;
+      element.saved = false;
+      changed = true;
+    }
+    if (!changed) {
+      return;
+    }
+    this.redoStack = [];
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
   }
   getToolOpacity(tool) {
     return tool === "highlight" ? this.highlightOpacity : this.penOpacity;
@@ -58803,29 +58844,6 @@ function drawStroke(ctx, stroke2, cssWidth, cssHeight, selected = false) {
     ctx.lineTo(last2.x * cssWidth, last2.y * cssHeight);
   }
   ctx.stroke();
-  ctx.restore();
-  if (selected) {
-    drawSelectionBox(ctx, stroke2, cssWidth, cssHeight);
-  }
-}
-function drawSelectionBox(ctx, stroke2, cssWidth, cssHeight) {
-  const box = strokeBounds(stroke2, cssWidth, cssHeight);
-  if (!box) {
-    return;
-  }
-  const pad2 = Math.max(8, stroke2.width * 1.8);
-  const x = Math.max(0, box.minX - pad2);
-  const y = Math.max(0, box.minY - pad2);
-  const width = Math.min(cssWidth - x, box.maxX - box.minX + pad2 * 2);
-  const height = Math.min(cssHeight - y, box.maxY - box.minY + pad2 * 2);
-  ctx.save();
-  ctx.globalAlpha = 1;
-  ctx.strokeStyle = "#228be6";
-  ctx.fillStyle = "rgba(34, 139, 230, 0.08)";
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 4]);
-  ctx.fillRect(x, y, width, height);
-  ctx.strokeRect(x, y, width, height);
   ctx.restore();
 }
 function drawTextElement(ctx, text, cssWidth, cssHeight, selected = false) {
