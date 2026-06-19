@@ -53738,6 +53738,8 @@ var InkSession = class {
   coverHistory = [];
   loadedAnnotationState = false;
   redoStack = [];
+  undoStack = [];
+  redoHistoryStack = [];
   saveTimer = null;
   settingsSaveTimer = null;
   scanTimer = null;
@@ -53807,6 +53809,8 @@ var InkSession = class {
     this.currentStroke = null;
     this.dirty = false;
     this.redoStack = [];
+    this.undoStack = [];
+    this.redoHistoryStack = [];
     this.selectionDrag = null;
     this.selectedStrokeIds.clear();
     this.nativeSelection = null;
@@ -54694,6 +54698,7 @@ var InkSession = class {
       x: point.x,
       y: point.y
     };
+    this.rememberHistory();
     this.textHistory.push(textElement);
     this.redoStack = [];
     this.selectedStrokeIds.clear();
@@ -54788,6 +54793,9 @@ var InkSession = class {
       const value = editor.value.trim();
       this.closeNativeTextEditor(false);
       if (!value) {
+        if (textElement.text.trim()) {
+          this.rememberHistory();
+        }
         this.removeElementById(textElement.id);
         this.selectedStrokeIds.delete(textElement.id);
         this.markDirty();
@@ -54798,6 +54806,7 @@ var InkSession = class {
       if (value === textElement.text.trim()) {
         return;
       }
+      this.rememberHistory();
       textElement.text = value;
       textElement.saved = false;
       this.markDirty();
@@ -55083,6 +55092,7 @@ var InkSession = class {
     }
     this.nativeTextHighlightColor = normalizeHexColor(color);
     this.scheduleToolSettingsSave();
+    this.rememberHistory();
     for (const object of info.objects) {
       this.coverHistory.push({
         color: normalizeHexColor(color),
@@ -55152,6 +55162,7 @@ var InkSession = class {
       x: selection.x,
       y: selection.y
     };
+    this.rememberHistory();
     this.coverHistory.push(cover);
     this.textHistory.push(textElement);
     this.nativeSelection = null;
@@ -55614,6 +55625,7 @@ var InkSession = class {
     if (selected.length === 0) {
       return;
     }
+    this.rememberHistory();
     for (const text of selected) {
       update(text);
       text.saved = false;
@@ -55954,6 +55966,8 @@ var InkSession = class {
     this.currentCover = null;
     this.cropPreview = null;
     this.redoStack = [];
+    this.undoStack = [];
+    this.redoHistoryStack = [];
     this.selectedStrokeIds.clear();
     this.nativeSelection = null;
     this.dirty = false;
@@ -56050,7 +56064,11 @@ var InkSession = class {
   setSelectedPaletteColor(color) {
     color = normalizeHexColor(color);
     let changed = false;
-    for (const element of this.getSelectedEditableElements()) {
+    const selected = this.getSelectedEditableElements();
+    if (selected.some((element) => "color" in element && normalizeHexColor(element.color) !== color)) {
+      this.rememberHistory();
+    }
+    for (const element of selected) {
       if (!("color" in element) || normalizeHexColor(element.color) === color) {
         continue;
       }
@@ -56173,6 +56191,10 @@ var InkSession = class {
       if (selected.length === 0 || !moved) {
         return;
       }
+      if (!drag.historyRecorded) {
+        this.rememberHistory();
+        drag.historyRecorded = true;
+      }
       for (const element of selected) {
         translateElement(element, dx, dy);
         element.saved = false;
@@ -56187,6 +56209,10 @@ var InkSession = class {
     if (drag.mode === "resize") {
       if (!drag.handle || !drag.originalBounds || !drag.originalElements || !moved) {
         return;
+      }
+      if (!drag.historyRecorded) {
+        this.rememberHistory();
+        drag.historyRecorded = true;
       }
       this.resizeSelectedElements(drag, point);
       this.markDirty();
@@ -56253,6 +56279,7 @@ var InkSession = class {
         y: Math.min(1, only.y + 1e-3)
       });
     }
+    this.rememberHistory();
     this.strokeHistory.push(stroke2);
     this.redoStack = [];
     this.selectedStrokeIds.clear();
@@ -56272,6 +56299,7 @@ var InkSession = class {
       this.redrawOverlay(overlay);
       return;
     }
+    this.rememberHistory();
     this.coverHistory.push(cover);
     this.redoStack = [];
     this.selectedStrokeIds.clear();
@@ -56388,6 +56416,10 @@ var InkSession = class {
       const zoomDelta = distance - this.touchScroll.initialDistance;
       if (this.touchScroll.mode === "resize-selection") {
         if (this.touchScroll.initialBounds && this.touchScroll.initialElements && Math.abs(zoomDelta) > 4) {
+          if (!this.touchScroll.historyRecorded) {
+            this.rememberHistory();
+            this.touchScroll.historyRecorded = true;
+          }
           this.resizeSelectedElementsFromPinch(this.touchScroll, distance);
           this.markDirty();
           this.redoStack = [];
@@ -56448,13 +56480,15 @@ var InkSession = class {
   }
   eraseAt(overlay, point) {
     const before = this.strokeHistory.length;
-    this.strokeHistory = this.strokeHistory.filter((stroke2) => {
+    const nextStrokes = this.strokeHistory.filter((stroke2) => {
       if (stroke2.pageIndex !== overlay.pageIndex) {
         return true;
       }
       return !strokeContainsPoint(stroke2, point, overlay.cssWidth, overlay.cssHeight, this.eraserWidth);
     });
-    if (this.strokeHistory.length !== before) {
+    if (nextStrokes.length !== before) {
+      this.rememberHistory();
+      this.strokeHistory = nextStrokes;
       this.redoStack = [];
       this.pruneSelection();
       this.markDirty();
@@ -56463,40 +56497,35 @@ var InkSession = class {
     }
   }
   undo() {
-    const element = this.getEditableElements().at(-1);
-    if (!element) {
+    const snapshot = this.undoStack.pop();
+    if (!snapshot) {
       return;
     }
-    this.removeElementById(element.id);
-    this.redoStack.push(element);
-    if (this.selectedStrokeIds.has(element.id)) {
-      this.selectedStrokeIds.delete(element.id);
-    }
-    this.markDirty();
-    this.redrawAll();
-    this.scheduleAutoSave();
+    this.redoHistoryStack.push(this.createHistorySnapshot());
+    this.restoreHistorySnapshot(snapshot);
   }
   redo() {
-    const element = this.redoStack.pop();
-    if (!element) {
+    const snapshot = this.redoHistoryStack.pop();
+    if (!snapshot) {
       return;
     }
-    element.saved = false;
-    this.addElement(element);
-    this.selectedStrokeIds.clear();
-    this.markDirty();
-    this.redrawAll();
-    this.scheduleAutoSave();
+    this.undoStack.push(this.createHistorySnapshot());
+    this.restoreHistorySnapshot(snapshot);
   }
   async clearUnsavedInk() {
     if (this.selectedStrokeIds.size > 0) {
       const selected = new Set(this.selectedStrokeIds);
       const before = this.getEditableElements().length;
-      this.strokeHistory = this.strokeHistory.filter((stroke2) => !selected.has(stroke2.id));
-      this.textHistory = this.textHistory.filter((text) => !selected.has(text.id));
-      this.coverHistory = this.coverHistory.filter((cover) => !selected.has(cover.id));
-      this.imageHistory = this.imageHistory.filter((image) => !selected.has(image.id));
-      if (this.getEditableElements().length !== before) {
+      const nextStrokes = this.strokeHistory.filter((stroke2) => !selected.has(stroke2.id));
+      const nextTexts = this.textHistory.filter((text) => !selected.has(text.id));
+      const nextCovers = this.coverHistory.filter((cover) => !selected.has(cover.id));
+      const nextImages = this.imageHistory.filter((image) => !selected.has(image.id));
+      if (nextStrokes.length + nextTexts.length + nextCovers.length + nextImages.length !== before) {
+        this.rememberHistory();
+        this.strokeHistory = nextStrokes;
+        this.textHistory = nextTexts;
+        this.coverHistory = nextCovers;
+        this.imageHistory = nextImages;
         this.currentStroke = null;
         this.currentCover = null;
         this.selectedStrokeIds.clear();
@@ -56527,6 +56556,7 @@ var InkSession = class {
     }
     this.currentStroke = null;
     this.currentCover = null;
+    this.rememberHistory();
     this.strokeHistory = [];
     this.textHistory = [];
     this.coverHistory = [];
@@ -57254,6 +57284,7 @@ var InkSession = class {
       x: selection.x,
       y: selection.y
     };
+    this.rememberHistory();
     this.coverHistory.push(cover);
     this.imageHistory.push(image);
     this.selectedStrokeIds.clear();
@@ -57321,6 +57352,7 @@ var InkSession = class {
       x: 0.5 - clamp(width, 0.03, 0.9) / 2,
       y: 0.5 - clamp(height, 0.03, 0.9) / 2
     };
+    this.rememberHistory();
     this.imageHistory.push(image);
     this.selectedStrokeIds.clear();
     this.selectedStrokeIds.add(image.id);
@@ -57551,6 +57583,9 @@ var InkSession = class {
         x: block.x,
         y: block.y
       };
+      if (converted === 0) {
+        this.rememberHistory();
+      }
       this.coverHistory.push(cover);
       this.textHistory.push(text);
       converted += 1;
@@ -57582,6 +57617,7 @@ var InkSession = class {
       x: selection.x,
       y: selection.y
     };
+    this.rememberHistory();
     this.coverHistory.push(cover);
     this.redoStack = [];
     this.markDirty();
@@ -57738,6 +57774,40 @@ var InkSession = class {
   getEditableElements() {
     return [...this.strokeHistory, ...this.textHistory, ...this.coverHistory, ...this.imageHistory];
   }
+  createHistorySnapshot() {
+    return {
+      elements: this.getEditableElements().map(cloneElement),
+      nativeSelection: this.nativeSelection ? { ...this.nativeSelection } : null,
+      selectedIds: Array.from(this.selectedStrokeIds)
+    };
+  }
+  restoreHistorySnapshot(snapshot) {
+    const elements = snapshot.elements.map((element) => markElementUnsaved(cloneElement(element)));
+    this.strokeHistory = elements.filter((element) => element.kind === "stroke");
+    this.textHistory = elements.filter((element) => element.kind === "text");
+    this.coverHistory = elements.filter((element) => element.kind === "cover");
+    this.imageHistory = elements.filter((element) => element.kind === "image");
+    this.selectedStrokeIds = new Set(snapshot.selectedIds.filter((id) => elements.some((element) => element.id === id)));
+    this.nativeSelection = snapshot.nativeSelection ? { ...snapshot.nativeSelection } : null;
+    this.currentStroke = null;
+    this.currentCover = null;
+    this.selectionDrag = null;
+    this.dirty = true;
+    this.redrawAll();
+    this.scheduleAutoSave();
+  }
+  rememberHistory() {
+    const snapshot = this.createHistorySnapshot();
+    const previous = this.undoStack.at(-1);
+    if (previous && JSON.stringify(previous) === JSON.stringify(snapshot)) {
+      return;
+    }
+    this.undoStack.push(snapshot);
+    if (this.undoStack.length > 80) {
+      this.undoStack.shift();
+    }
+    this.redoHistoryStack = [];
+  }
   findElementById(id) {
     return this.strokeHistory.find((stroke2) => stroke2.id === id) ?? this.textHistory.find((text) => text.id === id) ?? this.coverHistory.find((cover) => cover.id === id) ?? this.imageHistory.find((image) => image.id === id) ?? null;
   }
@@ -57868,6 +57938,7 @@ var InkSession = class {
       return false;
     }
     const cloned = elements.map((element) => markElementUnsaved(cloneElement(element)));
+    this.rememberHistory();
     this.strokeHistory = cloned.filter((element) => element.kind === "stroke");
     this.textHistory = cloned.filter((element) => element.kind === "text");
     this.coverHistory = cloned.filter((element) => element.kind === "cover");
@@ -57881,6 +57952,7 @@ var InkSession = class {
   }
   aiUpdateElements(elements) {
     let count = 0;
+    let recorded = false;
     for (const element of elements) {
       if (!isInkElement(element)) {
         continue;
@@ -57888,6 +57960,10 @@ var InkSession = class {
       const live = this.findElementById(element.id);
       if (!live || live.kind !== element.kind) {
         continue;
+      }
+      if (!recorded) {
+        this.rememberHistory();
+        recorded = true;
       }
       this.removeElementById(live.id);
       this.addElement(markElementUnsaved(cloneElement(element)));
@@ -57902,6 +57978,10 @@ var InkSession = class {
   }
   aiDeleteElements(ids) {
     const before = this.getEditableElements().length;
+    const existingIds = ids.filter((id) => this.findElementById(id));
+    if (existingIds.length > 0) {
+      this.rememberHistory();
+    }
     for (const id of ids) {
       this.removeElementById(id);
       this.selectedStrokeIds.delete(id);
@@ -58137,6 +58217,7 @@ var InkSession = class {
     return this.aiAddElement(element);
   }
   aiAddElement(element) {
+    this.rememberHistory();
     this.addElement(element);
     this.redoStack = [];
     this.markDirty();
