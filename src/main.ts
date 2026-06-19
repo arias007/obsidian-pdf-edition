@@ -537,8 +537,8 @@ const NATIVE_TEXT_SELECTION_TOUCH_LIMITS = {
   maxRects: 36
 };
 
-const BUILTIN_ALIPAY_QR_PATH = ".obsidian/plugins/pdftion/assets/alipay.png";
-const BUILTIN_BINANCE_QR_PATH = ".obsidian/plugins/pdftion/assets/binance.png";
+const BUILTIN_ALIPAY_QR_PATH = "plugins/pdftion/assets/alipay.png";
+const BUILTIN_BINANCE_QR_PATH = "plugins/pdftion/assets/binance.png";
 
 interface PdftionSettings {
   autoEnableAnnotationToolbar: boolean;
@@ -1839,7 +1839,9 @@ class PdftionSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.replaceChildren();
 
-    containerEl.createEl("h2", { text: uiText("Pdftion 设置", "Pdftion settings") });
+    new Setting(containerEl)
+      .setName(uiText("Pdftion 设置", "Pdftion settings"))
+      .setHeading();
 
     this.addSection(uiText("导出", "Export"));
     new Setting(containerEl)
@@ -1906,7 +1908,10 @@ class PdftionSettingTab extends PluginSettingTab {
   }
 
   private addSection(title: string): void {
-    this.containerEl.createEl("h3", { cls: "pdftion-settings-section", text: title });
+    new Setting(this.containerEl)
+      .setName(title)
+      .setHeading()
+      .settingEl.addClass("pdftion-settings-section");
   }
 
   private addToggleSetting(
@@ -2013,10 +2018,10 @@ class PdftionSettingTab extends PluginSettingTab {
       return null;
     }
     if (path === "builtin:alipay") {
-      return this.plugin.app.vault.adapter.getResourcePath(BUILTIN_ALIPAY_QR_PATH);
+      return this.plugin.app.vault.adapter.getResourcePath(`${this.plugin.app.vault.configDir}/${BUILTIN_ALIPAY_QR_PATH}`);
     }
     if (path === "builtin:binance") {
-      return this.plugin.app.vault.adapter.getResourcePath(BUILTIN_BINANCE_QR_PATH);
+      return this.plugin.app.vault.adapter.getResourcePath(`${this.plugin.app.vault.configDir}/${BUILTIN_BINANCE_QR_PATH}`);
     }
     if (/^(https?:|data:image\/)/i.test(path)) {
       return path;
@@ -7917,22 +7922,6 @@ function parsePageOrder(raw: string, pageCount: number): number[] | null {
     return null;
   }
   return result;
-}
-
-function parseCropInput(raw: string): { bottom: number; left: number; right: number; top: number } | null {
-  const parts = raw.split(/[,\s]+/).map((part) => part.trim()).filter(Boolean);
-  if (parts.length !== 4) {
-    return null;
-  }
-  const values = parts.map(parseCropValue);
-  if (values.some((value) => value === null)) {
-    return null;
-  }
-  const [left, top, right, bottom] = values as number[];
-  if (left + right >= 0.9 || top + bottom >= 0.9) {
-    return null;
-  }
-  return { bottom, left, right, top };
 }
 
 function parseCropValue(raw: string): number | null {
