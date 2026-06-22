@@ -157,13 +157,20 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
 }
 
 .pdftion-enabled .annotationLayer,
-.pdftion-enabled .annotationEditorLayer {
-  pointer-events: none;
-  visibility: hidden;
-}
-
+.pdftion-enabled .annotationEditorLayer,
+.pdftion-enabled [data-annotation-id],
+.pdftion-enabled [data-pdf-annotation-id],
+.pdftion-enabled .popupAnnotation,
+.pdftion-enabled .pdf-annotation-popup,
+.pdftion-enabled .pdfAnnotationPopup,
 .pdftion-hide-native-ink-layer .annotationLayer,
-.pdftion-hide-native-ink-layer .annotationEditorLayer {
+.pdftion-hide-native-ink-layer .annotationEditorLayer,
+.pdftion-hide-native-ink-layer [data-annotation-id],
+.pdftion-hide-native-ink-layer [data-pdf-annotation-id],
+.pdftion-hide-native-ink-layer .popupAnnotation,
+.pdftion-hide-native-ink-layer .pdf-annotation-popup,
+.pdftion-hide-native-ink-layer .pdfAnnotationPopup {
+  display: none !important;
   opacity: 0 !important;
   pointer-events: none !important;
   visibility: hidden !important;
@@ -176,6 +183,7 @@ body.pdftion-editing-active [data-pdf-annotation-id],
 body.pdftion-editing-active .popupAnnotation,
 body.pdftion-editing-active .pdf-annotation-popup,
 body.pdftion-editing-active .pdfAnnotationPopup {
+  display: none !important;
   opacity: 0 !important;
   pointer-events: none !important;
   visibility: hidden !important;

@@ -53204,11 +53204,11 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
       return state;
     }
   }
-  async loadPdfInkAnnotations(file) {
+  async loadPdfInkAnnotations(file, pageIndexes) {
     try {
       const binary = await this.app.vault.readBinary(file);
       const pdf = await PDFDocument_default.load(binary, { ignoreEncryption: true, updateMetadata: false });
-      return extractPdfInkAnnotations(pdf);
+      return extractPdfInkAnnotations(pdf, pageIndexes);
     } catch (error2) {
       console.warn("pdftion could not import PDF ink annotations.", error2);
       return [];
@@ -53302,14 +53302,16 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
         console.warn("pdftion skipped annotation state without a PDF fingerprint.", file.path);
         return null;
       }
-      if (parsed.pdfFingerprint.sha256 !== currentFingerprint.sha256) {
+      const filePath = typeof parsed.filePath === "string" ? parsed.filePath : void 0;
+      const pendingInk = parsed.elements.filter(isInkElement).some((element) => element.kind === "stroke" && element.pdfSaved !== true);
+      if (parsed.pdfFingerprint.sha256 !== currentFingerprint.sha256 && !(pendingInk && filePath === file.path)) {
         console.warn("pdftion skipped annotation state for a replaced PDF.", file.path);
         return null;
       }
       return {
         basePdfFingerprint: isPdfFingerprint(parsed.basePdfFingerprint) ? parsed.basePdfFingerprint : void 0,
         elements: parsed.elements.filter(isInkElement),
-        filePath: typeof parsed.filePath === "string" ? parsed.filePath : void 0,
+        filePath,
         overlayAnnotationsOnly: parsed.overlayAnnotationsOnly === true,
         overlayTextOnly: parsed.overlayTextOnly === true,
         pdfFingerprint: parsed.pdfFingerprint,
@@ -53818,6 +53820,9 @@ var InkSession = class {
   button = null;
   currentCover = null;
   currentStroke = null;
+  currentStrokeStartedAt = 0;
+  currentStrokeMoved = false;
+  currentStrokeHadTouchMove = false;
   cropPreview = null;
   dirty = false;
   enabled = false;
@@ -53826,6 +53831,7 @@ var InkSession = class {
   shareMenu = null;
   mutationObserver;
   hiddenNativeAnnotationStyles = /* @__PURE__ */ new Map();
+  pendingNativeInkHidePages = /* @__PURE__ */ new Set();
   detachedInkEditPages = /* @__PURE__ */ new Set();
   overlays = /* @__PURE__ */ new Map();
   activeTouchId = null;
@@ -53863,6 +53869,11 @@ var InkSession = class {
   pageNavigator = null;
   selectedPageIndexes = /* @__PURE__ */ new Set();
   selectedStrokeIds = /* @__PURE__ */ new Set();
+  selectionChangedAt = 0;
+  selectionWasExplicitTap = false;
+  dirtyInkPages = /* @__PURE__ */ new Set();
+  deletedExternalInkIds = /* @__PURE__ */ new Set();
+  deletedPdftionInkIds = /* @__PURE__ */ new Set();
   nativeTextSelectionMenu = null;
   nativeTextSelectionInfo = null;
   nativeTextSelectionTimer = null;
@@ -53877,6 +53888,7 @@ var InkSession = class {
   lastTap = null;
   savedInkIsBurnedIntoPdf = false;
   savedTextIsBurnedIntoPdf = false;
+  touchGestureCooldownUntil = 0;
   touchScroll = null;
   highlightColor = DEFAULT_SETTINGS.highlightColor;
   highlightOpacity = DEFAULT_SETTINGS.highlightOpacity;
@@ -53929,14 +53941,17 @@ var InkSession = class {
     this.file = file;
     this.clearAutoSaveTimer();
     this.clearEditableInkPrepareTimer();
-    this.currentStroke = null;
+    this.clearCurrentStroke();
     this.dirty = false;
+    this.pendingNativeInkHidePages.clear();
+    this.dirtyInkPages.clear();
+    this.deletedExternalInkIds.clear();
+    this.deletedPdftionInkIds.clear();
     this.redoStack = [];
     this.undoStack = [];
     this.redoHistoryStack = [];
     this.selectionDrag = null;
-    this.selectedStrokeIds.clear();
-    this.nativeSelection = null;
+    this.clearEditableSelection();
     this.hideNativeTextSelectionMenu();
     this.pendingImageCrop = null;
     this.strokeHistory = [];
@@ -54000,7 +54015,7 @@ var InkSession = class {
     this.textHistory = elements.filter((element) => element.kind === "text");
     this.coverHistory = elements.filter((element) => element.kind === "cover");
     this.imageHistory = elements.filter((element) => element.kind === "image");
-    this.savedInkIsBurnedIntoPdf = state !== null && !state.overlayAnnotationsOnly && this.strokeHistory.length > 0;
+    this.savedInkIsBurnedIntoPdf = state !== null && !state.overlayAnnotationsOnly && this.strokeHistory.some((stroke2) => !Array.isArray(stroke2.pdfPoints));
     this.savedTextIsBurnedIntoPdf = state !== null && !state.overlayAnnotationsOnly && !state.overlayTextOnly && this.textHistory.length > 0;
     if (this.savedInkIsBurnedIntoPdf || this.savedTextIsBurnedIntoPdf) {
       this.dirty = true;
@@ -54023,6 +54038,9 @@ var InkSession = class {
     const pageEls = this.findPageElements();
     for (let i = 0; i < pageEls.length; i += 1) {
       this.ensureOverlay(pageEls[i], i);
+    }
+    if (this.enabled) {
+      this.rememberNativeInkHidePagesForCurrentPages();
     }
     this.redrawAll();
     this.scheduleEditableInkPrepare(120);
@@ -54356,22 +54374,23 @@ var InkSession = class {
       this.detachedInkEditPages.clear();
       this.showToolbar();
       this.scanPages();
+      this.primeNativeInkHidingForCurrentPages(true);
       this.startOverlayHealthCheck();
       this.startNativeAnnotationPopupSuppressor();
       this.scheduleEditableInkPrepare(0, true);
-      window.setTimeout(() => this.scheduleEditableInkPrepare(0, true), 650);
-      window.setTimeout(() => this.scheduleEditableInkPrepare(0, true), 1600);
+      window.setTimeout(() => this.scheduleEditableInkPrepare(0, true), 260);
+      window.setTimeout(() => this.scheduleEditableInkPrepare(0, true), 760);
       if (options.notice !== false) {
         new import_obsidian.Notice(uiText("PDF \u6279\u6CE8\u5DF2\u5F00\u542F\u3002", "PDF annotation enabled."));
       }
     } else {
       this.stopOverlayHealthCheck();
       this.stopNativeAnnotationPopupSuppressor();
-      this.currentStroke = null;
+      this.clearCurrentStroke();
       this.selectionDrag = null;
-      this.nativeSelection = null;
       this.pendingImageCrop = null;
-      this.selectedStrokeIds.clear();
+      this.pendingNativeInkHidePages.clear();
+      this.clearEditableSelection();
       this.palette?.remove();
       this.palette = null;
       this.imageMenu?.remove();
@@ -54457,69 +54476,45 @@ var InkSession = class {
     }
     this.detachingPdfInkForEditing = true;
     this.saving = true;
-    const targetFile = this.file;
-    const targetPath = targetFile.path;
     try {
+      for (const pageIndex of pageIndexes) {
+        this.pendingNativeInkHidePages.add(pageIndex);
+      }
+      this.updateExternalInkLayerState();
+      const targetFile = this.file;
+      const targetPath = targetFile.path;
       const binary = await this.plugin.app.vault.readBinary(targetFile);
       const pdf = await PDFDocument_default.load(binary, { ignoreEncryption: true, updateMetadata: false });
       const detachedStrokes = detachPdfInkAnnotations(pdf, pageIndexes);
-      let buffer2 = binary;
       if (detachedStrokes.length > 0) {
+        this.mergeDetachedPdfInkStrokes(detachedStrokes);
+        const preDetachElements = this.getEditableElements().map(markElementSaved);
+        await this.plugin.saveEditableAnnotationState(targetFile, preDetachElements, binary);
+        this.applySavedFlags(preDetachElements);
         const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
-        buffer2 = new ArrayBuffer(saved.byteLength);
+        const buffer2 = new ArrayBuffer(saved.byteLength);
         new Uint8Array(buffer2).set(saved);
         await this.plugin.app.vault.modifyBinary(targetFile, buffer2);
         if (this.file.path !== targetPath) {
           return;
         }
-      }
-      for (const stroke2 of detachedStrokes) {
-        const existing = this.strokeHistory.find((candidate) => candidate.id === stroke2.id);
-        if (existing) {
-          if (existing.pdfSaved === true && existing.saved && existing.externalDirty !== true) {
-            existing.points = stroke2.points.map((point) => ({ ...point }));
-            existing.color = stroke2.color;
-            existing.opacity = stroke2.opacity;
-            existing.pageCssHeight = stroke2.pageCssHeight;
-            existing.pageCssWidth = stroke2.pageCssWidth;
-            existing.tool = stroke2.tool;
-            existing.width = stroke2.width;
-          }
-          existing.pdfPoints = stroke2.pdfPoints?.map((point) => ({ ...point })) ?? stroke2.points.map((point) => ({ ...point }));
-          existing.pdfSaved = false;
-          existing.externalDirty = true;
-          existing.source = existing.source ?? stroke2.source;
-          existing.saved = false;
-        } else {
-          this.strokeHistory.push({
-            ...stroke2,
-            externalDirty: true,
-            pdfPoints: stroke2.pdfPoints?.map((point) => ({ ...point })) ?? stroke2.points.map((point) => ({ ...point })),
-            pdfSaved: false,
-            points: stroke2.points.map((point) => ({ ...point })),
-            saved: false
-          });
-        }
+        const postDetachElements = this.getEditableElements().map(markElementSaved);
+        await this.plugin.saveEditableAnnotationState(targetFile, postDetachElements, buffer2);
+        this.applySavedFlags(postDetachElements);
+        this.savedInkIsBurnedIntoPdf = this.strokeHistory.some((stroke2) => !Array.isArray(stroke2.pdfPoints)) && this.savedInkIsBurnedIntoPdf;
+        this.dirty = this.getEditableElements().some((element) => !element.saved);
       }
       for (const pageIndex of pageIndexes) {
         this.detachedInkEditPages.add(pageIndex);
+        this.pendingNativeInkHidePages.delete(pageIndex);
       }
+      this.updateExternalInkLayerState();
+      this.redrawAll();
       if (detachedStrokes.length > 0) {
-        const stateElements = this.getEditableElements().map(markElementSaved);
-        await this.plugin.saveEditableAnnotationState(targetFile, stateElements, buffer2);
-        const savedElementIds = new Set(stateElements.map((element) => element.id));
-        for (const element of this.getEditableElements()) {
-          if (savedElementIds.has(element.id)) {
-            element.saved = true;
-          }
-        }
-      }
-      this.dirty = this.getEditableElements().some((element) => !element.saved);
-      if (this.file.path === targetPath) {
-        this.redrawAll();
+        this.scheduleQuietScan();
       }
     } catch (error2) {
-      console.warn("pdftion could not detach PDF ink annotations for editing.", error2);
+      console.warn("pdftion could not prepare PDF ink annotations for editing.", error2);
     } finally {
       this.detachingPdfInkForEditing = false;
       this.saving = false;
@@ -54527,6 +54522,110 @@ var InkSession = class {
       if (this.pendingSaveAfterCurrentSave) {
         this.pendingSaveAfterCurrentSave = false;
         this.scheduleAutoSave(AUTO_SAVE_IDLE_DELAY_MS);
+      }
+    }
+  }
+  applySavedFlags(savedElements) {
+    const savedElementIds = new Set(savedElements.map((element) => element.id));
+    for (const element of this.getEditableElements()) {
+      if (savedElementIds.has(element.id)) {
+        element.saved = true;
+      }
+    }
+  }
+  async importPdfInkForPages(pageIndexes) {
+    if (pageIndexes.size === 0) {
+      return false;
+    }
+    const targetPath = this.file.path;
+    const pdfInkStrokes = await this.plugin.loadPdfInkAnnotations(this.file, pageIndexes);
+    if (this.file.path !== targetPath || pdfInkStrokes.length === 0) {
+      return false;
+    }
+    let changed = false;
+    for (const stroke2 of pdfInkStrokes) {
+      changed = this.mergePdfInkStrokeForEditing(stroke2) || changed;
+    }
+    if (changed) {
+      this.savedInkIsBurnedIntoPdf = this.strokeHistory.some((stroke2) => !Array.isArray(stroke2.pdfPoints)) && this.savedInkIsBurnedIntoPdf;
+      this.dirty = true;
+    }
+    return changed;
+  }
+  mergePdfInkStrokeForEditing(stroke2) {
+    const existing = this.strokeHistory.find((candidate) => candidate.id === stroke2.id || isSamePdfInkStrokeCandidate(candidate, stroke2));
+    const pdfPoints = (stroke2.pdfPoints ?? stroke2.points).map((point) => ({ ...point }));
+    if (!existing) {
+      this.strokeHistory.push({
+        ...stroke2,
+        externalDirty: false,
+        pdfPoints,
+        pdfSaved: true,
+        points: stroke2.points.map((point) => ({ ...point })),
+        saved: false
+      });
+      return true;
+    }
+    let changed = false;
+    const canRefreshFromPdf = existing.saved && existing.pdfSaved !== false && existing.externalDirty !== true;
+    if (canRefreshFromPdf && !inkStrokesEquivalentForPdf(existing, stroke2)) {
+      existing.points = stroke2.points.map((point) => ({ ...point }));
+      existing.color = stroke2.color;
+      existing.opacity = stroke2.opacity;
+      existing.pageCssHeight = stroke2.pageCssHeight;
+      existing.pageCssWidth = stroke2.pageCssWidth;
+      existing.tool = stroke2.tool;
+      existing.width = stroke2.width;
+      changed = true;
+    }
+    if (!existing.pdfPoints || !inkPointsApproximatelyEqual(existing.pdfPoints, pdfPoints)) {
+      existing.pdfPoints = pdfPoints;
+      changed = true;
+    }
+    if (existing.pdfSaved !== false && existing.pdfSaved !== true) {
+      existing.pdfSaved = true;
+      changed = true;
+    }
+    if (!existing.source && stroke2.source) {
+      existing.source = stroke2.source;
+      changed = true;
+    }
+    if (existing.pdfSaved === true && existing.externalDirty === true) {
+      existing.externalDirty = false;
+      changed = true;
+    }
+    if (changed && existing.saved) {
+      existing.saved = false;
+    }
+    return changed;
+  }
+  mergeDetachedPdfInkStrokes(detachedStrokes) {
+    for (const stroke2 of detachedStrokes) {
+      const existing = this.strokeHistory.find((candidate) => candidate.id === stroke2.id);
+      if (existing) {
+        if (existing.pdfSaved === true && existing.saved && existing.externalDirty !== true) {
+          existing.points = stroke2.points.map((point) => ({ ...point }));
+          existing.color = stroke2.color;
+          existing.opacity = stroke2.opacity;
+          existing.pageCssHeight = stroke2.pageCssHeight;
+          existing.pageCssWidth = stroke2.pageCssWidth;
+          existing.tool = stroke2.tool;
+          existing.width = stroke2.width;
+        }
+        existing.pdfPoints = stroke2.pdfPoints?.map((point) => ({ ...point })) ?? stroke2.points.map((point) => ({ ...point }));
+        existing.pdfSaved = false;
+        existing.externalDirty = true;
+        existing.source = existing.source ?? stroke2.source;
+        existing.saved = false;
+      } else {
+        this.strokeHistory.push({
+          ...stroke2,
+          externalDirty: true,
+          pdfPoints: stroke2.pdfPoints?.map((point) => ({ ...point })) ?? stroke2.points.map((point) => ({ ...point })),
+          pdfSaved: false,
+          points: stroke2.points.map((point) => ({ ...point })),
+          saved: false
+        });
       }
     }
   }
@@ -54765,7 +54864,7 @@ var InkSession = class {
       this.nativeSelection = null;
       this.pendingImageCrop = null;
       if (tool === "eraser" || tool === "cover") {
-        this.selectedStrokeIds.clear();
+        this.clearEditableSelection();
       }
       this.redrawAll();
     }
@@ -54901,11 +55000,10 @@ var InkSession = class {
   openEditorAtPoint(point, overlay) {
     const element = this.findTextElementAt(overlay, point) ?? this.findElementAt(overlay, point);
     if (element?.kind === "text") {
-      this.currentStroke = null;
+      this.clearCurrentStroke();
       this.currentCover = null;
       this.selectionDrag = null;
-      this.selectedStrokeIds.clear();
-      this.selectedStrokeIds.add(element.id);
+      this.setSingleSelectedElement(element.id);
       this.nativeSelection = null;
       this.openExistingTextEditor(element, overlay);
       this.redrawAll();
@@ -54916,11 +55014,10 @@ var InkSession = class {
     }
     const native = this.findNativeObjectAt(overlay, point);
     if (native?.kind === "text") {
-      this.currentStroke = null;
+      this.clearCurrentStroke();
       this.currentCover = null;
       this.selectionDrag = null;
-      this.selectedStrokeIds.clear();
-      this.nativeSelection = null;
+      this.clearEditableSelection();
       this.openNativeTextEditor(native, overlay);
       this.redrawAll();
       return true;
@@ -54948,8 +55045,7 @@ var InkSession = class {
         }
         return;
       }
-      this.selectedStrokeIds.clear();
-      this.nativeSelection = null;
+      this.clearEditableSelection();
       this.pendingImageCrop = null;
       this.selectionDrag = {
         current: point,
@@ -54962,11 +55058,34 @@ var InkSession = class {
       return;
     }
     const tool = this.tool;
-    if (tool !== "eraser" && tool !== "cover" && this.hasEditableSelection(overlay.pageIndex) && (this.findSelectionHandleAt(overlay, point) || this.selectionBoxContainsPoint(overlay, point))) {
+    const drawingTool = this.isDrawingToolMode(tool);
+    const startsInsideEditableSelection = this.findSelectionHandleAt(overlay, point) !== null || this.selectionBoxContainsPoint(overlay, point);
+    const canDragSelection = tool !== "eraser" && tool !== "cover" && !drawingTool && this.hasEditableSelection(overlay.pageIndex) && startsInsideEditableSelection && this.canMoveFreshSelection();
+    if (canDragSelection) {
       this.beginSelectionInteraction(point, overlay);
       return;
     }
-    if (hitElement && tool !== "eraser" && tool !== "cover") {
+    if (drawingTool) {
+      this.selectionDrag = null;
+      this.currentStrokeMoved = false;
+      this.currentStrokeHadTouchMove = false;
+      this.currentStrokeStartedAt = Date.now();
+      this.currentStroke = {
+        color: this.getToolColor(tool),
+        id: makeStrokeId(),
+        kind: "stroke",
+        opacity: this.getToolOpacity(tool),
+        pageCssHeight: overlay.cssHeight,
+        pageCssWidth: overlay.cssWidth,
+        pageIndex: overlay.pageIndex,
+        points: [point],
+        saved: false,
+        tool,
+        width: this.getToolWidth(tool)
+      };
+      return;
+    }
+    if (hitElement && !drawingTool && tool !== "eraser" && tool !== "cover") {
       this.beginSelectionInteraction(point, overlay);
       return;
     }
@@ -54999,19 +55118,6 @@ var InkSession = class {
       };
       return;
     }
-    this.currentStroke = {
-      color: this.getToolColor(tool),
-      id: makeStrokeId(),
-      kind: "stroke",
-      opacity: this.getToolOpacity(tool),
-      pageCssHeight: overlay.cssHeight,
-      pageCssWidth: overlay.cssWidth,
-      pageIndex: overlay.pageIndex,
-      points: [point],
-      saved: false,
-      tool,
-      width: this.getToolWidth(tool)
-    };
   }
   addTextAnnotation(point, overlay) {
     const textElement = {
@@ -55032,9 +55138,7 @@ var InkSession = class {
     this.rememberHistory();
     this.textHistory.push(textElement);
     this.redoStack = [];
-    this.selectedStrokeIds.clear();
-    this.selectedStrokeIds.add(textElement.id);
-    this.nativeSelection = null;
+    this.setSingleSelectedElement(textElement.id);
     this.markDirty();
     this.redrawOverlay(overlay);
     this.openExistingTextEditor(textElement, overlay);
@@ -55496,9 +55600,8 @@ var InkSession = class {
     this.rememberHistory();
     this.coverHistory.push(cover);
     this.textHistory.push(textElement);
-    this.nativeSelection = null;
+    this.clearEditableSelection();
     this.redoStack = [];
-    this.selectedStrokeIds.clear();
     this.markDirty();
     this.redrawOverlay(overlay);
     this.scheduleAutoSave();
@@ -55637,7 +55740,7 @@ var InkSession = class {
   }
   beginSelectionInteraction(point, overlay) {
     const handle = this.findSelectionHandleAt(overlay, point);
-    if (handle) {
+    if (handle && this.canMoveFreshSelection()) {
       const selected2 = this.getSelectedEditableElements(overlay.pageIndex);
       const bounds = normalizedElementsBounds(selected2);
       if (selected2.length > 0 && bounds) {
@@ -55649,6 +55752,7 @@ var InkSession = class {
           originalBounds: bounds,
           originalElements: selected2.map(cloneElement),
           pageIndex: overlay.pageIndex,
+          startedFromFreshSelection: true,
           start: point
         };
         this.redrawAll();
@@ -55658,8 +55762,16 @@ var InkSession = class {
     const selected = this.findElementAt(overlay, point);
     if (selected) {
       if (!this.selectedStrokeIds.has(selected.id)) {
-        this.selectedStrokeIds.clear();
-        this.selectedStrokeIds.add(selected.id);
+        this.setSingleSelectedElement(selected.id);
+        this.selectionDrag = null;
+        this.redrawAll();
+        return;
+      }
+      if (!this.canMoveFreshSelection()) {
+        this.nativeSelection = null;
+        this.selectionDrag = null;
+        this.redrawAll();
+        return;
       }
       this.nativeSelection = null;
       this.selectionDrag = {
@@ -55667,12 +55779,13 @@ var InkSession = class {
         mode: "move",
         moved: false,
         pageIndex: overlay.pageIndex,
+        startedFromFreshSelection: true,
         start: point
       };
       this.redrawAll();
       return;
     }
-    if (this.hasEditableSelection(overlay.pageIndex) && this.selectionBoxContainsPoint(overlay, point)) {
+    if (this.hasEditableSelection(overlay.pageIndex) && this.selectionBoxContainsPoint(overlay, point) && this.canMoveFreshSelection()) {
       this.nativeSelection = null;
       this.selectionDrag = {
         clearSelectionOnTap: true,
@@ -55680,6 +55793,7 @@ var InkSession = class {
         mode: "move",
         moved: false,
         pageIndex: overlay.pageIndex,
+        startedFromFreshSelection: true,
         start: point
       };
       this.redrawAll();
@@ -55687,39 +55801,37 @@ var InkSession = class {
     }
     if (!selected) {
       if (this.selectedStrokeIds.size > 0 || this.nativeSelection !== null) {
-        this.selectedStrokeIds.clear();
-        this.nativeSelection = null;
+        this.clearEditableSelection();
         this.selectionDrag = null;
         this.redrawAll();
         return;
       }
       const blockingCover = this.findCoverElementAt(overlay, point, true);
       if (blockingCover?.source === "native-text") {
-        this.selectedStrokeIds.clear();
-        this.nativeSelection = null;
+        this.clearEditableSelection();
         this.selectionDrag = null;
         this.redrawAll();
         return;
       }
       const native = this.findNativeObjectAt(overlay, point);
       if (native) {
-        this.selectedStrokeIds.clear();
+        this.clearEditableSelection();
         this.nativeSelection = native;
         this.selectionDrag = null;
         this.redrawAll();
         return;
       }
-      if (this.selectionBoxContainsPoint(overlay, point)) {
+      if (this.selectionBoxContainsPoint(overlay, point) && this.canMoveFreshSelection()) {
         this.selectionDrag = {
           current: point,
           mode: "move",
           moved: false,
           pageIndex: overlay.pageIndex,
+          startedFromFreshSelection: true,
           start: point
         };
       } else {
-        this.selectedStrokeIds.clear();
-        this.nativeSelection = null;
+        this.clearEditableSelection();
         this.selectionDrag = {
           current: point,
           mode: "marquee",
@@ -56381,14 +56493,13 @@ var InkSession = class {
     this.textHistory = elements.filter((element) => element.kind === "text");
     this.coverHistory = elements.filter((element) => element.kind === "cover");
     this.imageHistory = elements.filter((element) => element.kind === "image");
-    this.currentStroke = null;
+    this.clearCurrentStroke();
     this.currentCover = null;
     this.cropPreview = null;
     this.redoStack = [];
     this.undoStack = [];
     this.redoHistoryStack = [];
-    this.selectedStrokeIds.clear();
-    this.nativeSelection = null;
+    this.clearEditableSelection();
     this.dirty = false;
     this.redrawAll();
     this.refreshPageNavigator();
@@ -56451,6 +56562,12 @@ var InkSession = class {
   }
   getToolColor(tool) {
     return tool === "highlight" ? this.highlightColor : this.penColor;
+  }
+  isDrawingToolMode(tool = this.tool) {
+    return tool === "pen" || tool === "highlight";
+  }
+  shouldShowEditableSelection() {
+    return !this.isDrawingToolMode();
   }
   applyToolSettingsFromPlugin() {
     this.penColor = this.plugin.settings.penColor;
@@ -56540,15 +56657,20 @@ var InkSession = class {
     }
   }
   moveInkInteraction(point, overlay) {
+    const tool = this.tool;
+    const drawingTool = this.isDrawingToolMode(tool);
     if (this.selectionDrag) {
-      this.moveSelectionInteraction(point, overlay);
-      return;
+      if (drawingTool) {
+        this.selectionDrag = null;
+      } else {
+        this.moveSelectionInteraction(point, overlay);
+        return;
+      }
     }
     if (this.currentCover && this.currentCover.pageIndex === overlay.pageIndex) {
       this.updateCurrentCover(point, overlay);
       return;
     }
-    const tool = this.tool;
     if (tool === "select") {
       this.moveSelectionInteraction(point, overlay);
       return;
@@ -56562,6 +56684,25 @@ var InkSession = class {
       return;
     }
     this.appendPointToCurrentStroke(stroke2, point, overlay);
+  }
+  isStrictDrawingTap(stroke2, overlay) {
+    if (this.currentStrokeHadTouchMove || this.currentStrokeMoved || stroke2.points.length > 3) {
+      return false;
+    }
+    if (Date.now() - this.currentStrokeStartedAt > 260) {
+      return false;
+    }
+    const first = stroke2.points[0];
+    if (!first) {
+      return false;
+    }
+    return stroke2.points.every((point) => normalizedDistance(first, point, overlay.cssWidth, overlay.cssHeight) <= 1.25);
+  }
+  clearCurrentStroke() {
+    this.currentStroke = null;
+    this.currentStrokeMoved = false;
+    this.currentStrokeHadTouchMove = false;
+    this.currentStrokeStartedAt = 0;
   }
   updateCurrentCover(point, overlay) {
     const cover = this.currentCover;
@@ -56587,6 +56728,7 @@ var InkSession = class {
     if (distance < 0.8) {
       return;
     }
+    this.currentStrokeMoved = true;
     const steps = Math.max(1, Math.ceil(distance / 1.2));
     for (let i = 1; i <= steps; i += 1) {
       const ratio = i / steps;
@@ -56610,6 +56752,11 @@ var InkSession = class {
       if (selected.length === 0 || !moved) {
         return;
       }
+      if (!drag.startedFromFreshSelection || !this.selectionWasExplicitTap) {
+        this.selectionDrag = null;
+        this.redrawAll();
+        return;
+      }
       if (!drag.historyRecorded) {
         this.rememberHistory();
         drag.historyRecorded = true;
@@ -56618,6 +56765,7 @@ var InkSession = class {
         this.markElementChanged(element);
         translateElement(element, dx, dy);
       }
+      shiftElementsInsidePage(selected);
       this.markDirty();
       this.redoStack = [];
       drag.moved = true;
@@ -56672,20 +56820,18 @@ var InkSession = class {
     if (!stroke2) {
       return;
     }
-    if (isTapStroke(stroke2, overlay.cssWidth, overlay.cssHeight)) {
+    if (this.isStrictDrawingTap(stroke2, overlay)) {
       const selected = this.findElementAt(overlay, stroke2.points[0]);
       if (selected) {
-        this.selectedStrokeIds.clear();
-        this.selectedStrokeIds.add(selected.id);
-        this.currentStroke = null;
+        this.setSingleSelectedElement(selected.id);
+        this.clearCurrentStroke();
         this.redrawAll();
         this.updateToolbarState();
         return;
       }
       if (this.hasEditableSelection(overlay.pageIndex) || this.nativeSelection?.pageIndex === overlay.pageIndex) {
-        this.selectedStrokeIds.clear();
-        this.nativeSelection = null;
-        this.currentStroke = null;
+        this.clearEditableSelection();
+        this.clearCurrentStroke();
         this.redrawAll();
         this.updateToolbarState();
         return;
@@ -56701,9 +56847,9 @@ var InkSession = class {
     this.rememberHistory();
     this.strokeHistory.push(stroke2);
     this.redoStack = [];
-    this.selectedStrokeIds.clear();
-    this.nativeSelection = null;
-    this.currentStroke = null;
+    this.clearEditableSelection();
+    this.clearCurrentStroke();
+    this.markInkPageDirty(stroke2.pageIndex);
     this.markDirty();
     this.redrawOverlay(overlay);
     this.scheduleAutoSave();
@@ -56721,8 +56867,7 @@ var InkSession = class {
     this.rememberHistory();
     this.coverHistory.push(cover);
     this.redoStack = [];
-    this.selectedStrokeIds.clear();
-    this.nativeSelection = null;
+    this.clearEditableSelection();
     this.markDirty();
     this.redrawOverlay(overlay);
     this.scheduleAutoSave();
@@ -56738,8 +56883,7 @@ var InkSession = class {
         this.redrawAll();
         this.scheduleAutoSave(250);
       } else if (drag.clearSelectionOnTap) {
-        this.selectedStrokeIds.clear();
-        this.nativeSelection = null;
+        this.clearEditableSelection();
         this.redrawAll();
       }
       this.updateToolbarState();
@@ -56779,14 +56923,15 @@ var InkSession = class {
     if (event.touches.length >= 2) {
       event.preventDefault();
       event.stopPropagation();
-      this.currentStroke = null;
+      this.touchGestureCooldownUntil = Date.now() + 450;
+      this.clearCurrentStroke();
       this.activeTouchId = null;
       this.redrawAll();
       const center = getTouchCenter(event.touches);
       const centerPoint = getNormalizedClientPoint(center.x, center.y, overlay.canvas);
       const selected = this.getSelectedEditableElements(overlay.pageIndex);
       const bounds = normalizedElementsBounds(selected);
-      const resizeSelection = selected.length > 0 && bounds !== null && this.selectionBoxContainsPoint(overlay, centerPoint);
+      const resizeSelection = this.tool === "select" && selected.length > 0 && bounds !== null && this.selectionBoxContainsPoint(overlay, centerPoint);
       this.touchScroll = {
         initialDistance: getTouchDistance(event.touches),
         initialBounds: resizeSelection ? bounds : void 0,
@@ -56799,6 +56944,13 @@ var InkSession = class {
       return;
     }
     if (event.touches.length !== 1) {
+      return;
+    }
+    if (Date.now() < this.touchGestureCooldownUntil) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.clearCurrentStroke();
+      this.activeTouchId = null;
       return;
     }
     const touch = event.changedTouches[0];
@@ -56824,6 +56976,9 @@ var InkSession = class {
     if (event.touches.length >= 2) {
       event.preventDefault();
       event.stopPropagation();
+      this.touchGestureCooldownUntil = Date.now() + 450;
+      this.clearCurrentStroke();
+      this.activeTouchId = null;
       const center = getTouchCenter(event.touches);
       if (!this.touchScroll) {
         this.touchScroll = {
@@ -56873,6 +57028,7 @@ var InkSession = class {
     }
     event.preventDefault();
     event.stopPropagation();
+    this.currentStrokeHadTouchMove = true;
     this.moveInkInteraction(getNormalizedClientPoint(touch.clientX, touch.clientY, overlay.canvas), overlay);
   }
   onTouchEnd(event, overlay) {
@@ -56880,9 +57036,11 @@ var InkSession = class {
       return;
     }
     if (event.touches.length >= 2) {
+      this.touchGestureCooldownUntil = Date.now() + 450;
       return;
     }
     if (event.touches.length === 1 && this.touchScroll) {
+      this.touchGestureCooldownUntil = Date.now() + 450;
       if (this.touchScroll.mode === "resize-selection" && this.dirty) {
         this.scheduleAutoSave();
       }
@@ -56903,14 +57061,20 @@ var InkSession = class {
   }
   eraseAt(overlay, point) {
     const before = this.strokeHistory.length;
+    const removed = [];
     const nextStrokes = this.strokeHistory.filter((stroke2) => {
       if (stroke2.pageIndex !== overlay.pageIndex) {
         return true;
       }
-      return !strokeContainsPoint(stroke2, point, overlay.cssWidth, overlay.cssHeight, this.eraserWidth);
+      const keep = !strokeContainsPoint(stroke2, point, overlay.cssWidth, overlay.cssHeight, this.eraserWidth);
+      if (!keep) {
+        removed.push(stroke2);
+      }
+      return keep;
     });
     if (nextStrokes.length !== before) {
       this.rememberHistory();
+      this.markElementsDeleted(removed);
       this.strokeHistory = nextStrokes;
       this.redoStack = [];
       this.pruneSelection();
@@ -56939,19 +57103,21 @@ var InkSession = class {
     if (this.selectedStrokeIds.size > 0) {
       const selected = new Set(this.selectedStrokeIds);
       const before = this.getEditableElements().length;
+      const removed = this.getEditableElements().filter((element) => selected.has(element.id));
       const nextStrokes = this.strokeHistory.filter((stroke2) => !selected.has(stroke2.id));
       const nextTexts = this.textHistory.filter((text) => !selected.has(text.id));
       const nextCovers = this.coverHistory.filter((cover) => !selected.has(cover.id));
       const nextImages = this.imageHistory.filter((image) => !selected.has(image.id));
       if (nextStrokes.length + nextTexts.length + nextCovers.length + nextImages.length !== before) {
         this.rememberHistory();
+        this.markElementsDeleted(removed);
         this.strokeHistory = nextStrokes;
         this.textHistory = nextTexts;
         this.coverHistory = nextCovers;
         this.imageHistory = nextImages;
-        this.currentStroke = null;
+        this.clearCurrentStroke();
         this.currentCover = null;
-        this.selectedStrokeIds.clear();
+        this.clearEditableSelection();
         this.redoStack = [];
         this.markDirty();
         this.redrawAll();
@@ -56977,9 +57143,10 @@ var InkSession = class {
     })) {
       return;
     }
-    this.currentStroke = null;
+    this.clearCurrentStroke();
     this.currentCover = null;
     this.rememberHistory();
+    this.markElementsDeleted(this.getEditableElements());
     this.strokeHistory = [];
     this.textHistory = [];
     this.coverHistory = [];
@@ -57004,9 +57171,11 @@ var InkSession = class {
     ctx.setTransform(overlay.dpr, 0, 0, overlay.dpr, 0, 0);
     ctx.clearRect(0, 0, overlay.cssWidth, overlay.cssHeight);
     const editingText = this.nativeTextEditor !== null;
+    const tintEditableSelection = !editingText;
+    const showEditableSelectionControls = !editingText && this.shouldShowEditableSelection();
     for (const cover of this.coverHistory) {
       if (cover.pageIndex === overlay.pageIndex) {
-        drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(cover.id));
+        drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(cover.id));
       }
     }
     if (this.currentCover && this.currentCover.pageIndex === overlay.pageIndex) {
@@ -57017,35 +57186,35 @@ var InkSession = class {
     }
     for (const image of this.imageHistory) {
       if (image.pageIndex === overlay.pageIndex) {
-        this.drawImageElement(ctx, image, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(image.id));
+        this.drawImageElement(ctx, image, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(image.id));
       }
     }
     for (const stroke2 of this.strokeHistory) {
       if (stroke2.pageIndex !== overlay.pageIndex) {
         continue;
       }
-      if (this.savedInkIsBurnedIntoPdf && stroke2.saved) {
+      if (this.savedInkIsBurnedIntoPdf && stroke2.saved && !Array.isArray(stroke2.pdfPoints)) {
         continue;
       }
-      const selected2 = !editingText && this.selectedStrokeIds.has(stroke2.id);
+      const selected2 = tintEditableSelection && this.selectedStrokeIds.has(stroke2.id);
       drawStroke(ctx, stroke2, overlay.cssWidth, overlay.cssHeight, selected2);
     }
     if (previewStroke && previewStroke.pageIndex === overlay.pageIndex) {
-      drawStroke(ctx, previewStroke, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(previewStroke.id));
+      drawStroke(ctx, previewStroke, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(previewStroke.id));
     }
     for (const text of this.textHistory) {
       if (text.pageIndex === overlay.pageIndex && (!text.saved || !this.savedTextIsBurnedIntoPdf)) {
-        drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, !editingText && this.selectedStrokeIds.has(text.id));
+        drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(text.id));
       }
     }
-    if (!editingText && this.selectionDrag?.mode === "marquee" && this.selectionDrag.pageIndex === overlay.pageIndex) {
+    if (showEditableSelectionControls && this.selectionDrag?.mode === "marquee" && this.selectionDrag.pageIndex === overlay.pageIndex) {
       drawMarqueeBox(ctx, this.selectionDrag.start, this.selectionDrag.current, overlay.cssWidth, overlay.cssHeight);
     }
     const selected = this.getSelectedEditableElements(overlay.pageIndex);
-    if (!editingText && selected.length > 0) {
+    if (showEditableSelectionControls && selected.length > 0) {
       drawSelectionGroup(ctx, selected, overlay.cssWidth, overlay.cssHeight);
     }
-    if (!editingText && this.nativeSelection?.pageIndex === overlay.pageIndex) {
+    if (showEditableSelectionControls && this.nativeSelection?.pageIndex === overlay.pageIndex) {
       drawNativeSelection(ctx, this.nativeSelection, overlay.cssWidth, overlay.cssHeight);
     }
     if (this.cropPreview?.pageIndexes.has(overlay.pageIndex)) {
@@ -57073,7 +57242,14 @@ var InkSession = class {
     const targetFile = this.file;
     const targetPath = targetFile.path;
     const hasUnsavedPdfStroke = elements.some((element) => element.kind === "stroke" && element.pdfSaved !== true);
-    if (!this.dirty && elements.every((element) => element.saved) && !hasUnsavedPdfStroke) {
+    const changedInkPages = /* @__PURE__ */ new Set([
+      ...Array.from(this.dirtyInkPages),
+      ...elements.filter((element) => element.kind === "stroke" && element.pdfSaved !== true).map((stroke2) => stroke2.pageIndex)
+    ]);
+    const deletedExternalInkIds = new Set(this.deletedExternalInkIds);
+    const deletedPdftionInkIds = new Set(this.deletedPdftionInkIds);
+    const hasInkPdfChange = changedInkPages.size > 0 || deletedExternalInkIds.size > 0 || deletedPdftionInkIds.size > 0;
+    if (!this.dirty && elements.every((element) => element.saved) && !hasUnsavedPdfStroke && !hasInkPdfChange) {
       if (!auto) {
         new import_obsidian.Notice(uiText("\u6CA1\u6709\u65B0\u7684\u6807\u6CE8\u9700\u8981\u4FDD\u5B58\u3002", "No new annotations to save."));
       }
@@ -57087,19 +57263,28 @@ var InkSession = class {
     this.saving = true;
     try {
       const binary = await this.plugin.app.vault.readBinary(targetFile);
-      const pdf = await PDFDocument_default.load(binary, { ignoreEncryption: true, updateMetadata: false });
-      await syncEditableInkAnnotationsOnPdf(pdf, elements);
-      const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
-      const buffer2 = new ArrayBuffer(saved.byteLength);
-      new Uint8Array(buffer2).set(saved);
-      await this.plugin.app.vault.modifyBinary(targetFile, buffer2);
+      let buffer2 = binary;
+      if (hasInkPdfChange) {
+        const pdf = await PDFDocument_default.load(binary, { ignoreEncryption: true, updateMetadata: false });
+        await syncEditableInkAnnotationsOnPdf(pdf, elements, {
+          deletedExternalInkIds,
+          deletedPdftionInkIds,
+          dirtyPages: changedInkPages
+        });
+        const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
+        buffer2 = new ArrayBuffer(saved.byteLength);
+        new Uint8Array(buffer2).set(saved);
+        await this.plugin.app.vault.modifyBinary(targetFile, buffer2);
+      }
       const markedElements = elements.map((element) => {
-        const wroteStrokeToPdf = element.kind === "stroke" && element.pdfSaved !== true;
+        const wroteStrokeToPdf = element.kind === "stroke" && changedInkPages.has(element.pageIndex);
         element.saved = true;
         if (element.kind === "stroke") {
-          element.pdfSaved = true;
-          element.pdfPoints = element.points.map((point) => ({ ...point }));
-          element.externalDirty = false;
+          if (wroteStrokeToPdf) {
+            element.pdfSaved = true;
+            element.pdfPoints = element.points.map((point) => ({ ...point }));
+            element.externalDirty = false;
+          }
           if (wroteStrokeToPdf) {
             element.source = "pdftion";
           }
@@ -57110,11 +57295,15 @@ var InkSession = class {
       if (this.file.path !== targetPath) {
         return;
       }
-      this.currentStroke = null;
+      this.clearCurrentStroke();
       this.currentCover = null;
       this.savedInkIsBurnedIntoPdf = false;
       this.savedTextIsBurnedIntoPdf = false;
+      this.pendingNativeInkHidePages.clear();
       this.detachedInkEditPages.clear();
+      this.dirtyInkPages.clear();
+      this.deletedExternalInkIds.clear();
+      this.deletedPdftionInkIds.clear();
       this.pruneSelection();
       this.dirty = false;
       this.updateExternalInkLayerState();
@@ -57337,7 +57526,7 @@ var InkSession = class {
     for (const image of elements.filter((element) => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
       await this.drawImageElementForExport(ctx, image, overlay.cssWidth, overlay.cssHeight);
     }
-    for (const stroke2 of elements.filter((element) => element.kind === "stroke" && element.pageIndex === overlay.pageIndex && (!element.saved || !this.savedInkIsBurnedIntoPdf))) {
+    for (const stroke2 of elements.filter((element) => element.kind === "stroke" && element.pageIndex === overlay.pageIndex && (!element.saved || !this.savedInkIsBurnedIntoPdf || Array.isArray(element.pdfPoints)))) {
       drawStroke(ctx, stroke2, overlay.cssWidth, overlay.cssHeight, false);
     }
     for (const text of elements.filter((element) => element.kind === "text" && element.pageIndex === overlay.pageIndex && (!element.saved || !this.savedTextIsBurnedIntoPdf))) {
@@ -57752,8 +57941,7 @@ var InkSession = class {
     this.rememberHistory();
     this.coverHistory.push(cover);
     this.imageHistory.push(image);
-    this.selectedStrokeIds.clear();
-    this.selectedStrokeIds.add(image.id);
+    this.setSingleSelectedElement(image.id);
     this.redoStack = [];
     this.markDirty();
     this.scheduleAutoSave();
@@ -57819,9 +58007,7 @@ var InkSession = class {
     };
     this.rememberHistory();
     this.imageHistory.push(image);
-    this.selectedStrokeIds.clear();
-    this.selectedStrokeIds.add(image.id);
-    this.nativeSelection = null;
+    this.setSingleSelectedElement(image.id);
     this.redoStack = [];
     this.markDirty();
     this.redrawAll();
@@ -58158,6 +58344,27 @@ var InkSession = class {
     for (const element of elements) {
       this.selectedStrokeIds.add(element.id);
     }
+    this.selectionChangedAt = Date.now();
+    this.selectionWasExplicitTap = false;
+  }
+  setSingleSelectedElement(id) {
+    this.selectedStrokeIds.clear();
+    this.selectedStrokeIds.add(id);
+    this.nativeSelection = null;
+    this.selectionChangedAt = Date.now();
+    this.selectionWasExplicitTap = true;
+  }
+  clearEditableSelection() {
+    const hadSelection = this.selectedStrokeIds.size > 0 || this.nativeSelection !== null;
+    this.selectedStrokeIds.clear();
+    this.nativeSelection = null;
+    if (hadSelection) {
+      this.selectionChangedAt = Date.now();
+    }
+    this.selectionWasExplicitTap = false;
+  }
+  canMoveFreshSelection() {
+    return this.selectionWasExplicitTap && Date.now() - this.selectionChangedAt >= 500;
   }
   pruneSelection() {
     for (const id of Array.from(this.selectedStrokeIds)) {
@@ -58179,16 +58386,18 @@ var InkSession = class {
     return this.getSelectedEditableElements(pageIndex).length > 0;
   }
   updateExternalInkLayerState() {
-    this.restoreHiddenNativeInkAnnotations();
+    const activePages = /* @__PURE__ */ new Set();
     for (const overlay of this.overlays.values()) {
       const targets = this.strokeHistory.filter((stroke2) => stroke2.pageIndex === overlay.pageIndex && Array.isArray(stroke2.pdfPoints));
-      overlay.pageEl.classList.toggle("pdftion-hide-native-ink-layer", targets.length > 0);
-      if (targets.length === 0) {
+      const shouldHidePage = targets.length > 0 || this.enabled && (this.pendingNativeInkHidePages.has(overlay.pageIndex) || this.detachedInkEditPages.has(overlay.pageIndex));
+      if (!shouldHidePage) {
+        overlay.pageEl.classList.remove("pdftion-hide-native-ink-layer");
         continue;
       }
-      for (const layer of Array.from(overlay.pageEl.querySelectorAll(".annotationLayer, .annotationEditorLayer"))) {
-        this.hiddenNativeAnnotationStyles.set(layer, layer.style.visibility);
-        layer.style.visibility = "hidden";
+      activePages.add(overlay.pageIndex);
+      overlay.pageEl.classList.add("pdftion-hide-native-ink-layer");
+      for (const layer of this.collectNativeAnnotationElements(overlay.pageEl, false)) {
+        this.hideNativeAnnotationElement(layer);
       }
       const canvasRect = overlay.canvas.getBoundingClientRect();
       const targetRects = targets.map((stroke2) => normalizedStrokeBounds({ ...stroke2, points: stroke2.pdfPoints ?? stroke2.points })).filter((bounds) => bounds !== null).map((bounds) => {
@@ -58203,29 +58412,94 @@ var InkSession = class {
       if (targetRects.length === 0) {
         continue;
       }
-      for (const candidate of Array.from(overlay.pageEl.querySelectorAll(".annotationLayer *, .annotationEditorLayer *"))) {
+      for (const candidate of this.collectNativeAnnotationElements(overlay.pageEl, true)) {
         const rect = candidate.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) {
           continue;
         }
         if (targetRects.some((target) => rectsOverlap(target, rect))) {
-          this.hiddenNativeAnnotationStyles.set(candidate, candidate.style.visibility);
-          candidate.style.visibility = "hidden";
+          this.hideNativeAnnotationElement(candidate);
         }
       }
     }
+    this.restoreHiddenNativeInkAnnotations(activePages);
   }
-  restoreHiddenNativeInkAnnotations() {
-    for (const [element, visibility] of this.hiddenNativeAnnotationStyles) {
-      if (visibility) {
-        element.style.visibility = visibility;
-      } else {
-        element.style.removeProperty("visibility");
+  rememberNativeInkHidePagesForCurrentPages(force = false) {
+    const pageIndexes = this.getCurrentInkDetachPages(force);
+    if (pageIndexes.size === 0) {
+      return false;
+    }
+    for (const pageIndex of pageIndexes) {
+      this.pendingNativeInkHidePages.add(pageIndex);
+    }
+    return true;
+  }
+  primeNativeInkHidingForCurrentPages(force = false) {
+    if (!this.rememberNativeInkHidePagesForCurrentPages(force)) {
+      return;
+    }
+    this.updateExternalInkLayerState();
+    window.requestAnimationFrame(() => this.updateExternalInkLayerState());
+    window.setTimeout(() => this.updateExternalInkLayerState(), 80);
+  }
+  collectNativeAnnotationElements(root, includeChildren) {
+    const selector = includeChildren ? ".annotationLayer *, .annotationEditorLayer *, [data-annotation-id], [data-pdf-annotation-id], .popupAnnotation, .pdf-annotation-popup, .pdfAnnotationPopup" : ".annotationLayer, .annotationEditorLayer, [data-annotation-id], [data-pdf-annotation-id], .popupAnnotation, .pdf-annotation-popup, .pdfAnnotationPopup";
+    return Array.from(root.querySelectorAll(selector));
+  }
+  hideNativeAnnotationElement(element) {
+    if (!this.hiddenNativeAnnotationStyles.has(element)) {
+      this.hiddenNativeAnnotationStyles.set(element, {
+        display: element.style.display,
+        opacity: element.style.opacity,
+        pointerEvents: element.style.pointerEvents,
+        visibility: element.style.visibility
+      });
+    }
+    element.style.setProperty("display", "none", "important");
+    element.style.setProperty("opacity", "0", "important");
+    element.style.setProperty("pointer-events", "none", "important");
+    element.style.setProperty("visibility", "hidden", "important");
+  }
+  restoreHiddenNativeAnnotationElement(element, snapshot) {
+    if (snapshot.display) {
+      element.style.display = snapshot.display;
+    } else {
+      element.style.removeProperty("display");
+    }
+    if (snapshot.opacity) {
+      element.style.opacity = snapshot.opacity;
+    } else {
+      element.style.removeProperty("opacity");
+    }
+    if (snapshot.pointerEvents) {
+      element.style.pointerEvents = snapshot.pointerEvents;
+    } else {
+      element.style.removeProperty("pointer-events");
+    }
+    if (snapshot.visibility) {
+      element.style.visibility = snapshot.visibility;
+    } else {
+      element.style.removeProperty("visibility");
+    }
+  }
+  restoreHiddenNativeInkAnnotations(keepPageIndexes = /* @__PURE__ */ new Set()) {
+    for (const overlay of this.overlays.values()) {
+      if (!keepPageIndexes.has(overlay.pageIndex)) {
+        overlay.pageEl.classList.remove("pdftion-hide-native-ink-layer");
       }
     }
-    this.hiddenNativeAnnotationStyles.clear();
-    for (const overlay of this.overlays.values()) {
-      overlay.pageEl.classList.remove("pdftion-hide-native-ink-layer");
+    for (const [element, snapshot] of Array.from(this.hiddenNativeAnnotationStyles)) {
+      const overlay = Array.from(this.overlays.values()).find((candidate) => candidate.pageEl.contains(element));
+      if (overlay && keepPageIndexes.has(overlay.pageIndex)) {
+        continue;
+      }
+      if (element.isConnected) {
+        this.restoreHiddenNativeAnnotationElement(element, snapshot);
+      } else {
+        this.hiddenNativeAnnotationStyles.delete(element);
+        continue;
+      }
+      this.hiddenNativeAnnotationStyles.delete(element);
     }
   }
   selectionBoxContainsPoint(overlay, point) {
@@ -58298,13 +58572,14 @@ var InkSession = class {
   }
   restoreHistorySnapshot(snapshot) {
     const elements = snapshot.elements.map((element) => markElementUnsaved(cloneElement(element)));
+    this.markInkChangesBetween(this.getEditableElements(), elements);
     this.strokeHistory = elements.filter((element) => element.kind === "stroke");
     this.textHistory = elements.filter((element) => element.kind === "text");
     this.coverHistory = elements.filter((element) => element.kind === "cover");
     this.imageHistory = elements.filter((element) => element.kind === "image");
     this.selectedStrokeIds = new Set(snapshot.selectedIds.filter((id) => elements.some((element) => element.id === id)));
     this.nativeSelection = snapshot.nativeSelection ? { ...snapshot.nativeSelection } : null;
-    this.currentStroke = null;
+    this.clearCurrentStroke();
     this.currentCover = null;
     this.selectionDrag = null;
     this.dirty = true;
@@ -58338,23 +58613,35 @@ var InkSession = class {
     }
   }
   removeElementById(id) {
+    const removed = this.findElementById(id);
+    if (!removed) {
+      return null;
+    }
+    this.markElementsDeleted([removed]);
     this.strokeHistory = this.strokeHistory.filter((stroke2) => stroke2.id !== id);
     this.textHistory = this.textHistory.filter((text) => text.id !== id);
     this.coverHistory = this.coverHistory.filter((cover) => cover.id !== id);
     this.imageHistory = this.imageHistory.filter((image) => image.id !== id);
+    return removed;
   }
   hasUnsavedStrokes() {
     return this.getEditableElements().some((element) => !element.saved);
   }
   hasPendingPdfWrite() {
-    return this.dirty || this.getEditableElements().some((element) => !element.saved || element.kind === "stroke" && element.pdfSaved !== true);
+    return this.dirty || this.dirtyInkPages.size > 0 || this.deletedExternalInkIds.size > 0 || this.deletedPdftionInkIds.size > 0 || this.getEditableElements().some((element) => !element.saved || element.kind === "stroke" && element.pdfSaved !== true);
   }
   markDirty() {
     this.dirty = true;
   }
+  markInkPageDirty(pageIndex) {
+    if (Number.isFinite(pageIndex) && pageIndex >= 0) {
+      this.dirtyInkPages.add(pageIndex);
+    }
+  }
   markElementChanged(element) {
     element.saved = false;
     if (element.kind === "stroke") {
+      this.markInkPageDirty(element.pageIndex);
       if (element.pdfSaved === true && !element.pdfPoints) {
         element.pdfPoints = element.points.map((point) => ({ ...point }));
       }
@@ -58362,6 +58649,39 @@ var InkSession = class {
         element.externalDirty = true;
       }
       element.pdfSaved = false;
+    }
+  }
+  markStrokeDeleted(stroke2) {
+    this.markInkPageDirty(stroke2.pageIndex);
+    if (stroke2.source === "external-ink") {
+      this.deletedExternalInkIds.add(stroke2.id);
+      return;
+    }
+    if (stroke2.source === "pdftion" || stroke2.pdfSaved === true) {
+      this.deletedPdftionInkIds.add(stroke2.id);
+    }
+  }
+  markElementsDeleted(elements) {
+    for (const element of elements) {
+      if (element.kind === "stroke") {
+        this.markStrokeDeleted(element);
+      }
+    }
+  }
+  markInkChangesBetween(before, after) {
+    const beforeStrokes = new Map(before.filter((element) => element.kind === "stroke").map((stroke2) => [stroke2.id, stroke2]));
+    const afterStrokes = after.filter((element) => element.kind === "stroke");
+    const afterIds = new Set(afterStrokes.map((stroke2) => stroke2.id));
+    for (const stroke2 of beforeStrokes.values()) {
+      if (!afterIds.has(stroke2.id)) {
+        this.markStrokeDeleted(stroke2);
+      }
+    }
+    for (const stroke2 of afterStrokes) {
+      const previous = beforeStrokes.get(stroke2.id);
+      if (!previous || !inkStrokesEquivalentForPdf(previous, stroke2)) {
+        this.markElementChanged(stroke2);
+      }
     }
   }
   async saveEditableStateWhileSaving() {
@@ -58472,6 +58792,8 @@ var InkSession = class {
       }
     }
     this.nativeSelection = null;
+    this.selectionChangedAt = Date.now();
+    this.selectionWasExplicitTap = false;
     this.redrawAll();
     return this.selectedStrokeIds.size;
   }
@@ -58488,7 +58810,7 @@ var InkSession = class {
     this.textHistory = cloned.filter((element) => element.kind === "text");
     this.coverHistory = cloned.filter((element) => element.kind === "cover");
     this.imageHistory = cloned.filter((element) => element.kind === "image");
-    this.selectedStrokeIds.clear();
+    this.clearEditableSelection();
     this.redoStack = [];
     this.markDirty();
     this.redrawAll();
@@ -58862,13 +59184,25 @@ async function embedAnnotationFont(pdf, fontBytes) {
   pdf.registerFontkit(resolvePdfFontkit(fontkit_es_exports));
   return pdf.embedFont(fontBytes, { subset: true });
 }
-async function syncEditableInkAnnotationsOnPdf(pdf, elements) {
-  const strokesToWrite = elements.filter((element) => element.kind === "stroke" && element.pdfSaved !== true);
+async function syncEditableInkAnnotationsOnPdf(pdf, elements, options = {}) {
+  const dirtyStrokes = elements.filter((element) => element.kind === "stroke" && element.pdfSaved !== true);
+  const pagesToRewrite = /* @__PURE__ */ new Set([
+    ...options.dirtyPages ? Array.from(options.dirtyPages) : [],
+    ...dirtyStrokes.map((stroke2) => stroke2.pageIndex)
+  ]);
+  const strokesToWrite = elements.filter((element) => element.kind === "stroke" && (element.pdfSaved !== true || pagesToRewrite.has(element.pageIndex) && element.source !== "external-ink"));
   removeTargetInkAnnotations(
     pdf,
-    new Set(strokesToWrite.filter((stroke2) => stroke2.source !== "external-ink").map((stroke2) => stroke2.id)),
-    new Set(strokesToWrite.filter((stroke2) => stroke2.source === "external-ink" && stroke2.externalDirty === true).map((stroke2) => stroke2.id))
+    /* @__PURE__ */ new Set([
+      ...dirtyStrokes.filter((stroke2) => stroke2.source !== "external-ink").map((stroke2) => stroke2.id),
+      ...options.deletedPdftionInkIds ? Array.from(options.deletedPdftionInkIds) : []
+    ]),
+    /* @__PURE__ */ new Set([
+      ...dirtyStrokes.filter((stroke2) => stroke2.source === "external-ink" && stroke2.externalDirty === true).map((stroke2) => stroke2.id),
+      ...options.deletedExternalInkIds ? Array.from(options.deletedExternalInkIds) : []
+    ])
   );
+  removePdftionInkAnnotationsOnPages(pdf, pagesToRewrite);
   const pages = pdf.getPages();
   for (const stroke2 of strokesToWrite) {
     const page = pages[stroke2.pageIndex];
@@ -58878,6 +59212,25 @@ async function syncEditableInkAnnotationsOnPdf(pdf, elements) {
     if (!addStandardInkAnnotation(pdf, page, stroke2)) {
       const size = page.getSize();
       drawStrokeAsPdfLines(page, stroke2, size.width, size.height);
+    }
+  }
+}
+function removePdftionInkAnnotationsOnPages(pdf, pageIndexes) {
+  if (pageIndexes.size === 0) {
+    return;
+  }
+  const pages = pdf.getPages();
+  for (const pageIndex of pageIndexes) {
+    const page = pages[pageIndex];
+    const annots = page?.node.Annots?.();
+    if (!annots) {
+      continue;
+    }
+    for (let index = annots.size() - 1; index >= 0; index -= 1) {
+      const annot = annots.lookupMaybe(index, PDFDict_default);
+      if (annot && isPdftionInkAnnotation(annot)) {
+        annots.remove(index);
+      }
     }
   }
 }
@@ -58907,10 +59260,13 @@ function isPdftionInkAnnotation(annot) {
   const title2 = decodePdfText(annot.lookupMaybe(PDFName_default.of("T"), PDFString_default, PDFHexString_default));
   return nm.startsWith("Pdftion:") || contents.startsWith("Pdftion ") || title2 === "Pdftion";
 }
-function extractPdfInkAnnotations(pdf) {
+function extractPdfInkAnnotations(pdf, pageIndexes) {
   const strokes = [];
   const pages = pdf.getPages();
   for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+    if (pageIndexes && !pageIndexes.has(pageIndex)) {
+      continue;
+    }
     const page = pages[pageIndex];
     const size = page.getSize();
     const annots = page.node.Annots?.();
@@ -60115,25 +60471,18 @@ function rectsOverlap(a, b) {
 function nativeRegionContainsPoint(region, point) {
   return point.x >= region.x && point.x <= region.x + region.width && point.y >= region.y && point.y <= region.y + region.height;
 }
-function isTapStroke(stroke2, cssWidth, cssHeight) {
-  const first = stroke2.points[0];
-  if (!first) {
-    return false;
-  }
-  return stroke2.points.every((point) => normalizedDistance(first, point, cssWidth, cssHeight) <= 4);
-}
 function translateStroke(stroke2, dx, dy) {
   for (const point of stroke2.points) {
-    point.x = clamp(point.x + dx, 0, 1);
-    point.y = clamp(point.y + dy, 0, 1);
+    point.x += dx;
+    point.y += dy;
   }
 }
 function translateElement(element, dx, dy) {
   if (element.kind === "stroke") {
     translateStroke(element, dx, dy);
   } else {
-    element.x = clamp(element.x + dx, 0, 1);
-    element.y = clamp(element.y + dy, 0, 1);
+    element.x += dx;
+    element.y += dy;
   }
 }
 function cloneStroke(stroke2) {
@@ -60145,6 +60494,9 @@ function cloneStroke(stroke2) {
 }
 function cloneElement(element) {
   return element.kind === "stroke" ? cloneStroke(element) : { ...element };
+}
+function inkStrokesEquivalentForPdf(a, b) {
+  return a.pageIndex === b.pageIndex && a.color === b.color && Math.abs(a.opacity - b.opacity) <= 1e-3 && Math.abs(a.width - b.width) <= 1e-3 && a.tool === b.tool && inkPointsApproximatelyEqual(a.points, b.points);
 }
 function normalizedStrokeBounds(stroke2) {
   if (stroke2.points.length === 0) {
