@@ -1418,9 +1418,11 @@ export default class PdftionPlugin extends Plugin {
     delete (activeWindow as unknown as Record<string, unknown>)[PDFTION_AI_API_NAME];
     getActiveBody().classList.remove("pdftion-menu-boost");
     getActiveBody().classList.remove("pdftion-editing-active");
-    getActiveBody().style.removeProperty("--pdftion-toolbar-button-size");
-    getActiveBody().style.removeProperty("--pdftion-toolbar-max-width");
-    getActiveBody().style.removeProperty("--pdftion-toolbar-top-offset");
+    getActiveBody().setCssProps({
+      "--pdftion-toolbar-button-size": "",
+      "--pdftion-toolbar-max-width": "",
+      "--pdftion-toolbar-top-offset": ""
+    });
     for (const session of this.sessions.values()) {
       session.destroy();
     }
@@ -1436,9 +1438,11 @@ export default class PdftionPlugin extends Plugin {
   applyRuntimeSettings(): void {
     const body = getActiveBody();
     body.classList.toggle("pdftion-menu-boost", this.settings.boostPdfMenus);
-    body.style.setProperty("--pdftion-toolbar-button-size", `${this.settings.toolbarButtonSize}px`);
-    body.style.setProperty("--pdftion-toolbar-max-width", `${this.settings.toolbarMaxWidth}px`);
-    body.style.setProperty("--pdftion-toolbar-top-offset", `${this.settings.toolbarTopOffset}px`);
+    body.setCssProps({
+      "--pdftion-toolbar-button-size": `${this.settings.toolbarButtonSize}px`,
+      "--pdftion-toolbar-max-width": `${this.settings.toolbarMaxWidth}px`,
+      "--pdftion-toolbar-top-offset": `${this.settings.toolbarTopOffset}px`
+    });
   }
 
   private queuePdfSurfaceScans(): void {
@@ -4455,8 +4459,7 @@ class InkSession {
       if (!this.isNativePdfAnnotationPopup(candidate) && !this.looksLikeNativeAnnotationMenu(candidate)) {
         continue;
       }
-      candidate.style.setProperty("display", "none", "important");
-      candidate.style.setProperty("pointer-events", "none", "important");
+      candidate.classList.add("pdftion-hide-native-popup");
     }
   }
 
@@ -7566,33 +7569,17 @@ class InkSession {
         visibility: element.style.visibility
       });
     }
-    element.style.setProperty("display", "none", "important");
-    element.style.setProperty("opacity", "0", "important");
-    element.style.setProperty("pointer-events", "none", "important");
-    element.style.setProperty("visibility", "hidden", "important");
+    element.classList.add("pdftion-hide-native-annotation-element");
   }
 
   private restoreHiddenNativeAnnotationElement(element: HTMLElement, snapshot: NativeAnnotationStyleSnapshot): void {
-    if (snapshot.display) {
-      element.style.display = snapshot.display;
-    } else {
-      element.style.removeProperty("display");
-    }
-    if (snapshot.opacity) {
-      element.style.opacity = snapshot.opacity;
-    } else {
-      element.style.removeProperty("opacity");
-    }
-    if (snapshot.pointerEvents) {
-      element.style.pointerEvents = snapshot.pointerEvents;
-    } else {
-      element.style.removeProperty("pointer-events");
-    }
-    if (snapshot.visibility) {
-      element.style.visibility = snapshot.visibility;
-    } else {
-      element.style.removeProperty("visibility");
-    }
+    element.classList.remove("pdftion-hide-native-annotation-element");
+    element.setCssStyles({
+      display: snapshot.display || "",
+      opacity: snapshot.opacity || "",
+      pointerEvents: snapshot.pointerEvents || "",
+      visibility: snapshot.visibility || ""
+    });
   }
 
   private restoreHiddenNativeInkAnnotations(keepPageIndexes = new Set<number>()): void {
@@ -8785,7 +8772,7 @@ function addStandardInkAnnotation(pdf: PDFDocument, page: ReturnType<PDFDocument
     }
     let annots = pageNode.Annots?.();
     if (!annots) {
-      annots = pdf.context.obj([]) as PDFArray;
+      annots = pdf.context.obj([]);
       pageNode.set(PDFName.of("Annots"), annots);
     }
     annots.push(annotationRef);

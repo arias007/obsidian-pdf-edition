@@ -53107,9 +53107,11 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     delete activeWindow[PDFTION_AI_API_NAME];
     getActiveBody().classList.remove("pdftion-menu-boost");
     getActiveBody().classList.remove("pdftion-editing-active");
-    getActiveBody().style.removeProperty("--pdftion-toolbar-button-size");
-    getActiveBody().style.removeProperty("--pdftion-toolbar-max-width");
-    getActiveBody().style.removeProperty("--pdftion-toolbar-top-offset");
+    getActiveBody().setCssProps({
+      "--pdftion-toolbar-button-size": "",
+      "--pdftion-toolbar-max-width": "",
+      "--pdftion-toolbar-top-offset": ""
+    });
     for (const session of this.sessions.values()) {
       session.destroy();
     }
@@ -53123,9 +53125,11 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   applyRuntimeSettings() {
     const body = getActiveBody();
     body.classList.toggle("pdftion-menu-boost", this.settings.boostPdfMenus);
-    body.style.setProperty("--pdftion-toolbar-button-size", `${this.settings.toolbarButtonSize}px`);
-    body.style.setProperty("--pdftion-toolbar-max-width", `${this.settings.toolbarMaxWidth}px`);
-    body.style.setProperty("--pdftion-toolbar-top-offset", `${this.settings.toolbarTopOffset}px`);
+    body.setCssProps({
+      "--pdftion-toolbar-button-size": `${this.settings.toolbarButtonSize}px`,
+      "--pdftion-toolbar-max-width": `${this.settings.toolbarMaxWidth}px`,
+      "--pdftion-toolbar-top-offset": `${this.settings.toolbarTopOffset}px`
+    });
   }
   queuePdfSurfaceScans() {
     this.clearSurfaceScanTimers();
@@ -54448,7 +54452,7 @@ var InkSession = class {
       return;
     }
     for (const [property, value] of Object.entries(styles)) {
-      element.style.setProperty(property, value, "important");
+      element.setCssStyles({ [property]: value });
     }
   }
   stabilizeEditingSurface() {
@@ -55827,8 +55831,7 @@ var InkSession = class {
       if (!this.isNativePdfAnnotationPopup(candidate) && !this.looksLikeNativeAnnotationMenu(candidate)) {
         continue;
       }
-      candidate.style.setProperty("display", "none", "important");
-      candidate.style.setProperty("pointer-events", "none", "important");
+      candidate.classList.add("pdftion-hide-native-popup");
     }
   }
   isNativePdfAnnotationElement(element) {
@@ -58600,32 +58603,16 @@ var InkSession = class {
         visibility: element.style.visibility
       });
     }
-    element.style.setProperty("display", "none", "important");
-    element.style.setProperty("opacity", "0", "important");
-    element.style.setProperty("pointer-events", "none", "important");
-    element.style.setProperty("visibility", "hidden", "important");
+    element.classList.add("pdftion-hide-native-annotation-element");
   }
   restoreHiddenNativeAnnotationElement(element, snapshot) {
-    if (snapshot.display) {
-      element.style.display = snapshot.display;
-    } else {
-      element.style.removeProperty("display");
-    }
-    if (snapshot.opacity) {
-      element.style.opacity = snapshot.opacity;
-    } else {
-      element.style.removeProperty("opacity");
-    }
-    if (snapshot.pointerEvents) {
-      element.style.pointerEvents = snapshot.pointerEvents;
-    } else {
-      element.style.removeProperty("pointer-events");
-    }
-    if (snapshot.visibility) {
-      element.style.visibility = snapshot.visibility;
-    } else {
-      element.style.removeProperty("visibility");
-    }
+    element.classList.remove("pdftion-hide-native-annotation-element");
+    element.setCssStyles({
+      display: snapshot.display || "",
+      opacity: snapshot.opacity || "",
+      pointerEvents: snapshot.pointerEvents || "",
+      visibility: snapshot.visibility || ""
+    });
   }
   restoreHiddenNativeInkAnnotations(keepPageIndexes = /* @__PURE__ */ new Set()) {
     for (const overlay of this.overlays.values()) {

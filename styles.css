@@ -257,6 +257,14 @@ body.pdftion-editing-active .pdfAnnotationPopup {
   visibility: hidden !important;
 }
 
+.pdftion-hide-native-popup,
+.pdftion-hide-native-annotation-element {
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  visibility: hidden !important;
+}
+
 .pdftion-toolbar-host {
   align-items: center;
   display: none;
