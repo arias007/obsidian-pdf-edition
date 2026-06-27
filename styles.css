@@ -8,6 +8,59 @@ body.pdftion-menu-boost .pdftion-embed-actions {
   z-index: 161;
 }
 
+body.pdftion-menu-boost :is(.sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card) :is(.view-header, .view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title),
+body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.view-header, .view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title) {
+  align-items: center !important;
+  display: flex !important;
+  flex: 0 0 auto !important;
+  min-height: 38px !important;
+  max-height: none !important;
+  height: auto !important;
+  overflow: visible !important;
+  position: relative !important;
+  z-index: 2147483000 !important;
+}
+
+body.pdftion-menu-boost :is(.sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card) :is(.view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title) :is(.clickable-icon, button),
+body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title) :is(.clickable-icon, button) {
+  flex: 0 0 auto !important;
+  min-height: 34px !important;
+  min-width: 34px !important;
+  padding: 4px !important;
+}
+
+body.pdftion-menu-boost .pdftion-sr-pdf-root :is(.pdf-viewer, .pdfViewer, .pdf-container) {
+  flex: 1 1 auto !important;
+  max-height: none !important;
+  min-height: 180px !important;
+  overflow: auto !important;
+}
+
+body.pdftion-menu-boost :is(.sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card).pdftion-sr-has-pdf,
+body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.markdown-embed, .internal-embed, .media-embed, .file-embed, .pdf-embed),
+body.pdftion-menu-boost .pdftion-sr-pdf-root {
+  flex: 1 1 auto !important;
+  max-height: none !important;
+  min-height: 220px !important;
+  overflow: visible !important;
+}
+
+body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.markdown-preview-view, .markdown-rendered, .markdown-embed-content, .file-embed, .internal-embed, .media-embed) {
+  max-height: none !important;
+  overflow: visible !important;
+}
+
+body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.pdf-viewer, .pdfViewer, .pdf-container, .pdf-embed) {
+  min-height: 180px !important;
+  overflow: auto !important;
+}
+
+body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.view-header, .view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title, .pdftion-inline-actions) {
+  flex-shrink: 0 !important;
+  min-height: 38px !important;
+  overflow: visible !important;
+}
+
 body.pdftion-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions .clickable-icon,
 body.pdftion-menu-boost .pdftion-inline-actions .clickable-icon,
 body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
@@ -101,10 +154,13 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
 }
 
 .pdftion-sr-inline-actions {
-  bottom: 10px;
+  bottom: auto;
   left: auto;
   right: 10px;
-  top: auto;
+  top: 10px;
+  min-height: 40px;
+  max-height: none;
+  z-index: 2147483001;
 }
 
 .pdftion-root {

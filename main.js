@@ -53129,7 +53129,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
   }
   queuePdfSurfaceScans() {
     this.clearSurfaceScanTimers();
-    for (const delay of [0, 80, 180, 420, 900, 1800, 3200]) {
+    for (const delay of [0, 40, 80, 180, 420, 900, 1800, 3200, 5200, 8200, 12500]) {
       const timer = window.setTimeout(() => {
         this.surfaceScanTimers = this.surfaceScanTimers.filter((value) => value !== timer);
         this.scanPdfSurfaces();
@@ -53189,6 +53189,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
           cloned.pdfPoints = cloned.points.map((point) => ({ ...point }));
           cloned.externalDirty = false;
           cloned.source = cloned.source ?? "pdftion";
+          cloned.pathBreaks = cloneStrokePathBreaks(cloned);
         }
         return cloned;
       });
@@ -53434,7 +53435,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
     const surfaces = [];
     for (const rootEl of roots) {
       const file = this.resolvePdfFile(rootEl, view.file);
-      if (file && this.hasPdfPages(rootEl)) {
+      if (file && (this.hasPdfPages(rootEl) || this.isDetachedPdfSurface(rootEl))) {
         surfaces.push({ file, rootEl });
       }
     }
@@ -53445,7 +53446,7 @@ var PdftionPlugin = class extends import_obsidian.Plugin {
       rootEl.querySelectorAll(
         ".pdfViewer .page, .pdf-viewer .page, .pdf-container .page, .page[data-page-number]"
       )
-    ).filter((page) => page.querySelector("canvas") !== null);
+    ).filter((page) => page.querySelector("canvas") !== null || page.closest(".sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card") !== null);
   }
   hasPdfPages(rootEl) {
     return this.findPdfPageElements(rootEl).some((page) => page.clientWidth > 0 && page.clientHeight > 0);
@@ -53762,6 +53763,12 @@ var InkSession = class {
     this.rootEl = rootEl;
     this.applyToolSettingsFromPlugin();
     this.rootEl.classList.add("pdftion-root");
+    const srRoot = this.rootEl.closest(".sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card");
+    if (srRoot) {
+      this.rootEl.classList.add("pdftion-sr-pdf-root");
+      srRoot.classList.add("pdftion-sr-has-pdf");
+      this.startSrSurfaceStabilizer();
+    }
     this.injectButton();
     void this.loadEditableAnnotations();
     if (this.plugin.settings.autoEnableAnnotationToolbar) {
@@ -53861,6 +53868,9 @@ var InkSession = class {
   scanTimer = null;
   healthTimer = null;
   inkPrepareTimer = null;
+  overlaySyncFrame = 0;
+  srStabilizerTimer = null;
+  srStabilizerUntil = 0;
   inkPrepareTimerForce = false;
   nativeAnnotationPopupTimer = null;
   selectionDrag = null;
@@ -53902,6 +53912,11 @@ var InkSession = class {
     this.clearToolSettingsSaveTimer();
     this.clearScanTimer();
     this.clearEditableInkPrepareTimer();
+    this.stopSrSurfaceStabilizer(true);
+    if (this.overlaySyncFrame !== 0) {
+      window.cancelAnimationFrame(this.overlaySyncFrame);
+      this.overlaySyncFrame = 0;
+    }
     this.stopOverlayHealthCheck();
     this.stopNativeAnnotationPopupSuppressor();
     this.mutationObserver.disconnect();
@@ -53918,6 +53933,8 @@ var InkSession = class {
     this.toolbarHost?.remove();
     this.rootEl.querySelector(".pdftion-inline-actions")?.remove();
     this.toolbarHost = null;
+    this.rootEl.classList.remove("pdftion-sr-pdf-root");
+    this.rootEl.closest(".sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card")?.classList.remove("pdftion-sr-has-pdf");
     for (const overlay of this.overlays.values()) {
       overlay.abort.abort();
       overlay.canvas.remove();
@@ -54004,6 +54021,8 @@ var InkSession = class {
       const stroke2 = {
         ...element,
         externalDirty: matchesPdfStroke ? false : element.externalDirty,
+        externalInkId: element.externalInkId ?? (pdfStroke?.source === "external-ink" ? pdfStroke.id : void 0),
+        pathBreaks: cloneStrokePathBreaks(pdfStroke) ?? cloneStrokePathBreaks(element),
         pdfPoints: pdfPoints?.map((point) => ({ ...point })),
         pdfSaved: matchesPdfStroke ? true : element.pdfSaved ?? (pdfStroke ? true : void 0),
         source: element.source ?? pdfStroke?.source
@@ -54046,7 +54065,7 @@ var InkSession = class {
     this.scheduleEditableInkPrepare(120);
   }
   scheduleQuietScan() {
-    this.scheduleScanPages(this.enabled ? 320 : 120);
+    this.scheduleScanPages(this.isSpacedRepetitionSurface() ? this.enabled ? 90 : 60 : this.enabled ? 320 : 120);
   }
   scheduleScanPages(delay = 250) {
     this.clearScanTimer();
@@ -54212,7 +54231,7 @@ var InkSession = class {
         return false;
       }
       unique.add(candidate);
-      return candidate.querySelector("canvas") !== null && candidate.clientWidth > 0 && candidate.clientHeight > 0;
+      return candidate.querySelector("canvas") !== null && (candidate.clientWidth > 0 && candidate.clientHeight > 0 || this.isSpacedRepetitionSurface());
     });
   }
   ensureOverlay(pageEl, fallbackIndex) {
@@ -54363,6 +54382,83 @@ var InkSession = class {
     void this.prepareEditableInkForCurrentPage();
     this.scheduleScanPages(0);
   }
+  syncOverlayGeometrySoon() {
+    if (this.overlaySyncFrame !== 0) {
+      return;
+    }
+    this.overlaySyncFrame = window.requestAnimationFrame(() => {
+      this.overlaySyncFrame = 0;
+      if (!this.enabled) {
+        return;
+      }
+      for (const overlay of this.overlays.values()) {
+        this.resizeOverlay(overlay);
+      }
+      this.redrawAll();
+      this.updateExternalInkLayerState();
+    });
+  }
+  startSrSurfaceStabilizer() {
+    if (!this.isSpacedRepetitionSurface()) {
+      return;
+    }
+    this.srStabilizerUntil = Math.max(this.srStabilizerUntil, Date.now() + 3e4);
+    this.stabilizeSrSurface();
+    if (this.srStabilizerTimer !== null) {
+      return;
+    }
+    this.srStabilizerTimer = window.setInterval(() => {
+      if (!this.enabled && Date.now() > this.srStabilizerUntil) {
+        this.stopSrSurfaceStabilizer(true);
+        return;
+      }
+      this.stabilizeSrSurface();
+    }, 260);
+  }
+  stopSrSurfaceStabilizer(force = false) {
+    if (!force && this.isSpacedRepetitionSurface() && Date.now() <= this.srStabilizerUntil) {
+      return;
+    }
+    if (this.srStabilizerTimer !== null) {
+      window.clearInterval(this.srStabilizerTimer);
+      this.srStabilizerTimer = null;
+    }
+  }
+  stabilizeSrSurface() {
+    const srRoot = this.rootEl.closest(".sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card");
+    if (!srRoot) {
+      return;
+    }
+    this.rootEl.classList.add("pdftion-sr-pdf-root");
+    srRoot.classList.add("pdftion-sr-has-pdf");
+    this.applySrStableStyle(srRoot, { minHeight: "240px", overflow: "visible" });
+    this.applySrStableStyle(this.rootEl, { minHeight: "220px", overflow: "visible" });
+    for (const element of Array.from(this.rootEl.querySelectorAll(".markdown-embed, .internal-embed, .media-embed, .file-embed, .pdf-embed, .pdf-container, .pdf-viewer, .pdfViewer"))) {
+      this.applySrStableStyle(element, { minHeight: "180px", overflow: "auto" });
+    }
+    for (const element of Array.from(srRoot.querySelectorAll(".view-header, .view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title, .pdftion-inline-actions"))) {
+      this.applySrStableStyle(element, { minHeight: "38px", overflow: "visible" });
+    }
+    for (const button of Array.from(srRoot.querySelectorAll(".view-actions .clickable-icon, .view-actions button, .pdf-toolbar-actions .clickable-icon, .pdf-toolbar-actions button, .pdf-toolbar-items .clickable-icon, .pdf-toolbar-items button, .pdf-viewer-toolbar .clickable-icon, .pdf-viewer-toolbar button, .pdf-toolbar .clickable-icon, .pdf-toolbar button, .pdf-toolbar-container .clickable-icon, .pdf-toolbar-container button, .pdf-embed-toolbar .clickable-icon, .pdf-embed-toolbar button, .pdftion-inline-actions .clickable-icon, .pdftion-inline-actions button"))) {
+      this.applySrStableStyle(button, { minHeight: "34px", minWidth: "34px", overflow: "visible" });
+    }
+  }
+  applySrStableStyle(element, styles) {
+    if (!isHTMLElement(element)) {
+      return;
+    }
+    for (const [property, value] of Object.entries(styles)) {
+      element.style.setProperty(property, value, "important");
+    }
+  }
+  stabilizeEditingSurface() {
+    this.startSrSurfaceStabilizer();
+    this.injectButton();
+    this.scanPages();
+    this.repairActiveOverlays();
+    this.syncOverlayGeometrySoon();
+    this.scheduleEditableInkPrepare(0, true);
+  }
   setEnabled(enabled, options = {}) {
     this.enabled = enabled;
     this.rootEl.classList.toggle("pdftion-enabled", this.enabled);
@@ -54377,13 +54473,20 @@ var InkSession = class {
       this.primeNativeInkHidingForCurrentPages(true);
       this.startOverlayHealthCheck();
       this.startNativeAnnotationPopupSuppressor();
+      this.startSrSurfaceStabilizer();
+      this.stabilizeEditingSurface();
       this.scheduleEditableInkPrepare(0, true);
       window.setTimeout(() => this.scheduleEditableInkPrepare(0, true), 260);
       window.setTimeout(() => this.scheduleEditableInkPrepare(0, true), 760);
+      window.setTimeout(() => this.stabilizeEditingSurface(), 120);
+      window.setTimeout(() => this.stabilizeEditingSurface(), 520);
+      window.setTimeout(() => this.stabilizeEditingSurface(), 1200);
+      window.setTimeout(() => this.stabilizeEditingSurface(), 2200);
       if (options.notice !== false) {
         new import_obsidian.Notice(uiText("PDF \u6279\u6CE8\u5DF2\u5F00\u542F\u3002", "PDF annotation enabled."));
       }
     } else {
+      this.stopSrSurfaceStabilizer();
       this.stopOverlayHealthCheck();
       this.stopNativeAnnotationPopupSuppressor();
       this.clearCurrentStroke();
@@ -54559,6 +54662,8 @@ var InkSession = class {
       this.strokeHistory.push({
         ...stroke2,
         externalDirty: false,
+        externalInkId: stroke2.externalInkId ?? (stroke2.source === "external-ink" ? stroke2.id : void 0),
+        pathBreaks: cloneStrokePathBreaks(stroke2),
         pdfPoints,
         pdfSaved: true,
         points: stroke2.points.map((point) => ({ ...point })),
@@ -54570,6 +54675,7 @@ var InkSession = class {
     const canRefreshFromPdf = existing.saved && existing.pdfSaved !== false && existing.externalDirty !== true;
     if (canRefreshFromPdf && !inkStrokesEquivalentForPdf(existing, stroke2)) {
       existing.points = stroke2.points.map((point) => ({ ...point }));
+      existing.pathBreaks = cloneStrokePathBreaks(stroke2);
       existing.color = stroke2.color;
       existing.opacity = stroke2.opacity;
       existing.pageCssHeight = stroke2.pageCssHeight;
@@ -54605,6 +54711,7 @@ var InkSession = class {
       if (existing) {
         if (existing.pdfSaved === true && existing.saved && existing.externalDirty !== true) {
           existing.points = stroke2.points.map((point) => ({ ...point }));
+          existing.pathBreaks = cloneStrokePathBreaks(stroke2);
           existing.color = stroke2.color;
           existing.opacity = stroke2.opacity;
           existing.pageCssHeight = stroke2.pageCssHeight;
@@ -54615,12 +54722,15 @@ var InkSession = class {
         existing.pdfPoints = stroke2.pdfPoints?.map((point) => ({ ...point })) ?? stroke2.points.map((point) => ({ ...point }));
         existing.pdfSaved = false;
         existing.externalDirty = true;
+        existing.externalInkId = existing.externalInkId ?? stroke2.externalInkId ?? (stroke2.source === "external-ink" ? stroke2.id : void 0);
         existing.source = existing.source ?? stroke2.source;
         existing.saved = false;
       } else {
         this.strokeHistory.push({
           ...stroke2,
           externalDirty: true,
+          externalInkId: stroke2.externalInkId ?? (stroke2.source === "external-ink" ? stroke2.id : void 0),
+          pathBreaks: cloneStrokePathBreaks(stroke2),
           pdfPoints: stroke2.pdfPoints?.map((point) => ({ ...point })) ?? stroke2.points.map((point) => ({ ...point })),
           pdfSaved: false,
           points: stroke2.points.map((point) => ({ ...point })),
@@ -57012,11 +57122,15 @@ var InkSession = class {
       if (Math.abs(zoomDelta) > 26 && Math.abs(zoomDelta) > Math.max(moveY, moveX) * 1.8) {
         dispatchPdfZoomGesture(this.rootEl, zoomDelta);
         this.touchScroll.initialDistance = distance;
+        this.syncOverlayGeometrySoon();
+        window.setTimeout(() => this.syncOverlayGeometrySoon(), 80);
+        window.setTimeout(() => this.syncOverlayGeometrySoon(), 220);
       }
       this.touchScroll.scrollEl.scrollTop += this.touchScroll.lastY - center.y;
       this.touchScroll.scrollEl.scrollLeft += this.touchScroll.lastX - center.x;
       this.touchScroll.lastX = center.x;
       this.touchScroll.lastY = center.y;
+      this.syncOverlayGeometrySoon();
       return;
     }
     if (this.activeTouchId === null) {
@@ -57284,6 +57398,8 @@ var InkSession = class {
             element.pdfSaved = true;
             element.pdfPoints = element.points.map((point) => ({ ...point }));
             element.externalDirty = false;
+            element.externalInkId = void 0;
+            element.pathBreaks = cloneStrokePathBreaks(element);
           }
           if (wroteStrokeToPdf) {
             element.source = "pdftion";
@@ -57393,20 +57509,7 @@ var InkSession = class {
     return targetPath;
   }
   async exportAnnotationsDocx() {
-    this.commitNativeTextEditor();
-    const targetFile = this.file;
-    const base = targetFile.path.replace(/\.pdf$/i, "");
-    let targetPath = `${base}-pdftion-content.docx`;
-    let index = 2;
-    while (await this.plugin.app.vault.adapter.exists(targetPath)) {
-      targetPath = `${base}-pdftion-content-${index}.docx`;
-      index += 1;
-    }
-    const docx = buildDocxFromParagraphs(markdownToDocxParagraphs(await this.getPdfContentMarkdown()), targetFile.basename);
-    const buffer2 = toArrayBufferCopy(docx);
-    await this.plugin.app.vault.adapter.writeBinary(targetPath, buffer2);
-    new import_obsidian.Notice(uiText(`\u5DF2\u5BFC\u51FA DOCX\uFF1A${targetPath}`, `Exported DOCX: ${targetPath}`));
-    return targetPath;
+    return this.exportConvertedDocx({ suffix: "pdftion-content", notice: true });
   }
   async getPdfContentMarkdown() {
     const pageCount = await this.getCurrentPdfPageCount();
@@ -57445,6 +57548,7 @@ var InkSession = class {
   async prepareExportSnapshot() {
     this.commitNativeTextEditor();
     await sleepMs(0);
+    await this.ensureVisualConversionPagesRendered();
     this.redrawAll();
     await waitForNextFrame();
   }
@@ -57470,7 +57574,7 @@ var InkSession = class {
     try {
       await this.prepareExportSnapshot();
       const pages = await this.captureVisualConversionPages();
-      const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "docx");
+      const targetPath = await this.getUniqueConvertedPath(options.suffix ?? "pdftion-converted", "docx");
       const docx = buildDocxFromPageImages(pages, this.file.basename);
       const buffer2 = toArrayBufferCopy(docx);
       await this.plugin.app.vault.adapter.writeBinary(targetPath, buffer2);
@@ -57485,6 +57589,7 @@ var InkSession = class {
     }
   }
   async captureVisualConversionPages() {
+    await this.ensureVisualConversionPagesRendered();
     const overlays = Array.from(this.overlays.values()).sort((a, b) => a.pageIndex - b.pageIndex);
     const pages = [];
     for (const overlay of overlays) {
@@ -57497,6 +57602,37 @@ var InkSession = class {
       throw new Error("No rendered PDF pages are available for conversion.");
     }
     return pages;
+  }
+  async ensureVisualConversionPagesRendered() {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const scroller = findScrollableAncestor(this.rootEl);
+    const originalScrollTop = scroller?.scrollTop ?? 0;
+    const originalScrollLeft = scroller?.scrollLeft ?? 0;
+    for (let pass = 0; pass < 2; pass += 1) {
+      const pages = this.findPageElements();
+      for (const pageEl of pages) {
+        const index = getPageIndex(pageEl, pages.indexOf(pageEl));
+        if (pageCount > 0 && index >= pageCount) {
+          continue;
+        }
+        pageEl.scrollIntoView({ block: "center", behavior: "auto" });
+        await waitForNextFrame();
+        await sleepMs(35);
+        this.ensureOverlay(pageEl, index);
+      }
+      this.scanPages();
+      await waitForNextFrame();
+      if (pageCount <= 0 || this.overlays.size >= pageCount) {
+        break;
+      }
+      await sleepMs(120);
+    }
+    if (scroller) {
+      scroller.scrollTop = originalScrollTop;
+      scroller.scrollLeft = originalScrollLeft;
+    }
+    this.scanPages();
+    await waitForNextFrame();
   }
   async captureVisualPageImage(overlay) {
     const pdfCanvas = this.getPdfCanvas(overlay);
@@ -57795,7 +57931,16 @@ var InkSession = class {
       if (stroke2.pageIndex !== overlay.pageIndex) {
         continue;
       }
-      if (strokeBoxContainsPoint(stroke2, point, overlay.cssWidth, overlay.cssHeight)) {
+      if (strokeContainsPoint(stroke2, point, overlay.cssWidth, overlay.cssHeight)) {
+        return stroke2;
+      }
+    }
+    for (let i = this.strokeHistory.length - 1; i >= 0; i -= 1) {
+      const stroke2 = this.strokeHistory[i];
+      if (stroke2.pageIndex !== overlay.pageIndex) {
+        continue;
+      }
+      if (strokeBoxContainsPoint(stroke2, point, overlay.cssWidth, overlay.cssHeight, true)) {
         return stroke2;
       }
     }
@@ -58542,6 +58687,7 @@ var InkSession = class {
       this.markElementChanged(live);
       if (live.kind === "stroke" && element.kind === "stroke") {
         live.points = element.points;
+        live.pathBreaks = cloneStrokePathBreaks(element);
         live.width = element.width;
       } else if (live.kind === "text" && element.kind === "text") {
         live.x = element.x;
@@ -58647,14 +58793,15 @@ var InkSession = class {
       }
       if (element.source === "external-ink") {
         element.externalDirty = true;
+        element.externalInkId = element.externalInkId ?? element.id;
       }
       element.pdfSaved = false;
     }
   }
   markStrokeDeleted(stroke2) {
     this.markInkPageDirty(stroke2.pageIndex);
-    if (stroke2.source === "external-ink") {
-      this.deletedExternalInkIds.add(stroke2.id);
+    if (stroke2.source === "external-ink" || stroke2.externalInkId) {
+      this.deletedExternalInkIds.add(stroke2.externalInkId ?? stroke2.id);
       return;
     }
     if (stroke2.source === "pdftion" || stroke2.pdfSaved === true) {
@@ -59198,7 +59345,7 @@ async function syncEditableInkAnnotationsOnPdf(pdf, elements, options = {}) {
       ...options.deletedPdftionInkIds ? Array.from(options.deletedPdftionInkIds) : []
     ]),
     /* @__PURE__ */ new Set([
-      ...dirtyStrokes.filter((stroke2) => stroke2.source === "external-ink" && stroke2.externalDirty === true).map((stroke2) => stroke2.id),
+      ...dirtyStrokes.filter((stroke2) => (stroke2.source === "external-ink" || stroke2.externalInkId) && stroke2.externalDirty === true).map((stroke2) => stroke2.externalInkId ?? stroke2.id),
       ...options.deletedExternalInkIds ? Array.from(options.deletedExternalInkIds) : []
     ])
   );
@@ -59325,25 +59472,29 @@ function externalInkAnnotationToStroke(annot, pageIndex, annotIndex, pageWidth, 
   if (!inkList || inkList.size() === 0) {
     return null;
   }
-  const points = [];
+  const paths = [];
   for (let pathIndex = 0; pathIndex < inkList.size(); pathIndex += 1) {
     const path = inkList.lookupMaybe(pathIndex, PDFArray_default);
     if (!path) {
       continue;
     }
+    const pathPoints = [];
     for (let pointIndex = 0; pointIndex + 1 < path.size(); pointIndex += 2) {
       const x = path.lookupMaybe(pointIndex, PDFNumber_default)?.asNumber();
       const y = path.lookupMaybe(pointIndex + 1, PDFNumber_default)?.asNumber();
       if (typeof x !== "number" || typeof y !== "number") {
         continue;
       }
-      points.push({
+      pathPoints.push({
         x: clamp(x / Math.max(1, pageWidth), 0, 1),
         y: clamp((pageHeight - y) / Math.max(1, pageHeight), 0, 1)
       });
     }
+    if (pathPoints.length > 0) {
+      paths.push(pathPoints);
+    }
   }
-  if (points.length < 2) {
+  if (paths.length === 0) {
     return null;
   }
   const color = readPdfColor(annot.lookupMaybe(PDFName_default.of("C"), PDFArray_default));
@@ -59351,15 +59502,22 @@ function externalInkAnnotationToStroke(annot, pageIndex, annotIndex, pageWidth, 
   const border = annot.lookupMaybe(PDFName_default.of("Border"), PDFArray_default);
   const borderWidth = border?.lookupMaybe(2, PDFNumber_default)?.asNumber() ?? 2;
   const pdftionId = pdftionInkStrokeId(annot);
-  const simplifiedPoints = simplifyInkPoints(points, 900);
+  const simplifiedPaths = simplifyInkPointRuns(paths, 3200).map(makeDrawableInkRun).filter((run) => run.length > 0);
+  const simplifiedPoints = flattenInkPointRuns(simplifiedPaths);
+  if (simplifiedPoints.length < 2) {
+    return null;
+  }
+  const pathBreaks = buildInkPathBreaks(simplifiedPaths);
   return {
     color,
     id: pdftionId ?? externalInkStrokeId(pageIndex, annotIndex, annot),
+    externalInkId: pdftionId ? void 0 : externalInkStrokeId(pageIndex, annotIndex, annot),
     kind: "stroke",
     opacity: clamp(opacity, 0.01, 1),
     pageCssHeight: pageHeight,
     pageCssWidth: pageWidth,
     pageIndex,
+    pathBreaks,
     pdfPoints: simplifiedPoints.map((point) => ({ ...point })),
     pdfSaved: true,
     points: simplifiedPoints,
@@ -59406,6 +59564,81 @@ function simplifyInkPoints(points, maxPoints) {
     simplified.push(last2);
   }
   return simplified;
+}
+function simplifyInkPointRuns(runs, maxPoints) {
+  const total = runs.reduce((sum2, run) => sum2 + run.length, 0);
+  if (total <= maxPoints) {
+    return runs.map((run) => run.map((point) => ({ ...point })));
+  }
+  return runs.map((run) => {
+    const share = Math.max(2, Math.round(maxPoints * run.length / Math.max(1, total)));
+    return simplifyInkPoints(run, share).map((point) => ({ ...point }));
+  });
+}
+function makeDrawableInkRun(run) {
+  if (run.length !== 1) {
+    return run.map((point) => ({ ...point }));
+  }
+  const point = run[0];
+  const offset = 2e-4;
+  return [
+    { ...point },
+    {
+      x: clamp(point.x + (point.x > 0.999 ? -offset : offset), 0, 1),
+      y: point.y
+    }
+  ];
+}
+function buildInkPathBreaks(runs) {
+  const breaks = [];
+  let offset = 0;
+  for (const run of runs) {
+    if (run.length === 0) {
+      continue;
+    }
+    if (offset > 0) {
+      breaks.push(offset);
+    }
+    offset += run.length;
+  }
+  return breaks;
+}
+function flattenInkPointRuns(runs) {
+  return runs.flatMap((run) => run.map((point) => ({ ...point })));
+}
+function cloneStrokePathBreaks(stroke2) {
+  if (!stroke2) {
+    return void 0;
+  }
+  return Array.isArray(stroke2.pathBreaks) ? stroke2.pathBreaks.map((value) => Math.floor(Number(value))).filter((value, index, values2) => Number.isFinite(value) && value > 0 && value < stroke2.points.length && values2.indexOf(value) === index).sort((a, b) => a - b) : void 0;
+}
+function getStrokePointRuns(stroke2) {
+  if (stroke2.points.length === 0) {
+    return [];
+  }
+  const breaks = cloneStrokePathBreaks(stroke2) ?? [];
+  if (breaks.length === 0) {
+    return [stroke2.points];
+  }
+  const runs = [];
+  let start = 0;
+  for (const stop of breaks) {
+    if (stop > start) {
+      runs.push(stroke2.points.slice(start, stop));
+    }
+    start = stop;
+  }
+  if (start < stroke2.points.length) {
+    runs.push(stroke2.points.slice(start));
+  }
+  return runs.filter((run) => run.length > 0);
+}
+function smoothInkPointRunsForPdf(runs, maxPoints) {
+  const total = runs.reduce((sum2, run) => sum2 + run.length, 0);
+  return runs.map((run) => {
+    const share = Math.max(2, Math.round(maxPoints * run.length / Math.max(1, total)));
+    return makeDrawableInkRun(smoothInkPointsForPdf(run, share));
+  }).filter((run) => run.length > 0);
 }
 function smoothInkPointsForPdf(points, maxPoints) {
   if (points.length <= 2) {
@@ -59460,11 +59693,15 @@ function addStandardInkAnnotation(pdf, page, stroke2) {
   }
   try {
     const size = page.getSize();
-    const inkPoints = smoothInkPointsForPdf(stroke2.points, 1600);
-    const scaledPoints = inkPoints.map((point) => ({
+    const inkRuns = smoothInkPointRunsForPdf(getStrokePointRuns(stroke2), 2400);
+    const scaledRuns = inkRuns.map((run) => run.map((point) => ({
       x: clamp(point.x, 0, 1) * size.width,
       y: size.height - clamp(point.y, 0, 1) * size.height
-    }));
+    }))).filter((run) => run.length >= 2);
+    if (scaledRuns.length === 0) {
+      return true;
+    }
+    const scaledPoints = scaledRuns.flat();
     const xs = scaledPoints.map((point) => point.x);
     const ys = scaledPoints.map((point) => point.y);
     const thickness = Math.max(0.5, stroke2.width * (size.width / Math.max(1, stroke2.pageCssWidth)));
@@ -59476,8 +59713,7 @@ function addStandardInkAnnotation(pdf, page, stroke2) {
       Math.min(size.width, Math.max(...xs) + padding),
       Math.min(size.height, Math.max(...ys) + padding)
     ]);
-    const inkPath = pdf.context.obj(scaledPoints.flatMap((point) => [point.x, point.y]));
-    const inkList = pdf.context.obj([inkPath]);
+    const inkList = pdf.context.obj(scaledRuns.map((run) => pdf.context.obj(run.flatMap((point) => [point.x, point.y]))));
     const border = pdf.context.obj([0, 0, thickness]);
     const annotation = pdf.context.obj({
       Border: border,
@@ -59517,17 +59753,19 @@ function drawStrokeAsPdfLines(page, stroke2, width, height) {
   }
   const color = hexToRgb(stroke2.color);
   const thickness = Math.max(0.5, stroke2.width * (width / Math.max(1, stroke2.pageCssWidth)));
-  const points = smoothInkPointsForPdf(stroke2.points, 1600);
-  for (let i = 1; i < points.length; i += 1) {
-    const start = points[i - 1];
-    const end = points[i];
-    page.drawLine({
-      color: rgb(color.r, color.g, color.b),
-      end: { x: end.x * width, y: height - end.y * height },
-      opacity: stroke2.opacity,
-      start: { x: start.x * width, y: height - start.y * height },
-      thickness
-    });
+  const runs = smoothInkPointRunsForPdf(getStrokePointRuns(stroke2), 2400);
+  for (const points of runs) {
+    for (let i = 1; i < points.length; i += 1) {
+      const start = points[i - 1];
+      const end = points[i];
+      page.drawLine({
+        color: rgb(color.r, color.g, color.b),
+        end: { x: end.x * width, y: height - end.y * height },
+        opacity: stroke2.opacity,
+        start: { x: start.x * width, y: height - start.y * height },
+        thickness
+      });
+    }
   }
 }
 async function drawVisibleInkElementsOnPdf(pdf, elements, fontBytes) {
@@ -59563,16 +59801,18 @@ async function drawVisibleInkElementsOnPdf(pdf, elements, fontBytes) {
       }
       const color2 = hexToRgb(element.color);
       const thickness = Math.max(0.5, element.width * (size.width / Math.max(1, element.pageCssWidth)));
-      for (let i = 1; i < element.points.length; i += 1) {
-        const start = element.points[i - 1];
-        const end = element.points[i];
-        page.drawLine({
-          color: rgb(color2.r, color2.g, color2.b),
-          end: { x: end.x * size.width, y: size.height - end.y * size.height },
-          opacity: element.opacity,
-          start: { x: start.x * size.width, y: size.height - start.y * size.height },
-          thickness
-        });
+      for (const points of getStrokePointRuns(element)) {
+        for (let i = 1; i < points.length; i += 1) {
+          const start = points[i - 1];
+          const end = points[i];
+          page.drawLine({
+            color: rgb(color2.r, color2.g, color2.b),
+            end: { x: end.x * size.width, y: size.height - end.y * size.height },
+            opacity: element.opacity,
+            start: { x: start.x * size.width, y: size.height - start.y * size.height },
+            thickness
+          });
+        }
       }
       continue;
     }
@@ -59822,7 +60062,7 @@ function buildDocxFromPageImages(pages, title2) {
   const mediaFiles = [];
   const rels = [];
   let relId = 1;
-  const body = [`<w:p><w:r><w:t xml:space="preserve">${xmlEscape(title2)}</w:t></w:r></w:p>`];
+  const body = [];
   for (const page of pages) {
     const imageName = `image${page.pageIndex + 1}.png`;
     mediaFiles.push({ name: `word/media/${imageName}`, data: page.bytes });
@@ -59831,13 +60071,12 @@ function buildDocxFromPageImages(pages, title2) {
     rels.push(`<Relationship Id="${imageRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${imageName}"/>`);
     const widthPx = Math.max(1, page.width);
     const heightPx = Math.max(1, page.height);
-    const rawWidthEmu = Math.max(914400, Math.round(widthPx * 9525));
-    const rawHeightEmu = Math.max(914400, Math.round(heightPx * 9525));
-    const scale2 = Math.min(1, 66e5 / rawWidthEmu);
-    const widthEmu = Math.round(rawWidthEmu * scale2);
-    const heightEmu = Math.round(rawHeightEmu * scale2);
+    const widthEmu = 6675120;
+    const heightEmu = Math.max(914400, Math.round(widthEmu * heightPx / widthPx));
+    if (body.length > 0) {
+      body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
+    }
     body.push(
-      `<w:p><w:r><w:t xml:space="preserve">Page ${page.pageIndex + 1}</w:t></w:r></w:p>`,
       `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${imageRelId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`
     );
   }
@@ -60189,24 +60428,29 @@ function drawStroke(ctx, stroke2, cssWidth, cssHeight, selected = false) {
   ctx.lineJoin = "round";
   ctx.lineWidth = stroke2.width;
   ctx.strokeStyle = stroke2.color;
-  ctx.beginPath();
-  const first = stroke2.points[0];
-  ctx.moveTo(first.x * cssWidth, first.y * cssHeight);
-  if (stroke2.points.length === 2) {
-    const end = stroke2.points[1];
-    ctx.lineTo(end.x * cssWidth, end.y * cssHeight);
-  } else {
-    for (let i = 1; i < stroke2.points.length - 1; i += 1) {
-      const point = stroke2.points[i];
-      const next = stroke2.points[i + 1];
-      const midX = (point.x + next.x) / 2 * cssWidth;
-      const midY = (point.y + next.y) / 2 * cssHeight;
-      ctx.quadraticCurveTo(point.x * cssWidth, point.y * cssHeight, midX, midY);
+  for (const run of getStrokePointRuns(stroke2)) {
+    if (run.length < 2) {
+      continue;
     }
-    const last2 = stroke2.points[stroke2.points.length - 1];
-    ctx.lineTo(last2.x * cssWidth, last2.y * cssHeight);
+    ctx.beginPath();
+    const first = run[0];
+    ctx.moveTo(first.x * cssWidth, first.y * cssHeight);
+    if (run.length === 2) {
+      const end = run[1];
+      ctx.lineTo(end.x * cssWidth, end.y * cssHeight);
+    } else {
+      for (let i = 1; i < run.length - 1; i += 1) {
+        const point = run[i];
+        const next = run[i + 1];
+        const midX = (point.x + next.x) / 2 * cssWidth;
+        const midY = (point.y + next.y) / 2 * cssHeight;
+        ctx.quadraticCurveTo(point.x * cssWidth, point.y * cssHeight, midX, midY);
+      }
+      const last2 = run[run.length - 1];
+      ctx.lineTo(last2.x * cssWidth, last2.y * cssHeight);
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
   ctx.restore();
 }
 function drawTextElement(ctx, text, cssWidth, cssHeight, selected = false) {
@@ -60384,11 +60628,17 @@ function strokeBounds(stroke2, cssWidth, cssHeight) {
   if (stroke2.points.length === 0) {
     return null;
   }
+  return strokePointsBounds(stroke2.points, cssWidth, cssHeight);
+}
+function strokePointsBounds(points, cssWidth, cssHeight) {
+  if (points.length === 0) {
+    return null;
+  }
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
   let maxY = Number.NEGATIVE_INFINITY;
-  for (const point of stroke2.points) {
+  for (const point of points) {
     const x = point.x * cssWidth;
     const y = point.y * cssHeight;
     minX = Math.min(minX, x);
@@ -60412,15 +60662,20 @@ function textBounds(text, cssWidth, cssHeight) {
     minY
   };
 }
-function strokeBoxContainsPoint(stroke2, point, cssWidth, cssHeight) {
-  const box = strokeBounds(stroke2, cssWidth, cssHeight);
-  if (!box) {
-    return false;
-  }
-  const pad2 = stroke2.source === "external-ink" ? Math.max(22, stroke2.width * 4) : Math.max(8, stroke2.width * 1.8);
+function strokeBoxContainsPoint(stroke2, point, cssWidth, cssHeight, fallbackOnly = false, minimum = 8) {
+  const pad2 = fallbackOnly ? Math.max(6, Math.min(16, stroke2.width * 2.2)) : strokeSelectionRadius(stroke2, minimum);
   const px2 = point.x * cssWidth;
   const py2 = point.y * cssHeight;
-  return px2 >= box.minX - pad2 && px2 <= box.maxX + pad2 && py2 >= box.minY - pad2 && py2 <= box.maxY + pad2;
+  for (const run of getStrokePointRuns(stroke2)) {
+    const box = strokePointsBounds(run, cssWidth, cssHeight);
+    if (!box) {
+      continue;
+    }
+    if (px2 >= box.minX - pad2 && px2 <= box.maxX + pad2 && py2 >= box.minY - pad2 && py2 <= box.maxY + pad2) {
+      return true;
+    }
+  }
+  return false;
 }
 function textBoxContainsPoint(text, point, cssWidth, cssHeight) {
   const box = textBounds(text, cssWidth, cssHeight);
@@ -60488,6 +60743,7 @@ function translateElement(element, dx, dy) {
 function cloneStroke(stroke2) {
   return {
     ...stroke2,
+    pathBreaks: cloneStrokePathBreaks(stroke2),
     pdfPoints: stroke2.pdfPoints?.map((point) => ({ ...point })),
     points: stroke2.points.map((point) => ({ ...point }))
   };
@@ -60496,7 +60752,20 @@ function cloneElement(element) {
   return element.kind === "stroke" ? cloneStroke(element) : { ...element };
 }
 function inkStrokesEquivalentForPdf(a, b) {
-  return a.pageIndex === b.pageIndex && a.color === b.color && Math.abs(a.opacity - b.opacity) <= 1e-3 && Math.abs(a.width - b.width) <= 1e-3 && a.tool === b.tool && inkPointsApproximatelyEqual(a.points, b.points);
+  return a.pageIndex === b.pageIndex && a.color === b.color && Math.abs(a.opacity - b.opacity) <= 1e-3 && Math.abs(a.width - b.width) <= 1e-3 && a.tool === b.tool && inkPointsApproximatelyEqual(a.points, b.points) && inkPathBreaksApproximatelyEqual(a, b);
+}
+function inkPathBreaksApproximatelyEqual(a, b) {
+  const aBreaks = cloneStrokePathBreaks(a) ?? [];
+  const bBreaks = cloneStrokePathBreaks(b) ?? [];
+  if (aBreaks.length !== bBreaks.length) {
+    return false;
+  }
+  for (let index = 0; index < aBreaks.length; index += 1) {
+    if (aBreaks[index] !== bBreaks[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 function normalizedStrokeBounds(stroke2) {
   if (stroke2.points.length === 0) {
@@ -60769,25 +61038,34 @@ function strokeContainsPoint(stroke2, point, cssWidth, cssHeight, eraserWidth = 
   if (stroke2.points.length < 2) {
     return false;
   }
+  if (!strokeBoxContainsPoint(stroke2, point, cssWidth, cssHeight, false, eraserWidth)) {
+    return false;
+  }
   const px2 = point.x * cssWidth;
   const py2 = point.y * cssHeight;
-  const radius = Math.max(eraserWidth, stroke2.width * 2.2);
-  for (let i = 1; i < stroke2.points.length; i += 1) {
-    const start = stroke2.points[i - 1];
-    const end = stroke2.points[i];
-    const distance = pointToSegmentDistance(
-      px2,
-      py2,
-      start.x * cssWidth,
-      start.y * cssHeight,
-      end.x * cssWidth,
-      end.y * cssHeight
-    );
-    if (distance <= radius) {
-      return true;
+  const radius = strokeSelectionRadius(stroke2, eraserWidth);
+  for (const run of getStrokePointRuns(stroke2)) {
+    for (let i = 1; i < run.length; i += 1) {
+      const start = run[i - 1];
+      const end = run[i];
+      const distance = pointToSegmentDistance(
+        px2,
+        py2,
+        start.x * cssWidth,
+        start.y * cssHeight,
+        end.x * cssWidth,
+        end.y * cssHeight
+      );
+      if (distance <= radius) {
+        return true;
+      }
     }
   }
   return false;
+}
+function strokeSelectionRadius(stroke2, minimum = 10) {
+  const base = stroke2.source === "external-ink" ? stroke2.width * 4.2 : stroke2.width * 3;
+  return Math.max(minimum, Math.min(28, base));
 }
 function pointToSegmentDistance(px2, py2, ax, ay, bx, by) {
   const dx = bx - ax;

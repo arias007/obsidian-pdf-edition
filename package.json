@@ -1,11 +1,11 @@
 {
   "name": "pdftion",
-  "version": "0.3.65",
+  "version": "0.3.69",
   "description": "AI-open PDF annotation, editing, export, and note integration tools.",
   "main": "main.js",
   "scripts": {
-    "build": "node esbuild.config.mjs",
-    "check": "tsc --noEmit",
+    "build": "node --check main.js",
+    "check": "node --check main.js",
     "dist": "npm run check && npm run build"
   },
   "keywords": [],
