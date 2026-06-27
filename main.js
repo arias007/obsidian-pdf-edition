@@ -55548,11 +55548,11 @@ var InkSession = class {
     actionRow.className = "pdftion-native-selection-actions";
     const copyText = createIconButton("type", uiText("\u590D\u5236\u6587\u5B57", "Copy text"));
     copyText.classList.add("pdftion-native-selection-action", "pdftion-native-selection-copy-text");
-    copyText.addEventListener("click", () => void this.copyNativeTextSelectionText());
+    copyText.addEventListener("click", () => this.copyNativeTextSelectionText());
     actionRow.appendChild(copyText);
     const copyLink = createIconButton("link", uiText("\u590D\u5236 PDF \u94FE\u63A5", "Copy PDF link"));
     copyLink.classList.add("pdftion-native-selection-action", "pdftion-native-selection-copy-link");
-    copyLink.addEventListener("click", () => void this.copyNativeTextSelectionLink());
+    copyLink.addEventListener("click", () => this.copyNativeTextSelectionLink());
     actionRow.appendChild(copyLink);
     panel.appendChild(actionRow);
     appendToActiveBody(panel);
@@ -55666,34 +55666,59 @@ var InkSession = class {
     activeDocument.getSelection()?.removeAllRanges();
     this.hideNativeTextSelectionMenu();
   }
-  async copyNativeTextSelectionLink() {
+  copyNativeTextSelectionLink() {
     const info = this.nativeTextSelectionInfo;
     if (!info) {
       return;
     }
     const link = buildPdfSelectionWikilink(this.file, info.overlay.pageIndex, info.text);
-    const copied = await writeClipboardText(link);
-    if (copied) {
-      new import_obsidian.Notice(uiText("\u5DF2\u590D\u5236 PDF \u6587\u5B57\u94FE\u63A5\u3002", "Copied PDF text link."));
-    } else {
-      new import_obsidian.Notice(uiText("\u590D\u5236\u5931\u8D25\u3002", "Could not copy link."));
-    }
-    activeDocument.getSelection()?.removeAllRanges();
-    this.hideNativeTextSelectionMenu();
+    this.showManualCopyPanel(link, uiText("PDF \u94FE\u63A5", "PDF link"));
   }
-  async copyNativeTextSelectionText() {
+  copyNativeTextSelectionText() {
     const info = this.nativeTextSelectionInfo;
     if (!info) {
       return;
     }
-    const copied = await writeClipboardText(info.text);
-    if (copied) {
-      new import_obsidian.Notice(uiText("\u5DF2\u590D\u5236 PDF \u6587\u5B57\u3002", "Copied PDF text."));
-    } else {
-      new import_obsidian.Notice(uiText("\u590D\u5236\u5931\u8D25\u3002", "Could not copy text."));
+    this.showManualCopyPanel(info.text, uiText("PDF \u6587\u5B57", "PDF text"));
+  }
+  showManualCopyPanel(value, title) {
+    const info = this.nativeTextSelectionInfo;
+    this.nativeTextSelectionMenu?.remove();
+    const panel = activeDocument.createElement("div");
+    panel.className = "pdftion-native-selection-menu pdftion-native-selection-copy-panel";
+    panel.addEventListener("pointerdown", (event) => {
+      if (isHTMLElement(event.target) && event.target.closest("textarea")) {
+        event.stopPropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    panel.addEventListener("click", (event) => event.stopPropagation());
+    const header = activeDocument.createElement("div");
+    header.className = "pdftion-native-selection-copy-title";
+    header.textContent = title;
+    panel.appendChild(header);
+    const textarea = activeDocument.createElement("textarea");
+    textarea.className = "pdftion-native-selection-copy-value";
+    textarea.readOnly = true;
+    textarea.rows = clamp(value.split(/\r?\n/).length, 2, 6);
+    textarea.value = value;
+    panel.appendChild(textarea);
+    const closeButton = createIconButton("x", uiText("\u5173\u95ED", "Close"));
+    closeButton.classList.add("pdftion-native-selection-action");
+    closeButton.addEventListener("click", () => {
+      activeDocument.getSelection()?.removeAllRanges();
+      this.hideNativeTextSelectionMenu();
+    });
+    panel.appendChild(closeButton);
+    appendToActiveBody(panel);
+    this.nativeTextSelectionMenu = panel;
+    if (info) {
+      this.positionNativeTextSelectionMenu(info, panel);
     }
-    activeDocument.getSelection()?.removeAllRanges();
-    this.hideNativeTextSelectionMenu();
+    focusTextEditor(textarea);
+    new import_obsidian.Notice(uiText("\u5DF2\u663E\u793A\u53EF\u590D\u5236\u5185\u5BB9\u3002", "Text is ready to copy."));
   }
   replaceNativeSelectionWithText(selection, overlay, text, backgroundColor) {
     const cover = this.createNativeTextCover(selection, overlay, backgroundColor, false);
@@ -59930,17 +59955,6 @@ function sanitizeWikilinkAlias(value) {
 function truncateForLinkAlias(value) {
   const cleaned = value.replace(/\s+/g, " ").trim();
   return cleaned.length > 96 ? `${cleaned.slice(0, 95)}\u2026` : cleaned;
-}
-async function writeClipboardText(value) {
-  try {
-    if (activeWindow.navigator.clipboard?.writeText) {
-      await activeWindow.navigator.clipboard.writeText(value);
-      return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
 }
 function stripObsidianLinkSyntax(value) {
   const normalized = normalizeObsidianLink(value);

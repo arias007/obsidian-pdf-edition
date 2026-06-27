@@ -10,55 +10,55 @@ body.pdftion-menu-boost .pdftion-embed-actions {
 
 body.pdftion-menu-boost :is(.sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card) :is(.view-header, .view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title),
 body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.view-header, .view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title) {
-  align-items: center !important;
-  display: flex !important;
-  flex: 0 0 auto !important;
-  min-height: 38px !important;
-  max-height: none !important;
-  height: auto !important;
-  overflow: visible !important;
-  position: relative !important;
-  z-index: 2147483000 !important;
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  min-height: 38px;
+  max-height: none;
+  height: auto;
+  overflow: visible;
+  position: relative;
+  z-index: 2147483000;
 }
 
 body.pdftion-menu-boost :is(.sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card) :is(.view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title) :is(.clickable-icon, button),
 body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title) :is(.clickable-icon, button) {
-  flex: 0 0 auto !important;
-  min-height: 34px !important;
-  min-width: 34px !important;
-  padding: 4px !important;
+  flex: 0 0 auto;
+  min-height: 34px;
+  min-width: 34px;
+  padding: 4px;
 }
 
 body.pdftion-menu-boost .pdftion-sr-pdf-root :is(.pdf-viewer, .pdfViewer, .pdf-container) {
-  flex: 1 1 auto !important;
-  max-height: none !important;
-  min-height: 180px !important;
-  overflow: auto !important;
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 180px;
+  overflow: auto;
 }
 
 body.pdftion-menu-boost :is(.sr-modal, .sr-card, .spaced-repetition, .spaced-repetition-modal, .review-modal, .review-card).pdftion-sr-has-pdf,
 body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.markdown-embed, .internal-embed, .media-embed, .file-embed, .pdf-embed),
 body.pdftion-menu-boost .pdftion-sr-pdf-root {
-  flex: 1 1 auto !important;
-  max-height: none !important;
-  min-height: 220px !important;
-  overflow: visible !important;
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 220px;
+  overflow: visible;
 }
 
 body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.markdown-preview-view, .markdown-rendered, .markdown-embed-content, .file-embed, .internal-embed, .media-embed) {
-  max-height: none !important;
-  overflow: visible !important;
+  max-height: none;
+  overflow: visible;
 }
 
 body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.pdf-viewer, .pdfViewer, .pdf-container, .pdf-embed) {
-  min-height: 180px !important;
-  overflow: auto !important;
+  min-height: 180px;
+  overflow: auto;
 }
 
 body.pdftion-menu-boost .pdftion-sr-has-pdf :is(.view-header, .view-actions, .pdf-toolbar-actions, .pdf-toolbar-items, .pdf-viewer-toolbar, .pdf-toolbar, .pdf-toolbar-container, .pdf-embed-toolbar, .file-embed-title, .embed-title, .markdown-embed-title, .pdftion-inline-actions) {
-  flex-shrink: 0 !important;
-  min-height: 38px !important;
-  overflow: visible !important;
+  flex-shrink: 0;
+  min-height: 38px;
+  overflow: visible;
 }
 
 body.pdftion-menu-boost .workspace-leaf-content[data-type="pdf"] .view-actions .clickable-icon,
@@ -226,10 +226,10 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
 .pdftion-hide-native-ink-layer .popupAnnotation,
 .pdftion-hide-native-ink-layer .pdf-annotation-popup,
 .pdftion-hide-native-ink-layer .pdfAnnotationPopup {
-  display: none !important;
-  opacity: 0 !important;
-  pointer-events: none !important;
-  visibility: hidden !important;
+  display: none;
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
 }
 
 body.pdftion-editing-active .annotationLayer,
@@ -239,10 +239,10 @@ body.pdftion-editing-active [data-pdf-annotation-id],
 body.pdftion-editing-active .popupAnnotation,
 body.pdftion-editing-active .pdf-annotation-popup,
 body.pdftion-editing-active .pdfAnnotationPopup {
-  display: none !important;
-  opacity: 0 !important;
-  pointer-events: none !important;
-  visibility: hidden !important;
+  display: none;
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
 }
 
 body.pdftion-editing-active .annotationLayer .popupWrapper,
@@ -252,17 +252,17 @@ body.pdftion-editing-active .annotationEditorLayer .popup,
 body.pdftion-editing-active .popupAnnotation,
 body.pdftion-editing-active .pdf-annotation-popup,
 body.pdftion-editing-active .pdfAnnotationPopup {
-  display: none !important;
-  pointer-events: none !important;
-  visibility: hidden !important;
+  display: none;
+  pointer-events: none;
+  visibility: hidden;
 }
 
 .pdftion-hide-native-popup,
 .pdftion-hide-native-annotation-element {
-  display: none !important;
-  opacity: 0 !important;
-  pointer-events: none !important;
-  visibility: hidden !important;
+  display: none;
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
 }
 
 .pdftion-toolbar-host {
@@ -492,6 +492,33 @@ body.pdftion-editing-active .pdfAnnotationPopup {
   border-radius: 6px;
   color: var(--text-normal);
   width: 34px;
+}
+
+.pdftion-native-selection-copy-panel {
+  align-items: stretch;
+  width: min(360px, calc(100vw - 24px));
+}
+
+.pdftion-native-selection-copy-title {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 0 2px;
+}
+
+.pdftion-native-selection-copy-value {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.35;
+  max-height: min(160px, 36vh);
+  min-height: 54px;
+  padding: 6px;
+  resize: none;
+  width: 100%;
 }
 
 .pdftion-panel {

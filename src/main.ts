@@ -4135,12 +4135,12 @@ class InkSession {
 
     const copyText = createIconButton("type", uiText("复制文字", "Copy text"));
     copyText.classList.add("pdftion-native-selection-action", "pdftion-native-selection-copy-text");
-    copyText.addEventListener("click", () => void this.copyNativeTextSelectionText());
+    copyText.addEventListener("click", () => this.copyNativeTextSelectionText());
     actionRow.appendChild(copyText);
 
     const copyLink = createIconButton("link", uiText("复制 PDF 链接", "Copy PDF link"));
     copyLink.classList.add("pdftion-native-selection-action", "pdftion-native-selection-copy-link");
-    copyLink.addEventListener("click", () => void this.copyNativeTextSelectionLink());
+    copyLink.addEventListener("click", () => this.copyNativeTextSelectionLink());
     actionRow.appendChild(copyLink);
     panel.appendChild(actionRow);
 
@@ -4267,37 +4267,68 @@ class InkSession {
     this.hideNativeTextSelectionMenu();
   }
 
-  private async copyNativeTextSelectionLink(): Promise<void> {
+  private copyNativeTextSelectionLink(): void {
     const info = this.nativeTextSelectionInfo;
     if (!info) {
       return;
     }
 
     const link = buildPdfSelectionWikilink(this.file, info.overlay.pageIndex, info.text);
-    const copied = await writeClipboardText(link);
-    if (copied) {
-      new Notice(uiText("已复制 PDF 文字链接。", "Copied PDF text link."));
-    } else {
-      new Notice(uiText("复制失败。", "Could not copy link."));
-    }
-    activeDocument.getSelection()?.removeAllRanges();
-    this.hideNativeTextSelectionMenu();
+    this.showManualCopyPanel(link, uiText("PDF 链接", "PDF link"));
   }
 
-  private async copyNativeTextSelectionText(): Promise<void> {
+  private copyNativeTextSelectionText(): void {
     const info = this.nativeTextSelectionInfo;
     if (!info) {
       return;
     }
 
-    const copied = await writeClipboardText(info.text);
-    if (copied) {
-      new Notice(uiText("已复制 PDF 文字。", "Copied PDF text."));
-    } else {
-      new Notice(uiText("复制失败。", "Could not copy text."));
+    this.showManualCopyPanel(info.text, uiText("PDF 文字", "PDF text"));
+  }
+
+  private showManualCopyPanel(value: string, title: string): void {
+    const info = this.nativeTextSelectionInfo;
+    this.nativeTextSelectionMenu?.remove();
+
+    const panel = activeDocument.createElement("div");
+    panel.className = "pdftion-native-selection-menu pdftion-native-selection-copy-panel";
+    panel.addEventListener("pointerdown", (event: PointerEvent) => {
+      if (isHTMLElement(event.target) && event.target.closest("textarea")) {
+        event.stopPropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    panel.addEventListener("click", (event: MouseEvent) => event.stopPropagation());
+
+    const header = activeDocument.createElement("div");
+    header.className = "pdftion-native-selection-copy-title";
+    header.textContent = title;
+    panel.appendChild(header);
+
+    const textarea = activeDocument.createElement("textarea");
+    textarea.className = "pdftion-native-selection-copy-value";
+    textarea.readOnly = true;
+    textarea.rows = clamp(value.split(/\r?\n/).length, 2, 6);
+    textarea.value = value;
+    panel.appendChild(textarea);
+
+    const closeButton = createIconButton("x", uiText("关闭", "Close"));
+    closeButton.classList.add("pdftion-native-selection-action");
+    closeButton.addEventListener("click", () => {
+      activeDocument.getSelection()?.removeAllRanges();
+      this.hideNativeTextSelectionMenu();
+    });
+    panel.appendChild(closeButton);
+
+    appendToActiveBody(panel);
+    this.nativeTextSelectionMenu = panel;
+    if (info) {
+      this.positionNativeTextSelectionMenu(info, panel);
     }
-    activeDocument.getSelection()?.removeAllRanges();
-    this.hideNativeTextSelectionMenu();
+    focusTextEditor(textarea);
+    new Notice(uiText("已显示可复制内容。", "Text is ready to copy."));
   }
 
   private replaceNativeSelectionWithText(selection: PdfNativeObject, overlay: PageOverlay, text: string, backgroundColor: string): void {
@@ -8374,47 +8405,6 @@ async function embedAnnotationFont(pdf: PDFDocument, fontBytes: Uint8Array) {
   return pdf.embedFont(fontBytes, { subset: true });
 }
 
-async function drawInkElementsOnPdf(
-  pdf: PDFDocument,
-  elements: InkElement[],
-  options: { strokesOnlyUnsaved?: boolean } = {}
-): Promise<void> {
-  const pages = pdf.getPages();
-  const orderedElements = [
-    ...elements.filter((element): element is InkCover => element.kind === "cover"),
-    ...elements.filter((element): element is InkStroke => (
-      element.kind === "stroke" && (!options.strokesOnlyUnsaved || element.pdfSaved !== true)
-    ))
-  ];
-
-  for (const element of orderedElements) {
-    const page = pages[element.pageIndex];
-    if (!page) {
-      continue;
-    }
-    const size = page.getSize();
-
-    if (element.kind === "cover") {
-      const color = hexToRgb(element.color);
-      page.drawRectangle({
-        color: rgb(color.r, color.g, color.b),
-        height: element.height * size.height,
-        opacity: element.opacity,
-        width: element.width * size.width,
-        x: element.x * size.width,
-        y: size.height - (element.y + element.height) * size.height
-      });
-      continue;
-    }
-
-    if (element.kind === "stroke") {
-      if (!addStandardInkAnnotation(pdf, page, element)) {
-        drawStrokeAsPdfLines(page, element, size.width, size.height);
-      }
-    }
-  }
-}
-
 interface PdfInkSyncOptions {
   deletedExternalInkIds?: Set<string>;
   deletedPdftionInkIds?: Set<string>;
@@ -9001,18 +8991,6 @@ function sanitizeWikilinkAlias(value: string): string {
 function truncateForLinkAlias(value: string): string {
   const cleaned = value.replace(/\s+/g, " ").trim();
   return cleaned.length > 96 ? `${cleaned.slice(0, 95)}…` : cleaned;
-}
-
-async function writeClipboardText(value: string): Promise<boolean> {
-  try {
-    if (activeWindow.navigator.clipboard?.writeText) {
-      await activeWindow.navigator.clipboard.writeText(value);
-      return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
 }
 
 function stripObsidianLinkSyntax(value: string): string {
@@ -9881,15 +9859,6 @@ function rectsOverlap(
 
 function nativeRegionContainsPoint(region: PdfNativeObject, point: InkPoint): boolean {
   return point.x >= region.x && point.x <= region.x + region.width && point.y >= region.y && point.y <= region.y + region.height;
-}
-
-function isTapStroke(stroke: InkStroke, cssWidth: number, cssHeight: number): boolean {
-  const first = stroke.points[0];
-  if (!first) {
-    return false;
-  }
-
-  return stroke.points.every((point) => normalizedDistance(first, point, cssWidth, cssHeight) <= 4);
 }
 
 function translateStroke(stroke: InkStroke, dx: number, dy: number): void {
