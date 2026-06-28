@@ -2,6 +2,10 @@ import { Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, getLan
 import * as fontkitModule from "@pdf-lib/fontkit";
 import { PDFArray, PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, PDFString, degrees, rgb } from "pdf-lib";
 
+// Mobile WebViews do not expose Obsidian desktop-only activeWindow globals.
+const activeWindow = window;
+const activeDocument = document;
+
 type ToolMode = "select" | "pen" | "highlight" | "eraser" | "text" | "cover" | "image-crop";
 type ResizeHandle = "nw" | "ne" | "sw" | "se";
 

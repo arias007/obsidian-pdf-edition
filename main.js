@@ -4260,6 +4260,9 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
+// Mobile WebViews do not expose Obsidian desktop-only activeWindow globals.
+var activeWindow = window;
+var activeDocument = document;
 
 // node_modules/@pdf-lib/fontkit/dist/fontkit.es.js
 var fontkit_es_exports = {};
