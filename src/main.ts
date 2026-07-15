@@ -12,6 +12,9 @@ type PdfFontkitModule = typeof import("@pdf-lib/fontkit");
 const AUTO_SAVE_IDLE_DELAY_MS = 5200;
 const AUTO_SAVE_CLOSE_DELAY_MS = 200;
 const OVERLAY_HEALTH_CHECK_MS = 5000;
+const STROKE_FAST_SAVE_DELAY_MS = 180;
+const STROKE_MIN_POINT_DISTANCE_PX = 0.35;
+const STROKE_INTERPOLATION_STEP_PX = 0.75;
 let pdfFontkitModulePromise: Promise<PdfFontkitModule> | null = null;
 const PALETTE_COLORS = [
   "#000000",
@@ -1191,6 +1194,9 @@ interface PageOverlay {
   dpr: number;
   pageEl: HTMLElement;
   pageIndex: number;
+  redrawFrame?: number | null;
+  redrawPreviewStroke?: InkStroke | null;
+  resizeObserver?: ResizeObserver | null;
 }
 
 interface VisualConversionPage {
@@ -2378,6 +2384,10 @@ class InkSession {
     this.toolbarHost = null;
     for (const overlay of this.overlays.values()) {
       overlay.abort.abort();
+      overlay.resizeObserver?.disconnect();
+      if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
+        window.cancelAnimationFrame(overlay.redrawFrame);
+      }
       overlay.canvas.remove();
       overlay.pageEl.classList.remove("pdftion-page", "pdftion-hide-native-ink-layer");
     }
@@ -2784,7 +2794,10 @@ class InkSession {
         cssWidth: 0,
         dpr: 1,
         pageEl,
-        pageIndex
+        pageIndex,
+        redrawFrame: null,
+        redrawPreviewStroke: null,
+        resizeObserver: null
       };
 
       canvas.addEventListener("pointerdown", (event: PointerEvent) => this.onPointerDown(event, newOverlay), { signal: abort.signal });
@@ -2814,10 +2827,30 @@ class InkSession {
       pageEl.appendChild(canvas);
       overlay = newOverlay;
       this.overlays.set(pageEl, overlay);
+      this.observeOverlayResize(overlay);
     }
 
     overlay.pageIndex = pageIndex;
     this.resizeOverlay(overlay);
+  }
+
+  private observeOverlayResize(overlay: PageOverlay): void {
+    if (typeof ResizeObserver === "undefined" || overlay.resizeObserver) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (this.isInteracting()) {
+        this.requestOverlayRedraw(overlay, this.currentStroke?.pageIndex === overlay.pageIndex ? this.currentStroke : undefined);
+        return;
+      }
+      this.resizeOverlay(overlay);
+    });
+    observer.observe(overlay.pageEl);
+    const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.pdftion-canvas)");
+    if (visibleCanvas) {
+      observer.observe(visibleCanvas);
+    }
+    overlay.resizeObserver = observer;
   }
 
   private resizeOverlay(overlay: PageOverlay): void {
@@ -2851,6 +2884,12 @@ class InkSession {
     overlay.canvas.width = Math.max(1, Math.round(cssWidth * dpr));
     overlay.canvas.height = Math.max(1, Math.round(cssHeight * dpr));
     this.redrawOverlay(overlay);
+  }
+
+  private refreshOverlayGeometry(): void {
+    for (const overlay of this.overlays.values()) {
+      this.resizeOverlay(overlay);
+    }
   }
 
   private getOverlayClientRect(overlay: PageOverlay): DOMRectReadOnly {
@@ -3725,7 +3764,8 @@ class InkSession {
       !drawingTool &&
       this.hasEditableSelection(overlay.pageIndex) &&
       startsInsideEditableSelection &&
-      this.canMoveFreshSelection();
+      this.canMoveFreshSelection() &&
+      this.canDragSelectedElements(overlay.pageIndex);
     if (canDragSelection) {
       this.beginSelectionInteraction(point, overlay);
       return;
@@ -4138,12 +4178,12 @@ class InkSession {
 
     const copyText = createIconButton("type", uiText("复制文字", "Copy text"));
     copyText.classList.add("pdftion-native-selection-action", "pdftion-native-selection-copy-text");
-    copyText.addEventListener("click", () => this.copyNativeTextSelectionText());
+    copyText.addEventListener("click", () => void this.copyNativeTextSelectionText());
     actionRow.appendChild(copyText);
 
     const copyLink = createIconButton("link", uiText("复制 PDF 链接", "Copy PDF link"));
     copyLink.classList.add("pdftion-native-selection-action", "pdftion-native-selection-copy-link");
-    copyLink.addEventListener("click", () => this.copyNativeTextSelectionLink());
+    copyLink.addEventListener("click", () => void this.copyNativeTextSelectionLink());
     actionRow.appendChild(copyLink);
     panel.appendChild(actionRow);
 
@@ -4270,23 +4310,47 @@ class InkSession {
     this.hideNativeTextSelectionMenu();
   }
 
-  private copyNativeTextSelectionLink(): void {
+  private async copyNativeTextSelectionLink(): Promise<void> {
     const info = this.nativeTextSelectionInfo;
     if (!info) {
       return;
     }
 
     const link = buildPdfSelectionWikilink(this.file, info.overlay.pageIndex, info.text);
+    if (await this.copyTextToClipboard(link, uiText("Copied PDF text link.", "Copied PDF text link."))) {
+      this.hideNativeTextSelectionMenu();
+      activeDocument.getSelection()?.removeAllRanges();
+      return;
+    }
     this.showManualCopyPanel(link, uiText("PDF 链接", "PDF link"));
   }
 
-  private copyNativeTextSelectionText(): void {
+  private async copyNativeTextSelectionText(): Promise<void> {
     const info = this.nativeTextSelectionInfo;
     if (!info) {
       return;
     }
 
+    if (await this.copyTextToClipboard(info.text, uiText("Copied PDF text.", "Copied PDF text."))) {
+      this.hideNativeTextSelectionMenu();
+      activeDocument.getSelection()?.removeAllRanges();
+      return;
+    }
     this.showManualCopyPanel(info.text, uiText("PDF 文字", "PDF text"));
+  }
+
+  private async copyTextToClipboard(value: string, successMessage: string): Promise<boolean> {
+    try {
+      if (!activeWindow.navigator.clipboard?.writeText) {
+        return false;
+      }
+      await activeWindow.navigator.clipboard.writeText(value);
+      new Notice(successMessage);
+      return true;
+    } catch (error) {
+      console.warn("pdftion clipboard write failed; showing manual copy panel.", error);
+      return false;
+    }
   }
 
   private showManualCopyPanel(value: string, title: string): void {
@@ -4519,7 +4583,7 @@ class InkSession {
 
   private beginSelectionInteraction(point: InkPoint, overlay: PageOverlay): void {
     const handle = this.findSelectionHandleAt(overlay, point);
-    if (handle && this.canMoveFreshSelection()) {
+    if (handle && this.canMoveFreshSelection() && this.canDragSelectedElements(overlay.pageIndex)) {
       const selected = this.getSelectedEditableElements(overlay.pageIndex);
       const bounds = normalizedElementsBounds(selected);
       if (selected.length > 0 && bounds) {
@@ -4547,7 +4611,7 @@ class InkSession {
         this.redrawAll();
         return;
       }
-      if (!this.canMoveFreshSelection()) {
+      if (!this.canMoveFreshSelection() || !this.canDragSelectedElements(overlay.pageIndex)) {
         this.nativeSelection = null;
         this.selectionDrag = null;
         this.redrawAll();
@@ -4566,7 +4630,7 @@ class InkSession {
       return;
     }
 
-    if (this.hasEditableSelection(overlay.pageIndex) && this.selectionBoxContainsPoint(overlay, point) && this.canMoveFreshSelection()) {
+    if (this.hasEditableSelection(overlay.pageIndex) && this.selectionBoxContainsPoint(overlay, point) && this.canMoveFreshSelection() && this.canDragSelectedElements(overlay.pageIndex)) {
       this.nativeSelection = null;
       this.selectionDrag = {
         clearSelectionOnTap: true,
@@ -4603,7 +4667,7 @@ class InkSession {
         this.redrawAll();
         return;
       }
-      if (this.selectionBoxContainsPoint(overlay, point) && this.canMoveFreshSelection()) {
+      if (this.selectionBoxContainsPoint(overlay, point) && this.canMoveFreshSelection() && this.canDragSelectedElements(overlay.pageIndex)) {
         this.selectionDrag = {
           current: point,
           mode: "move",
@@ -5640,17 +5704,17 @@ class InkSession {
     const last = stroke.points[stroke.points.length - 1];
     if (!last) {
       stroke.points.push(point);
-      this.redrawOverlay(overlay, stroke);
+      this.requestOverlayRedraw(overlay, stroke);
       return;
     }
 
     const distance = normalizedDistance(last, point, overlay.cssWidth, overlay.cssHeight);
-    if (distance < 0.8) {
+    if (distance < STROKE_MIN_POINT_DISTANCE_PX) {
       return;
     }
 
     this.currentStrokeMoved = true;
-    const steps = Math.max(1, Math.ceil(distance / 1.2));
+    const steps = Math.max(1, Math.ceil(distance / STROKE_INTERPOLATION_STEP_PX));
     for (let i = 1; i <= steps; i += 1) {
       const ratio = i / steps;
       stroke.points.push({
@@ -5659,7 +5723,7 @@ class InkSession {
       });
     }
 
-    this.redrawOverlay(overlay, stroke);
+    this.requestOverlayRedraw(overlay, stroke);
   }
 
   private moveSelectionInteraction(point: InkPoint, overlay: PageOverlay): void {
@@ -5696,7 +5760,7 @@ class InkSession {
       this.redoStack = [];
       drag.moved = true;
       drag.current = point;
-      this.redrawAll();
+      this.requestOverlayRedraw(overlay);
       return;
     }
 
@@ -5714,7 +5778,7 @@ class InkSession {
       this.redoStack = [];
       drag.moved = true;
       drag.current = point;
-      this.redrawAll();
+      this.requestOverlayRedraw(overlay);
       return;
     }
 
@@ -5791,7 +5855,7 @@ class InkSession {
     this.markInkPageDirty(stroke.pageIndex);
     this.markDirty();
     this.redrawOverlay(overlay);
-    this.scheduleAutoSave();
+    this.scheduleAutoSave(STROKE_FAST_SAVE_DELAY_MS);
   }
 
   private endCoverInteraction(overlay: PageOverlay): void {
@@ -5959,7 +6023,7 @@ class InkSession {
           this.resizeSelectedElementsFromPinch(this.touchScroll, distance);
           this.markDirty();
           this.redoStack = [];
-          this.redrawAll();
+          this.requestOverlayRedraw(overlay);
         }
         this.touchScroll.lastX = center.x;
         this.touchScroll.lastY = center.y;
@@ -5971,6 +6035,10 @@ class InkSession {
       if (Math.abs(zoomDelta) > 26 && Math.abs(zoomDelta) > Math.max(moveY, moveX) * 1.8) {
         dispatchPdfZoomGesture(this.rootEl, zoomDelta);
         this.touchScroll.initialDistance = distance;
+        window.setTimeout(() => {
+          this.refreshOverlayGeometry();
+          this.redrawAll();
+        }, 80);
       }
 
       this.touchScroll.scrollEl.scrollTop += this.touchScroll.lastY - center.y;
@@ -6139,8 +6207,32 @@ class InkSession {
   private redrawAll(): void {
     this.updateExternalInkLayerState();
     for (const overlay of this.overlays.values()) {
-      this.redrawOverlay(overlay);
+      if (this.isOverlayNearViewport(overlay)) {
+        this.requestOverlayRedraw(overlay);
+      }
     }
+  }
+
+  private requestOverlayRedraw(overlay: PageOverlay, previewStroke?: InkStroke): void {
+    if (previewStroke) {
+      overlay.redrawPreviewStroke = previewStroke;
+    }
+    if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
+      return;
+    }
+    overlay.redrawFrame = window.requestAnimationFrame(() => {
+      overlay.redrawFrame = null;
+      const pendingPreview = overlay.redrawPreviewStroke ?? undefined;
+      overlay.redrawPreviewStroke = null;
+      this.resizeOverlay(overlay);
+      this.redrawOverlay(overlay, pendingPreview);
+    });
+  }
+
+  private isOverlayNearViewport(overlay: PageOverlay): boolean {
+    const rect = overlay.pageEl.getBoundingClientRect();
+    const margin = Math.max(activeWindow.innerHeight * 1.5, 900);
+    return rect.bottom >= -margin && rect.top <= activeWindow.innerHeight + margin;
   }
 
   private redrawOverlay(overlay: PageOverlay, previewStroke?: InkStroke): void {
@@ -7491,6 +7583,13 @@ class InkSession {
     return this.selectionWasExplicitTap && Date.now() - this.selectionChangedAt >= 500;
   }
 
+  private canDragSelectedElements(pageIndex?: number): boolean {
+    if (this.nativeTextEditor !== null) {
+      return false;
+    }
+    return this.getSelectedEditableElements(pageIndex).every((element) => element.kind !== "text" || element.text.trim().length > 0);
+  }
+
   private pruneSelection(): void {
     for (const id of Array.from(this.selectedStrokeIds)) {
       const element = this.findElementById(id);
@@ -8386,6 +8485,10 @@ class InkSession {
       }
 
       overlay.abort.abort();
+      overlay.resizeObserver?.disconnect();
+      if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
+        window.cancelAnimationFrame(overlay.redrawFrame);
+      }
       overlay.canvas.remove();
       pageEl.classList.remove("pdftion-page", "pdftion-hide-native-ink-layer");
       this.overlays.delete(pageEl);
