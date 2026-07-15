@@ -14,6 +14,10 @@ const AUTO_SAVE_CLOSE_DELAY_MS = 200;
 const OVERLAY_HEALTH_CHECK_MS = 5000;
 const OVERLAY_MAX_DPR = 2;
 const PDF_ZOOM_SETTLE_DELAY_MS = 160;
+const INK_AUTO_GROUP_GAP_PX = 28;
+const INK_AUTO_GROUP_WINDOW_MS = 3500;
+const INK_LEGACY_GROUP_GAP_PX = 10;
+const NATIVE_POPUP_SUPPRESS_MS = 650;
 const STROKE_FAST_SAVE_DELAY_MS = 180;
 const STROKE_MIN_POINT_DISTANCE_PX = 0.35;
 const STROKE_INTERPOLATION_STEP_PX = 0.75;
@@ -1028,6 +1032,8 @@ interface InkPoint {
 
 interface InkStroke {
   color: string;
+  createdAt?: number;
+  groupId?: string;
   id: string;
   kind: "stroke";
   opacity: number;
@@ -1209,6 +1215,17 @@ interface OverlayGeometry {
   cssWidth: number;
   left: number;
   top: number;
+}
+
+interface RecentInkGroup {
+  bounds: NormalizedBounds;
+  color: string;
+  id: string;
+  lastAt: number;
+  opacity: number;
+  pageIndex: number;
+  tool: InkStroke["tool"];
+  width: number;
 }
 
 interface VisualConversionPage {
@@ -2237,6 +2254,9 @@ class InkSession {
   private inkPrepareTimer: number | null = null;
   private inkPrepareTimerForce = false;
   private nativeAnnotationPopupTimer: number | null = null;
+  private nativePopupHideTimers = new Set<number>();
+  private nativePopupSuppressUntil = 0;
+  private recentInkGroup: RecentInkGroup | null = null;
   private selectionDrag: SelectionDragState | null = null;
   private nativeSelection: PdfNativeObject | null = null;
   private pendingImageCrop: PdfNativeObject | null = null;
@@ -2323,7 +2343,7 @@ class InkSession {
       passive: true,
       signal: this.nativeTextSelectionAbort.signal
     });
-    for (const eventName of ["auxclick", "click", "contextmenu", "dblclick", "mousedown", "mousemove", "mouseover", "mouseup", "pointerdown", "pointermove", "pointerup", "touchstart"]) {
+    for (const eventName of ["auxclick", "click", "contextmenu", "dblclick", "focusin", "mousedown", "mousemove", "mouseover", "mouseup", "pointerdown", "pointermove", "pointerup", "touchstart"]) {
       this.rootEl.addEventListener(eventName, (event) => this.blockNativePdfAnnotationEvent(event), {
         capture: true,
         signal: this.nativeTextSelectionAbort.signal
@@ -2345,6 +2365,7 @@ class InkSession {
     this.clearScanTimer();
     this.clearEditableInkPrepareTimer();
     this.clearZoomGeometryTimer();
+    this.clearNativePopupHideTimers();
     this.stopOverlayHealthCheck();
     this.stopNativeAnnotationPopupSuppressor();
     this.mutationObserver.disconnect();
@@ -2396,6 +2417,7 @@ class InkSession {
     this.clearAutoSaveTimer();
     this.clearEditableInkPrepareTimer();
     this.clearCurrentStroke();
+    this.recentInkGroup = null;
     this.dirty = false;
     this.pendingNativeInkHidePages.clear();
     this.dirtyInkPages.clear();
@@ -3075,7 +3097,31 @@ class InkSession {
       window.clearInterval(this.nativeAnnotationPopupTimer);
       this.nativeAnnotationPopupTimer = null;
     }
+    this.nativePopupSuppressUntil = 0;
+    this.clearNativePopupHideTimers();
     this.hideNativePdfAnnotationPopups();
+  }
+
+  private clearNativePopupHideTimers(): void {
+    for (const timer of this.nativePopupHideTimers) {
+      window.clearTimeout(timer);
+    }
+    this.nativePopupHideTimers.clear();
+  }
+
+  private suppressNativePdfPopupBurst(duration = NATIVE_POPUP_SUPPRESS_MS): void {
+    this.clearNativePopupHideTimers();
+    this.nativePopupSuppressUntil = Math.max(this.nativePopupSuppressUntil, Date.now() + duration);
+    this.hideNativePdfAnnotationPopups();
+    for (const delay of [0, 16, 60, 160, 320, duration]) {
+      const timer = window.setTimeout(() => {
+        this.nativePopupHideTimers.delete(timer);
+        if (this.enabled || Date.now() <= this.nativePopupSuppressUntil) {
+          this.hideNativePdfAnnotationPopups();
+        }
+      }, delay);
+      this.nativePopupHideTimers.add(timer);
+    }
   }
 
   private repairActiveOverlays(): void {
@@ -3137,6 +3183,7 @@ class InkSession {
       this.stopOverlayHealthCheck();
       this.stopNativeAnnotationPopupSuppressor();
       this.clearCurrentStroke();
+      this.recentInkGroup = null;
       this.selectionDrag = null;
       this.pendingImageCrop = null;
       this.pendingNativeInkHidePages.clear();
@@ -3294,6 +3341,7 @@ class InkSession {
       existing.opacity = stroke.opacity;
       existing.pageCssHeight = stroke.pageCssHeight;
       existing.pageCssWidth = stroke.pageCssWidth;
+      existing.groupId = stroke.groupId;
       existing.tool = stroke.tool;
       existing.width = stroke.width;
       changed = true;
@@ -3590,6 +3638,9 @@ class InkSession {
   }
 
   private setTool(tool: ToolMode): void {
+    if (this.tool !== tool) {
+      this.recentInkGroup = null;
+    }
     this.tool = tool;
     this.rootEl.classList.toggle("pdftion-selecting", this.enabled && (this.tool === "select" || this.tool === "image-crop"));
     if (tool !== "select" && tool !== "image-crop") {
@@ -3727,6 +3778,7 @@ class InkSession {
       return;
     }
 
+    this.suppressNativePdfPopupBurst();
     event.preventDefault();
     event.stopPropagation();
     this.resizeOverlay(overlay);
@@ -3742,6 +3794,7 @@ class InkSession {
     if (!this.enabled) {
       return;
     }
+    this.suppressNativePdfPopupBurst();
     event.preventDefault();
     event.stopPropagation();
     this.resizeOverlay(overlay);
@@ -3833,6 +3886,7 @@ class InkSession {
       this.currentStrokeStartedAt = Date.now();
       this.currentStroke = {
         color: this.getToolColor(tool),
+        createdAt: this.currentStrokeStartedAt,
         id: makeStrokeId(),
         kind: "stroke",
         opacity: this.getToolOpacity(tool),
@@ -3916,6 +3970,7 @@ class InkSession {
 
   private openNativeTextEditor(selection: PdfNativeObject, overlay: PageOverlay): void {
     this.closeNativeTextEditor(false);
+    this.suppressNativePdfPopupBurst();
     const overlayRect = this.getOverlayClientRect(overlay);
     const x = selection.x * overlay.cssWidth;
     const y = selection.y * overlay.cssHeight;
@@ -3980,6 +4035,7 @@ class InkSession {
 
   private openExistingTextEditor(textElement: InkText, overlay: PageOverlay): void {
     this.closeNativeTextEditor(false);
+    this.suppressNativePdfPopupBurst();
     const overlayRect = this.getOverlayClientRect(overlay);
     const bounds = textBounds(textElement, overlay.cssWidth, overlay.cssHeight);
     const editor = activeDocument.createElement("textarea");
@@ -4539,7 +4595,7 @@ class InkSession {
   private getPdfCanvas(overlay: PageOverlay): HTMLCanvasElement | null {
     return (
       overlay.pageEl.querySelector<HTMLCanvasElement>(".canvasWrapper canvas") ??
-      Array.from(overlay.pageEl.querySelectorAll<HTMLCanvasElement>("canvas")).find((canvas) => canvas !== overlay.canvas) ??
+      Array.from(overlay.pageEl.querySelectorAll<HTMLCanvasElement>("canvas")).find((canvas) => !canvas.classList.contains("pdftion-canvas")) ??
       null
     );
   }
@@ -4553,10 +4609,27 @@ class InkSession {
     const target = event.target;
     const insideSession = path.some((value) => value === this.rootEl || (isHTMLElement(value) && this.rootEl.contains(value)));
     const targetElement = isHTMLElement(target) ? target : null;
+    const popupTriggerEvent = ["click", "contextmenu", "dblclick", "focusin", "mousedown", "pointerdown", "touchstart"].includes(event.type);
+    const fromPdftionInteraction = path.some((value) => (
+      isHTMLElement(value) &&
+      value.closest(
+        ".pdftion-live-canvas, .pdftion-native-editor, .pdftion-native-selection-menu, .pdftion-palette-panel, .pdftion-panel"
+      ) !== null
+    ));
     if (
       !insideSession &&
+      !fromPdftionInteraction &&
       !(targetElement && (this.isNativePdfAnnotationPopup(targetElement) || this.looksLikeNativeAnnotationMenu(targetElement)))
     ) {
+      return;
+    }
+
+    if (fromPdftionInteraction) {
+      if (popupTriggerEvent) {
+        this.suppressNativePdfPopupBurst();
+      } else {
+        this.hideNativePdfAnnotationPopups();
+      }
       return;
     }
 
@@ -4566,7 +4639,11 @@ class InkSession {
     ));
     const fromNativePopup = targetElement !== null && (this.isNativePdfAnnotationPopup(targetElement) || this.looksLikeNativeAnnotationMenu(targetElement));
     if (!fromNativeAnnotation && !fromNativePopup) {
-      this.hideNativePdfAnnotationPopups();
+      if (popupTriggerEvent) {
+        this.suppressNativePdfPopupBurst();
+      } else {
+        this.hideNativePdfAnnotationPopups();
+      }
       return;
     }
 
@@ -4575,23 +4652,28 @@ class InkSession {
     if (typeof event.stopImmediatePropagation === "function") {
       event.stopImmediatePropagation();
     }
-    this.hideNativePdfAnnotationPopups();
-    window.setTimeout(() => this.hideNativePdfAnnotationPopups(), 0);
+    this.suppressNativePdfPopupBurst();
   }
 
   private hideNativePdfAnnotationPopups(): void {
     const rootRect = this.rootEl.getBoundingClientRect();
+    const genericSuppressionActive = this.nativeTextEditor !== null || Date.now() <= this.nativePopupSuppressUntil;
     const selectors = [
       ".annotationLayer .popupWrapper",
       ".annotationLayer .popup",
       ".annotationEditorLayer .popupWrapper",
       ".annotationEditorLayer .popup",
+      ".annotationEditorParams",
+      ".annotationEditorToolbar",
+      ".editorParamsToolbar",
       ".pdf-annotation-popup",
+      ".pdf-annotation-menu",
       ".pdfAnnotationPopup",
       ".popupAnnotation",
       ".popover",
       ".hover-popover",
-      ".menu"
+      ".menu",
+      "[role='menu']"
     ];
     for (const candidate of Array.from(activeDocument.querySelectorAll<HTMLElement>(selectors.join(",")))) {
       if (candidate.closest(".pdftion-root, .pdftion-toolbar, .pdftion-panel, .pdftion-palette-panel, .pdftion-native-selection-menu")) {
@@ -4610,28 +4692,33 @@ class InkSession {
       if (!nearSession && !this.isNativePdfAnnotationPopup(candidate)) {
         continue;
       }
-      if (!this.isNativePdfAnnotationPopup(candidate) && !this.looksLikeNativeAnnotationMenu(candidate)) {
+      const genericNearbyMenu = genericSuppressionActive && candidate.matches(".menu, .popover, .hover-popover, [role='menu']");
+      if (!this.isNativePdfAnnotationPopup(candidate) && !this.looksLikeNativeAnnotationMenu(candidate) && !genericNearbyMenu) {
         continue;
       }
       candidate.classList.add("pdftion-hide-native-popup");
+      candidate.setAttribute("aria-hidden", "true");
     }
   }
 
   private isNativePdfAnnotationElement(element: HTMLElement): boolean {
     return element.closest(
-      ".annotationLayer, .annotationEditorLayer, .popupAnnotation, [data-annotation-id], [data-pdf-annotation-id]"
+      ".annotationLayer, .annotationEditorLayer, .annotationEditorParams, .annotationEditorToolbar, .editorParamsToolbar, .popupAnnotation, [data-annotation-id], [data-pdf-annotation-id]"
     ) !== null;
   }
 
   private isNativePdfAnnotationPopup(element: HTMLElement): boolean {
     return element.closest(
-      ".annotationLayer .popupWrapper, .annotationLayer .popup, .annotationEditorLayer .popupWrapper, .annotationEditorLayer .popup, .pdf-annotation-popup, .pdfAnnotationPopup, .popupAnnotation"
+      ".annotationLayer .popupWrapper, .annotationLayer .popup, .annotationEditorLayer .popupWrapper, .annotationEditorLayer .popup, .annotationEditorParams, .annotationEditorToolbar, .editorParamsToolbar, .pdf-annotation-popup, .pdf-annotation-menu, .pdfAnnotationPopup, .popupAnnotation"
     ) !== null;
   }
 
   private looksLikeNativeAnnotationMenu(element: HTMLElement): boolean {
     const text = (element.textContent ?? "").trim();
-    if (!text || text.length > 120) {
+    if (!text) {
+      return Date.now() <= this.nativePopupSuppressUntil && element.closest(".menu, .popover, .hover-popover, [role='menu']") !== null;
+    }
+    if (text.length > 120) {
       return false;
     }
     return /复制|信息|注释|批注|copy|info|annotation/i.test(text);
@@ -4662,7 +4749,7 @@ class InkSession {
     const selected = this.findElementAt(overlay, point);
     if (selected) {
       if (!this.selectedStrokeIds.has(selected.id)) {
-        this.setSingleSelectedElement(selected.id);
+        this.setSelectedElementForEditing(selected, overlay);
         this.selectionDrag = null;
         this.redrawAll();
         return;
@@ -5765,6 +5852,37 @@ class InkSession {
     }
   }
 
+  private resolveInkGroupId(stroke: InkStroke, overlay: PageOverlay): string {
+    const now = Date.now();
+    const bounds = normalizedStrokeBounds(stroke);
+    const recent = this.recentInkGroup;
+    const canReuseRecentGroup = Boolean(
+      bounds &&
+      recent &&
+      now - recent.lastAt <= INK_AUTO_GROUP_WINDOW_MS &&
+      recent.pageIndex === stroke.pageIndex &&
+      recent.tool === stroke.tool &&
+      recent.color === stroke.color &&
+      Math.abs(recent.opacity - stroke.opacity) <= 0.001 &&
+      Math.abs(recent.width - stroke.width) <= 0.01 &&
+      normalizedBoundsAreNear(recent.bounds, bounds, overlay.cssWidth, overlay.cssHeight, INK_AUTO_GROUP_GAP_PX)
+    );
+    const groupId = canReuseRecentGroup && recent ? recent.id : makeInkGroupId();
+    if (bounds) {
+      this.recentInkGroup = {
+        bounds: canReuseRecentGroup && recent ? unionNormalizedBounds(recent.bounds, bounds) : bounds,
+        color: stroke.color,
+        id: groupId,
+        lastAt: now,
+        opacity: stroke.opacity,
+        pageIndex: stroke.pageIndex,
+        tool: stroke.tool,
+        width: stroke.width
+      };
+    }
+    return groupId;
+  }
+
   private updateCurrentCover(point: InkPoint, overlay: PageOverlay): void {
     const cover = this.currentCover;
     if (!cover) {
@@ -5930,7 +6048,7 @@ class InkSession {
     if (this.isStrictDrawingTap(stroke, overlay)) {
       const selected = this.findElementAt(overlay, stroke.points[0]);
       if (selected) {
-        this.setSingleSelectedElement(selected.id);
+        this.setSelectedElementForEditing(selected, overlay);
         this.clearCurrentStroke();
         this.redrawAll();
         this.updateToolbarState();
@@ -5954,6 +6072,7 @@ class InkSession {
     }
 
     this.rememberHistory();
+    stroke.groupId = this.resolveInkGroupId(stroke, overlay);
     this.strokeHistory.push(stroke);
     this.redoStack = [];
     this.clearEditableSelection();
@@ -7694,6 +7813,46 @@ class InkSession {
     this.selectionWasExplicitTap = false;
   }
 
+  private setSelectedElementForEditing(element: InkElement, overlay: PageOverlay): void {
+    if (element.kind !== "stroke") {
+      this.setSingleSelectedElement(element.id);
+      return;
+    }
+    const group = this.findStrokeEditGroup(element, overlay);
+    this.setSelectedElements(group);
+    this.selectionWasExplicitTap = true;
+  }
+
+  private findStrokeEditGroup(stroke: InkStroke, overlay: PageOverlay): InkStroke[] {
+    if (stroke.groupId) {
+      return this.strokeHistory.filter((candidate) => (
+        candidate.pageIndex === stroke.pageIndex && candidate.groupId === stroke.groupId
+      ));
+    }
+
+    const candidates = this.strokeHistory.filter((candidate) => (
+      candidate.pageIndex === stroke.pageIndex && !candidate.groupId
+    ));
+    const grouped = new Set<InkStroke>([stroke]);
+    const queue: InkStroke[] = [stroke];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) {
+        break;
+      }
+      for (const candidate of candidates) {
+        if (grouped.has(candidate)) {
+          continue;
+        }
+        if (strokesAreVisuallyConnected(current, candidate, overlay.cssWidth, overlay.cssHeight, INK_LEGACY_GROUP_GAP_PX)) {
+          grouped.add(candidate);
+          queue.push(candidate);
+        }
+      }
+    }
+    return Array.from(grouped);
+  }
+
   private setSingleSelectedElement(id: string): void {
     this.selectedStrokeIds.clear();
     this.selectedStrokeIds.add(id);
@@ -8512,6 +8671,8 @@ class InkSession {
     const tool = input.tool === "highlight" ? "highlight" : "pen";
     const element: InkStroke = {
       color: normalizeHexColor(input.color ?? this.getToolColor(tool)),
+      createdAt: typeof input.createdAt === "number" ? input.createdAt : Date.now(),
+      groupId: typeof input.groupId === "string" && input.groupId.trim() ? input.groupId.trim() : undefined,
       id: input.id ?? makeStrokeId(),
       kind: "stroke",
       opacity: clamp(Number(input.opacity ?? this.getToolOpacity(tool)), 0.01, 1),
@@ -8822,9 +8983,11 @@ function externalInkAnnotationToStroke(
   const border = annot.lookupMaybe(PDFName.of("Border"), PDFArray);
   const borderWidth = border?.lookupMaybe(2, PDFNumber)?.asNumber() ?? 2;
   const pdftionId = pdftionInkStrokeId(annot);
+  const groupId = decodePdfText(annot.lookupMaybe(PDFName.of("PdftionGroup"), PDFString, PDFHexString)).trim() || undefined;
   const simplifiedPoints = simplifyInkPoints(points, 900);
   return {
     color,
+    groupId,
     id: pdftionId ?? externalInkStrokeId(pageIndex, annotIndex, annot),
     kind: "stroke",
     opacity: clamp(opacity, 0.01, 1),
@@ -8974,6 +9137,9 @@ function addStandardInkAnnotation(pdf: PDFDocument, page: ReturnType<PDFDocument
       T: PDFHexString.fromText("Pdftion"),
       Type: PDFName.of("Annot")
     });
+    if (stroke.groupId) {
+      annotation.set(PDFName.of("PdftionGroup"), PDFHexString.fromText(stroke.groupId));
+    }
     const annotationRef = pdf.context.register(annotation);
     const pageNode = page.node as unknown as {
       addAnnot?: (annotRef: unknown) => void;
@@ -10110,6 +10276,7 @@ function inkStrokesEquivalentForPdf(a: InkStroke, b: InkStroke): boolean {
   return (
     a.pageIndex === b.pageIndex &&
     a.color === b.color &&
+    a.groupId === b.groupId &&
     Math.abs(a.opacity - b.opacity) <= 0.001 &&
     Math.abs(a.width - b.width) <= 0.001 &&
     a.tool === b.tool &&
@@ -10135,6 +10302,39 @@ function normalizedStrokeBounds(stroke: InkStroke): NormalizedBounds | null {
   }
 
   return { maxX, maxY, minX, minY };
+}
+
+function unionNormalizedBounds(a: NormalizedBounds, b: NormalizedBounds): NormalizedBounds {
+  return {
+    maxX: Math.max(a.maxX, b.maxX),
+    maxY: Math.max(a.maxY, b.maxY),
+    minX: Math.min(a.minX, b.minX),
+    minY: Math.min(a.minY, b.minY)
+  };
+}
+
+function normalizedBoundsAreNear(
+  a: NormalizedBounds,
+  b: NormalizedBounds,
+  cssWidth: number,
+  cssHeight: number,
+  gapPx: number
+): boolean {
+  const gapX = Math.max(0, Math.max(a.minX, b.minX) - Math.min(a.maxX, b.maxX)) * Math.max(1, cssWidth);
+  const gapY = Math.max(0, Math.max(a.minY, b.minY) - Math.min(a.maxY, b.maxY)) * Math.max(1, cssHeight);
+  return Math.hypot(gapX, gapY) <= gapPx;
+}
+
+function strokesAreVisuallyConnected(
+  a: InkStroke,
+  b: InkStroke,
+  cssWidth: number,
+  cssHeight: number,
+  gapPx: number
+): boolean {
+  const aBounds = normalizedStrokeBounds(a);
+  const bBounds = normalizedStrokeBounds(b);
+  return Boolean(aBounds && bBounds && normalizedBoundsAreNear(aBounds, bBounds, cssWidth, cssHeight, gapPx));
 }
 
 function normalizedTextBounds(text: InkText): NormalizedBounds {
@@ -10640,6 +10840,10 @@ function cleanPdfPathHint(rawPath: string): string | null {
 
 function makeStrokeId(): string {
   return `stroke-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function makeInkGroupId(): string {
+  return `ink-group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function safeAnnotationKey(path: string): string {

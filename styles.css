@@ -218,17 +218,25 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
 
 .pdftion-enabled .annotationLayer,
 .pdftion-enabled .annotationEditorLayer,
+.pdftion-enabled .annotationEditorParams,
+.pdftion-enabled .annotationEditorToolbar,
+.pdftion-enabled .editorParamsToolbar,
 .pdftion-enabled [data-annotation-id],
 .pdftion-enabled [data-pdf-annotation-id],
 .pdftion-enabled .popupAnnotation,
 .pdftion-enabled .pdf-annotation-popup,
+.pdftion-enabled .pdf-annotation-menu,
 .pdftion-enabled .pdfAnnotationPopup,
 .pdftion-hide-native-ink-layer .annotationLayer,
 .pdftion-hide-native-ink-layer .annotationEditorLayer,
+.pdftion-hide-native-ink-layer .annotationEditorParams,
+.pdftion-hide-native-ink-layer .annotationEditorToolbar,
+.pdftion-hide-native-ink-layer .editorParamsToolbar,
 .pdftion-hide-native-ink-layer [data-annotation-id],
 .pdftion-hide-native-ink-layer [data-pdf-annotation-id],
 .pdftion-hide-native-ink-layer .popupAnnotation,
 .pdftion-hide-native-ink-layer .pdf-annotation-popup,
+.pdftion-hide-native-ink-layer .pdf-annotation-menu,
 .pdftion-hide-native-ink-layer .pdfAnnotationPopup {
   display: none;
   opacity: 0;
@@ -238,10 +246,14 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
 
 body.pdftion-editing-active .annotationLayer,
 body.pdftion-editing-active .annotationEditorLayer,
+body.pdftion-editing-active .annotationEditorParams,
+body.pdftion-editing-active .annotationEditorToolbar,
+body.pdftion-editing-active .editorParamsToolbar,
 body.pdftion-editing-active [data-annotation-id],
 body.pdftion-editing-active [data-pdf-annotation-id],
 body.pdftion-editing-active .popupAnnotation,
 body.pdftion-editing-active .pdf-annotation-popup,
+body.pdftion-editing-active .pdf-annotation-menu,
 body.pdftion-editing-active .pdfAnnotationPopup {
   display: none;
   opacity: 0;
@@ -253,8 +265,12 @@ body.pdftion-editing-active .annotationLayer .popupWrapper,
 body.pdftion-editing-active .annotationLayer .popup,
 body.pdftion-editing-active .annotationEditorLayer .popupWrapper,
 body.pdftion-editing-active .annotationEditorLayer .popup,
+body.pdftion-editing-active .annotationEditorParams,
+body.pdftion-editing-active .annotationEditorToolbar,
+body.pdftion-editing-active .editorParamsToolbar,
 body.pdftion-editing-active .popupAnnotation,
 body.pdftion-editing-active .pdf-annotation-popup,
+body.pdftion-editing-active .pdf-annotation-menu,
 body.pdftion-editing-active .pdfAnnotationPopup {
   display: none;
   pointer-events: none;
