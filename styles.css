@@ -181,14 +181,18 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
 }
 
 .pdftion-canvas {
-  cursor: crosshair;
   pointer-events: none;
   position: absolute;
   touch-action: none;
   z-index: 25;
 }
 
-.pdftion-selecting .pdftion-canvas {
+.pdftion-live-canvas {
+  cursor: crosshair;
+  z-index: 26;
+}
+
+.pdftion-selecting .pdftion-live-canvas {
   cursor: pointer;
 }
 
@@ -208,7 +212,7 @@ body.pdftion-menu-boost .pdftion-embed-actions .clickable-icon {
   z-index: 10001;
 }
 
-.pdftion-enabled .pdftion-canvas {
+.pdftion-enabled .pdftion-live-canvas {
   pointer-events: auto;
 }
 

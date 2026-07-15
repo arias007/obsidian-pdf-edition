@@ -12,10 +12,11 @@ type PdfFontkitModule = typeof import("@pdf-lib/fontkit");
 const AUTO_SAVE_IDLE_DELAY_MS = 5200;
 const AUTO_SAVE_CLOSE_DELAY_MS = 200;
 const OVERLAY_HEALTH_CHECK_MS = 5000;
+const OVERLAY_MAX_DPR = 2;
+const PDF_ZOOM_SETTLE_DELAY_MS = 160;
 const STROKE_FAST_SAVE_DELAY_MS = 180;
 const STROKE_MIN_POINT_DISTANCE_PX = 0.35;
 const STROKE_INTERPOLATION_STEP_PX = 0.75;
-const STROKE_LIVE_MAX_DPR = 2;
 let pdfFontkitModulePromise: Promise<PdfFontkitModule> | null = null;
 const PALETTE_COLORS = [
   "#000000",
@@ -1193,11 +1194,21 @@ interface PageOverlay {
   cssHeight: number;
   cssWidth: number;
   dpr: number;
+  observedCanvas?: HTMLCanvasElement | null;
   pageEl: HTMLElement;
   pageIndex: number;
   redrawFrame?: number | null;
   redrawPreviewStroke?: InkStroke | null;
   resizeObserver?: ResizeObserver | null;
+  resizeTimer?: number | null;
+  staticCanvas: HTMLCanvasElement;
+}
+
+interface OverlayGeometry {
+  cssHeight: number;
+  cssWidth: number;
+  left: number;
+  top: number;
 }
 
 interface VisualConversionPage {
@@ -1491,8 +1502,7 @@ export default class PdftionPlugin extends Plugin {
   async loadAnnotationState(file: TFile): Promise<{ elements: InkElement[]; overlayAnnotationsOnly: boolean; overlayTextOnly: boolean } | null> {
     const currentBytes = await this.app.vault.readBinary(file);
     const currentFingerprint = await fingerprintPdfBytes(currentBytes, file.stat.mtime);
-    const loadedState = await this.loadVerifiedAnnotationRecord(file, currentFingerprint);
-    const state = loadedState ? await this.recoverPendingPdfInkAnnotations(file, loadedState, currentBytes) : null;
+    const state = await this.loadVerifiedAnnotationRecord(file, currentFingerprint);
     if (!state) {
       return null;
     }
@@ -1501,48 +1511,6 @@ export default class PdftionPlugin extends Plugin {
       overlayAnnotationsOnly: state.overlayAnnotationsOnly === true,
       overlayTextOnly: state.overlayTextOnly === true
     };
-  }
-
-  private async recoverPendingPdfInkAnnotations(file: TFile, state: AnnotationStateRecord, currentBytes: ArrayBuffer): Promise<AnnotationStateRecord> {
-    const hasPendingInk = state.elements.some((element) => (
-      element.kind === "stroke" &&
-      element.pdfSaved !== true &&
-      element.points.length >= 2
-    ));
-    if (!hasPendingInk) {
-      return state;
-    }
-
-    try {
-      const pdf = await PDFDocument.load(currentBytes, { ignoreEncryption: true, updateMetadata: false });
-      await syncEditableInkAnnotationsOnPdf(pdf, state.elements);
-      const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
-      const buffer = new ArrayBuffer(saved.byteLength);
-      new Uint8Array(buffer).set(saved);
-      await this.app.vault.modifyBinary(file, buffer);
-
-      const elements = state.elements.map((element) => {
-        const cloned = cloneElement(element);
-        cloned.saved = true;
-        if (cloned.kind === "stroke") {
-          cloned.pdfSaved = true;
-          cloned.pdfPoints = cloned.points.map((point) => ({ ...point }));
-          cloned.externalDirty = false;
-          cloned.source = cloned.source ?? "pdftion";
-        }
-        return cloned;
-      });
-      await this.saveEditableAnnotationState(file, elements, buffer);
-      return {
-        ...state,
-        elements,
-        pdfFingerprint: await fingerprintPdfBytes(buffer, file.stat.mtime),
-        updatedAt: new Date().toISOString()
-      };
-    } catch (error) {
-      console.warn("pdftion could not recover pending PDF ink annotations; keeping editable state for retry.", error);
-      return state;
-    }
   }
 
   async loadPdfInkAnnotations(file: TFile, pageIndexes?: Set<number>): Promise<InkStroke[]> {
@@ -2229,6 +2197,7 @@ class InkSession {
   private currentStrokeHadTouchMove = false;
   private cropPreview: CropPreviewState | null = null;
   private dirty = false;
+  private destroyed = false;
   private enabled = false;
   private imageCache = new Map<string, HTMLImageElement>();
   private imageMenu: HTMLElement | null = null;
@@ -2241,7 +2210,7 @@ class InkSession {
   private activeTouchId: number | null = null;
   private annotationLoadToken = 0;
   private annotationLoadPromise: Promise<void> | null = null;
-  private detachingPdfInkForEditing = false;
+  private preparingPdfInkForEditing = false;
   private pendingEditableInkPrepareAfterSave = false;
   private pendingSaveAfterCurrentSave = false;
   private palette: HTMLElement | null = null;
@@ -2264,6 +2233,7 @@ class InkSession {
   private settingsSaveTimer: number | null = null;
   private scanTimer: number | null = null;
   private healthTimer: number | null = null;
+  private zoomGeometryTimer: number | null = null;
   private inkPrepareTimer: number | null = null;
   private inkPrepareTimerForce = false;
   private nativeAnnotationPopupTimer: number | null = null;
@@ -2337,12 +2307,18 @@ class InkSession {
     this.rootEl.addEventListener("keyup", () => this.scheduleNativeTextSelectionMenu(20), {
       signal: this.nativeTextSelectionAbort.signal
     });
-    this.rootEl.addEventListener("scroll", () => this.scheduleEditableInkPrepare(180), {
+    this.rootEl.addEventListener("scroll", () => {
+      this.scheduleEditableInkPrepare(180);
+      this.refreshVisibleOverlays();
+    }, {
       capture: true,
       passive: true,
       signal: this.nativeTextSelectionAbort.signal
     });
-    activeDocument.addEventListener("scroll", () => this.scheduleEditableInkPrepare(180), {
+    activeDocument.addEventListener("scroll", () => {
+      this.scheduleEditableInkPrepare(180);
+      this.refreshVisibleOverlays();
+    }, {
       capture: true,
       passive: true,
       signal: this.nativeTextSelectionAbort.signal
@@ -2361,12 +2337,14 @@ class InkSession {
 
   destroy(): void {
     this.flushSoon();
+    this.destroyed = true;
     this.enabled = false;
     this.restoreHiddenNativeInkAnnotations();
     this.clearAutoSaveTimer();
     this.clearToolSettingsSaveTimer();
     this.clearScanTimer();
     this.clearEditableInkPrepareTimer();
+    this.clearZoomGeometryTimer();
     this.stopOverlayHealthCheck();
     this.stopNativeAnnotationPopupSuppressor();
     this.mutationObserver.disconnect();
@@ -2389,7 +2367,11 @@ class InkSession {
       if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
         window.cancelAnimationFrame(overlay.redrawFrame);
       }
+      if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
+        window.clearTimeout(overlay.resizeTimer);
+      }
       overlay.canvas.remove();
+      overlay.staticCanvas.remove();
       overlay.pageEl.classList.remove("pdftion-page", "pdftion-hide-native-ink-layer");
     }
     this.overlays.clear();
@@ -2784,8 +2766,10 @@ class InkSession {
     let overlay = this.overlays.get(pageEl);
 
     if (!overlay) {
+      const staticCanvas = activeDocument.createElement("canvas");
+      staticCanvas.className = "pdftion-canvas pdftion-static-canvas";
       const canvas = activeDocument.createElement("canvas");
-      canvas.className = "pdftion-canvas";
+      canvas.className = "pdftion-canvas pdftion-live-canvas";
 
       const abort = new AbortController();
       const newOverlay: PageOverlay = {
@@ -2794,11 +2778,14 @@ class InkSession {
         cssHeight: 0,
         cssWidth: 0,
         dpr: 1,
+        observedCanvas: null,
         pageEl,
         pageIndex,
         redrawFrame: null,
         redrawPreviewStroke: null,
-        resizeObserver: null
+        resizeObserver: null,
+        resizeTimer: null,
+        staticCanvas
       };
 
       canvas.addEventListener("pointerdown", (event: PointerEvent) => this.onPointerDown(event, newOverlay), { signal: abort.signal });
@@ -2825,88 +2812,219 @@ class InkSession {
       });
 
       pageEl.classList.add("pdftion-page");
+      pageEl.appendChild(staticCanvas);
       pageEl.appendChild(canvas);
       overlay = newOverlay;
       this.overlays.set(pageEl, overlay);
-      this.observeOverlayResize(overlay);
     }
 
     overlay.pageIndex = pageIndex;
-    this.resizeOverlay(overlay);
+    this.observeOverlayResize(overlay);
+    if (this.isOverlayNearViewport(overlay)) {
+      this.resizeOverlay(overlay);
+    }
   }
 
   private observeOverlayResize(overlay: PageOverlay): void {
-    if (typeof ResizeObserver === "undefined" || overlay.resizeObserver) {
+    if (typeof ResizeObserver === "undefined") {
       return;
     }
-    const observer = new ResizeObserver(() => {
-      if (this.isInteracting()) {
-        this.requestOverlayRedraw(overlay, this.currentStroke?.pageIndex === overlay.pageIndex ? this.currentStroke : undefined);
-        return;
-      }
-      this.resizeOverlay(overlay);
-    });
-    observer.observe(overlay.pageEl);
-    const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.pdftion-canvas)");
-    if (visibleCanvas) {
-      observer.observe(visibleCanvas);
+    if (!overlay.resizeObserver) {
+      overlay.resizeObserver = new ResizeObserver(() => this.scheduleOverlayResize(overlay));
+      overlay.resizeObserver.observe(overlay.pageEl);
     }
-    overlay.resizeObserver = observer;
+
+    const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.pdftion-canvas)");
+    if (overlay.observedCanvas !== visibleCanvas) {
+      if (overlay.observedCanvas) {
+        overlay.resizeObserver.unobserve(overlay.observedCanvas);
+      }
+      if (visibleCanvas) {
+        overlay.resizeObserver.observe(visibleCanvas);
+      }
+      overlay.observedCanvas = visibleCanvas;
+    }
   }
 
-  private resizeOverlay(overlay: PageOverlay): void {
-    this.ensureOverlayCanvasMounted(overlay);
+  private measureOverlayGeometry(overlay: PageOverlay): OverlayGeometry | null {
     const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.pdftion-canvas)");
-    const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
-    const cssWidth = Math.round(rect.width);
-    const cssHeight = Math.round(rect.height);
-    const maxDpr = this.currentStroke?.pageIndex === overlay.pageIndex ? STROKE_LIVE_MAX_DPR : 3;
-    const dpr = Math.max(1, Math.min(maxDpr, activeWindow.devicePixelRatio || 1));
+    const pageRect = overlay.pageEl.getBoundingClientRect();
+    const visibleRect = visibleCanvas?.getBoundingClientRect() ?? pageRect;
+    const pageLocalWidth = overlay.pageEl.offsetWidth || overlay.pageEl.clientWidth || pageRect.width;
+    const pageLocalHeight = overlay.pageEl.offsetHeight || overlay.pageEl.clientHeight || pageRect.height;
+    const canvasLocalWidth = visibleCanvas?.clientWidth || visibleCanvas?.offsetWidth || 0;
+    const canvasLocalHeight = visibleCanvas?.clientHeight || visibleCanvas?.offsetHeight || 0;
+    const scaleX = canvasLocalWidth > 0
+      ? visibleRect.width / canvasLocalWidth
+      : pageRect.width > 0 && pageLocalWidth > 0
+        ? pageRect.width / pageLocalWidth
+        : 1;
+    const scaleY = canvasLocalHeight > 0
+      ? visibleRect.height / canvasLocalHeight
+      : pageRect.height > 0 && pageLocalHeight > 0
+        ? pageRect.height / pageLocalHeight
+        : 1;
+    const pageStyle = activeWindow.getComputedStyle(overlay.pageEl);
+    const borderLeft = Number.parseFloat(pageStyle.borderLeftWidth) || 0;
+    const borderTop = Number.parseFloat(pageStyle.borderTopWidth) || 0;
+    const cssWidth = canvasLocalWidth > 0 ? canvasLocalWidth : visibleRect.width / Math.max(0.01, scaleX);
+    const cssHeight = canvasLocalHeight > 0 ? canvasLocalHeight : visibleRect.height / Math.max(0.01, scaleY);
 
     if (cssWidth <= 0 || cssHeight <= 0) {
-      this.scheduleScanPages(260);
-      return;
+      return null;
     }
 
-    if (overlay.cssWidth === cssWidth && overlay.cssHeight === cssHeight && overlay.dpr === dpr) {
+    return {
+      cssHeight,
+      cssWidth,
+      left: Math.max(0, (visibleRect.left - pageRect.left) / Math.max(0.01, scaleX) - borderLeft),
+      top: Math.max(0, (visibleRect.top - pageRect.top) / Math.max(0.01, scaleY) - borderTop)
+    };
+  }
+
+  private applyOverlayCssGeometry(overlay: PageOverlay, geometry: OverlayGeometry): void {
+    const styles = {
+      height: `${geometry.cssHeight}px`,
+      left: `${geometry.left}px`,
+      top: `${geometry.top}px`,
+      width: `${geometry.cssWidth}px`
+    };
+    overlay.staticCanvas.setCssStyles(styles);
+    overlay.canvas.setCssStyles(styles);
+  }
+
+  private syncOverlayCssGeometry(overlay: PageOverlay): OverlayGeometry | null {
+    this.ensureOverlayCanvasMounted(overlay);
+    const geometry = this.measureOverlayGeometry(overlay);
+    if (geometry) {
+      this.applyOverlayCssGeometry(overlay, geometry);
+    }
+    return geometry;
+  }
+
+  private scheduleOverlayResize(overlay: PageOverlay, delay = PDF_ZOOM_SETTLE_DELAY_MS): void {
+    if (!this.isOverlayNearViewport(overlay)) {
+      if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
+        window.clearTimeout(overlay.resizeTimer);
+        overlay.resizeTimer = null;
+      }
       return;
+    }
+    this.syncOverlayCssGeometry(overlay);
+    if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
+      window.clearTimeout(overlay.resizeTimer);
+    }
+    overlay.resizeTimer = window.setTimeout(() => {
+      overlay.resizeTimer = null;
+      if (this.currentStroke?.pageIndex === overlay.pageIndex) {
+        this.scheduleOverlayResize(overlay, 80);
+        return;
+      }
+      if (this.isOverlayNearViewport(overlay)) {
+        this.resizeOverlay(overlay);
+      }
+    }, delay);
+  }
+
+  private resizeOverlay(overlay: PageOverlay): boolean {
+    const geometry = this.syncOverlayCssGeometry(overlay);
+    if (!geometry) {
+      this.scheduleScanPages(260);
+      return false;
+    }
+    const cssWidth = geometry.cssWidth;
+    const cssHeight = geometry.cssHeight;
+    const dpr = Math.max(1, Math.min(OVERLAY_MAX_DPR, activeWindow.devicePixelRatio || 1));
+    const bitmapWidth = Math.max(1, Math.round(cssWidth * dpr));
+    const bitmapHeight = Math.max(1, Math.round(cssHeight * dpr));
+    const geometryUnchanged =
+      Math.abs(overlay.cssWidth - cssWidth) < 0.1 &&
+      Math.abs(overlay.cssHeight - cssHeight) < 0.1 &&
+      overlay.dpr === dpr &&
+      overlay.canvas.width === bitmapWidth &&
+      overlay.canvas.height === bitmapHeight &&
+      overlay.staticCanvas.width === bitmapWidth &&
+      overlay.staticCanvas.height === bitmapHeight;
+    if (geometryUnchanged) {
+      return false;
     }
 
     overlay.cssWidth = cssWidth;
     overlay.cssHeight = cssHeight;
     overlay.dpr = dpr;
-    const left = visibleCanvas ? `${Math.max(0, Math.round(rect.left - overlay.pageEl.getBoundingClientRect().left))}px` : "0";
-    const top = visibleCanvas ? `${Math.max(0, Math.round(rect.top - overlay.pageEl.getBoundingClientRect().top))}px` : "0";
-    overlay.canvas.setCssStyles({
-      height: `${cssHeight}px`,
-      left,
-      top,
-      width: `${cssWidth}px`
-    });
-    overlay.canvas.width = Math.max(1, Math.round(cssWidth * dpr));
-    overlay.canvas.height = Math.max(1, Math.round(cssHeight * dpr));
-    this.redrawOverlay(overlay);
+    overlay.staticCanvas.width = bitmapWidth;
+    overlay.staticCanvas.height = bitmapHeight;
+    overlay.canvas.width = bitmapWidth;
+    overlay.canvas.height = bitmapHeight;
+    this.redrawOverlay(overlay, this.currentStroke?.pageIndex === overlay.pageIndex ? this.currentStroke : undefined);
+    return true;
   }
 
   private refreshOverlayGeometry(): void {
     for (const overlay of this.overlays.values()) {
-      this.resizeOverlay(overlay);
+      if (this.isOverlayNearViewport(overlay)) {
+        this.resizeOverlay(overlay);
+      }
+    }
+  }
+
+  private refreshVisibleOverlays(): void {
+    for (const overlay of this.overlays.values()) {
+      if (!this.isOverlayNearViewport(overlay)) {
+        continue;
+      }
+      const geometry = this.measureOverlayGeometry(overlay);
+      if (!geometry) {
+        continue;
+      }
+      this.applyOverlayCssGeometry(overlay, geometry);
+      if (
+        overlay.cssWidth <= 0 ||
+        overlay.cssHeight <= 0 ||
+        Math.abs(overlay.cssWidth - geometry.cssWidth) >= 0.1 ||
+        Math.abs(overlay.cssHeight - geometry.cssHeight) >= 0.1
+      ) {
+        this.requestOverlayRedraw(overlay);
+      }
+    }
+  }
+
+  private scheduleZoomGeometryRefresh(delay = PDF_ZOOM_SETTLE_DELAY_MS): void {
+    this.clearZoomGeometryTimer();
+    this.zoomGeometryTimer = window.setTimeout(() => {
+      this.zoomGeometryTimer = null;
+      this.refreshOverlayGeometry();
+    }, delay);
+  }
+
+  private clearZoomGeometryTimer(): void {
+    if (this.zoomGeometryTimer !== null) {
+      window.clearTimeout(this.zoomGeometryTimer);
+      this.zoomGeometryTimer = null;
     }
   }
 
   private getOverlayClientRect(overlay: PageOverlay): DOMRectReadOnly {
-    const canvasRect = overlay.canvas.getBoundingClientRect();
-    if (canvasRect.width > 0 && canvasRect.height > 0) {
-      return canvasRect;
-    }
-
     const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.pdftion-canvas)");
     const visibleRect = visibleCanvas?.getBoundingClientRect();
     if (visibleRect && visibleRect.width > 0 && visibleRect.height > 0) {
       return visibleRect;
     }
 
+    const canvasRect = overlay.canvas.getBoundingClientRect();
+    if (canvasRect.width > 0 && canvasRect.height > 0) {
+      return canvasRect;
+    }
+
     return overlay.pageEl.getBoundingClientRect();
+  }
+
+  private getOverlayInputPoint(overlay: PageOverlay, clientX: number, clientY: number): InkPoint {
+    const rect = this.getOverlayClientRect(overlay);
+    return {
+      x: clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+      y: clamp((clientY - rect.top) / Math.max(1, rect.height), 0, 1)
+    };
   }
 
   private ensureOverlayCanvasMounted(overlay: PageOverlay): boolean {
@@ -2915,11 +3033,20 @@ class InkSession {
     }
 
     overlay.pageEl.classList.add("pdftion-page");
+    let changed = false;
+    if (overlay.staticCanvas.parentElement !== overlay.pageEl) {
+      overlay.pageEl.appendChild(overlay.staticCanvas);
+      changed = true;
+    }
     if (overlay.canvas.parentElement !== overlay.pageEl || overlay.pageEl.lastElementChild !== overlay.canvas) {
       overlay.pageEl.appendChild(overlay.canvas);
-      return true;
+      changed = true;
     }
-    return false;
+    if (overlay.staticCanvas.nextElementSibling !== overlay.canvas) {
+      overlay.pageEl.insertBefore(overlay.staticCanvas, overlay.canvas);
+      changed = true;
+    }
+    return changed;
   }
 
   private startOverlayHealthCheck(): void {
@@ -2960,11 +3087,16 @@ class InkSession {
     this.cleanupDetachedOverlays();
     for (const overlay of this.overlays.values()) {
       const wasMounted = this.ensureOverlayCanvasMounted(overlay);
-      const visibleCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>("canvas:not(.pdftion-canvas)");
-      const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
-      const cssWidth = Math.round(rect.width);
-      const cssHeight = Math.round(rect.height);
-      if (wasMounted || cssWidth <= 0 || cssHeight <= 0 || overlay.cssWidth !== cssWidth || overlay.cssHeight !== cssHeight) {
+      this.observeOverlayResize(overlay);
+      if (!this.isOverlayNearViewport(overlay)) {
+        continue;
+      }
+      const geometry = this.syncOverlayCssGeometry(overlay);
+      const sizeChanged = Boolean(
+        geometry &&
+        (Math.abs(overlay.cssWidth - geometry.cssWidth) >= 0.1 || Math.abs(overlay.cssHeight - geometry.cssHeight) >= 0.1)
+      );
+      if (wasMounted || sizeChanged) {
         this.resizeOverlay(overlay);
         repaired = true;
       }
@@ -3034,11 +3166,11 @@ class InkSession {
         this.pendingEditableInkPrepareAfterSave = true;
         return;
       }
-      const pageIndexes = this.getCurrentInkDetachPages(force);
+      const pageIndexes = this.getCurrentInkPreparePages(force);
       if (pageIndexes.size === 0) {
         return;
       }
-      await this.detachPdfInkForEditing(pageIndexes);
+      this.preparePdfInkOverlayForEditing(pageIndexes);
     } catch (error) {
       console.warn("pdftion could not prepare PDF ink for editable mode.", error);
     }
@@ -3067,72 +3199,39 @@ class InkSession {
     this.inkPrepareTimerForce = false;
   }
 
-  private getCurrentInkDetachPages(force = false): Set<number> {
+  private getCurrentInkPreparePages(force = false): Set<number> {
     const pages = new Set<number>();
     const viewportHeight = activeWindow.innerHeight || activeDocument.documentElement.clientHeight || 1;
+    const margin = force ? 160 : 80;
     for (const overlay of this.overlays.values()) {
-      if (!force && this.detachedInkEditPages.has(overlay.pageIndex)) {
+      if (this.detachedInkEditPages.has(overlay.pageIndex)) {
         continue;
       }
       const rect = overlay.pageEl.getBoundingClientRect();
-      if (rect.bottom >= -80 && rect.top <= viewportHeight + 80) {
+      if (rect.bottom >= -margin && rect.top <= viewportHeight + margin) {
         pages.add(overlay.pageIndex);
       }
     }
     if (pages.size === 0) {
       const overlay = this.getVisibleOverlay() ?? Array.from(this.overlays.values()).sort((a, b) => a.pageIndex - b.pageIndex)[0];
-      if (overlay && (force || !this.detachedInkEditPages.has(overlay.pageIndex))) {
+      if (overlay && !this.detachedInkEditPages.has(overlay.pageIndex)) {
         pages.add(overlay.pageIndex);
       }
     }
     return pages;
   }
 
-  private async detachPdfInkForEditing(pageIndexes: Set<number>): Promise<void> {
-    if (pageIndexes.size === 0 || this.detachingPdfInkForEditing) {
-      return;
-    }
-    if (this.saving) {
-      this.pendingEditableInkPrepareAfterSave = true;
-      window.setTimeout(() => void this.prepareEditableInkForCurrentPage(true), 250);
+  private preparePdfInkOverlayForEditing(pageIndexes: Set<number>): void {
+    if (pageIndexes.size === 0 || this.preparingPdfInkForEditing) {
       return;
     }
 
-    this.detachingPdfInkForEditing = true;
-    this.saving = true;
+    this.preparingPdfInkForEditing = true;
     try {
       for (const pageIndex of pageIndexes) {
         this.pendingNativeInkHidePages.add(pageIndex);
       }
       this.updateExternalInkLayerState();
-
-      const targetFile = this.file;
-      const targetPath = targetFile.path;
-      const binary = await this.plugin.app.vault.readBinary(targetFile);
-      const pdf = await PDFDocument.load(binary, { ignoreEncryption: true, updateMetadata: false });
-      const detachedStrokes = detachPdfInkAnnotations(pdf, pageIndexes);
-
-      if (detachedStrokes.length > 0) {
-        this.mergeDetachedPdfInkStrokes(detachedStrokes);
-        const preDetachElements = this.getEditableElements().map(markElementSaved);
-        await this.plugin.saveEditableAnnotationState(targetFile, preDetachElements, binary);
-        this.applySavedFlags(preDetachElements);
-
-        const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
-        const buffer = new ArrayBuffer(saved.byteLength);
-        new Uint8Array(buffer).set(saved);
-        await this.plugin.app.vault.modifyBinary(targetFile, buffer);
-
-        if (this.file.path !== targetPath) {
-          return;
-        }
-
-        const postDetachElements = this.getEditableElements().map(markElementSaved);
-        await this.plugin.saveEditableAnnotationState(targetFile, postDetachElements, buffer);
-        this.applySavedFlags(postDetachElements);
-        this.savedInkIsBurnedIntoPdf = this.strokeHistory.some((stroke) => !Array.isArray(stroke.pdfPoints)) && this.savedInkIsBurnedIntoPdf;
-        this.dirty = this.getEditableElements().some((element) => !element.saved);
-      }
 
       for (const pageIndex of pageIndexes) {
         this.detachedInkEditPages.add(pageIndex);
@@ -3140,28 +3239,10 @@ class InkSession {
       }
       this.updateExternalInkLayerState();
       this.redrawAll();
-      if (detachedStrokes.length > 0) {
-        this.scheduleQuietScan();
-      }
     } catch (error) {
       console.warn("pdftion could not prepare PDF ink annotations for editing.", error);
     } finally {
-      this.detachingPdfInkForEditing = false;
-      this.saving = false;
-      this.flushPendingEditableInkPrepare();
-      if (this.pendingSaveAfterCurrentSave) {
-        this.pendingSaveAfterCurrentSave = false;
-        this.scheduleAutoSave(AUTO_SAVE_IDLE_DELAY_MS);
-      }
-    }
-  }
-
-  private applySavedFlags(savedElements: InkElement[]): void {
-    const savedElementIds = new Set(savedElements.map((element) => element.id));
-    for (const element of this.getEditableElements()) {
-      if (savedElementIds.has(element.id)) {
-        element.saved = true;
-      }
+      this.preparingPdfInkForEditing = false;
     }
   }
 
@@ -3237,37 +3318,6 @@ class InkSession {
       existing.saved = false;
     }
     return changed;
-  }
-
-  private mergeDetachedPdfInkStrokes(detachedStrokes: InkStroke[]): void {
-    for (const stroke of detachedStrokes) {
-      const existing = this.strokeHistory.find((candidate) => candidate.id === stroke.id);
-      if (existing) {
-        if (existing.pdfSaved === true && existing.saved && existing.externalDirty !== true) {
-          existing.points = stroke.points.map((point) => ({ ...point }));
-          existing.color = stroke.color;
-          existing.opacity = stroke.opacity;
-          existing.pageCssHeight = stroke.pageCssHeight;
-          existing.pageCssWidth = stroke.pageCssWidth;
-          existing.tool = stroke.tool;
-          existing.width = stroke.width;
-        }
-        existing.pdfPoints = stroke.pdfPoints?.map((point) => ({ ...point })) ?? stroke.points.map((point) => ({ ...point }));
-        existing.pdfSaved = false;
-        existing.externalDirty = true;
-        existing.source = existing.source ?? stroke.source;
-        existing.saved = false;
-      } else {
-        this.strokeHistory.push({
-          ...stroke,
-          externalDirty: true,
-          pdfPoints: stroke.pdfPoints?.map((point) => ({ ...point })) ?? stroke.points.map((point) => ({ ...point })),
-          pdfSaved: false,
-          points: stroke.points.map((point) => ({ ...point })),
-          saved: false
-        });
-      }
-    }
   }
 
   private updateButtonState(): void {
@@ -3679,11 +3729,13 @@ class InkSession {
 
     event.preventDefault();
     event.stopPropagation();
-    if (event.detail >= 2 && this.openEditorAtPoint(getNormalizedPoint(event, overlay.canvas), overlay)) {
+    this.resizeOverlay(overlay);
+    const point = this.getOverlayInputPoint(overlay, event.clientX, event.clientY);
+    if (event.detail >= 2 && this.openEditorAtPoint(point, overlay)) {
       return;
     }
     overlay.canvas.setPointerCapture(event.pointerId);
-    this.beginInkInteraction(getNormalizedPoint(event, overlay.canvas), overlay);
+    this.beginInkInteraction(point, overlay);
   }
 
   private onDoubleClick(event: MouseEvent, overlay: PageOverlay): void {
@@ -3692,7 +3744,8 @@ class InkSession {
     }
     event.preventDefault();
     event.stopPropagation();
-    this.openEditorAtPoint(getNormalizedClientPoint(event.clientX, event.clientY, overlay.canvas), overlay);
+    this.resizeOverlay(overlay);
+    this.openEditorAtPoint(this.getOverlayInputPoint(overlay, event.clientX, event.clientY), overlay);
   }
 
   private openEditorAtPoint(point: InkPoint, overlay: PageOverlay): boolean {
@@ -5627,8 +5680,24 @@ class InkSession {
     event.preventDefault();
     event.stopPropagation();
     const events = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [event];
+    const stroke = this.currentStroke;
+    if (stroke?.pageIndex === overlay.pageIndex) {
+      const startIndex = stroke.points.length - 1;
+      for (const pointerEvent of events) {
+        this.appendPointToCurrentStroke(
+          stroke,
+          this.getOverlayInputPoint(overlay, pointerEvent.clientX, pointerEvent.clientY),
+          overlay,
+          false
+        );
+      }
+      if (stroke.points.length > startIndex + 1) {
+        this.drawLiveStrokeSegments(overlay, stroke, startIndex);
+      }
+      return;
+    }
     for (const pointerEvent of events) {
-      this.moveInkInteraction(getNormalizedPoint(pointerEvent, overlay.canvas), overlay);
+      this.moveInkInteraction(this.getOverlayInputPoint(overlay, pointerEvent.clientX, pointerEvent.clientY), overlay);
     }
   }
 
@@ -5683,10 +5752,17 @@ class InkSession {
   }
 
   private clearCurrentStroke(): void {
+    const pageIndex = this.currentStroke?.pageIndex;
     this.currentStroke = null;
     this.currentStrokeMoved = false;
     this.currentStrokeHadTouchMove = false;
     this.currentStrokeStartedAt = 0;
+    if (pageIndex !== undefined) {
+      const overlay = this.findOverlayByPageIndex(pageIndex);
+      if (overlay) {
+        this.clearLiveOverlay(overlay);
+      }
+    }
   }
 
   private updateCurrentCover(point: InkPoint, overlay: PageOverlay): void {
@@ -5703,16 +5779,16 @@ class InkSession {
     this.redrawOverlay(overlay);
   }
 
-  private appendPointToCurrentStroke(stroke: InkStroke, point: InkPoint, overlay: PageOverlay): void {
+  private appendPointToCurrentStroke(stroke: InkStroke, point: InkPoint, overlay: PageOverlay, render = true): boolean {
     const last = stroke.points[stroke.points.length - 1];
     if (!last) {
       stroke.points.push(point);
-      return;
+      return true;
     }
 
     const distance = normalizedDistance(last, point, overlay.cssWidth, overlay.cssHeight);
     if (distance < STROKE_MIN_POINT_DISTANCE_PX) {
-      return;
+      return false;
     }
 
     this.currentStrokeMoved = true;
@@ -5726,7 +5802,10 @@ class InkSession {
       });
     }
 
-    this.drawLiveStrokeSegments(overlay, stroke, startIndex);
+    if (render) {
+      this.drawLiveStrokeSegments(overlay, stroke, startIndex);
+    }
+    return true;
   }
 
   private drawLiveStrokeSegments(overlay: PageOverlay, stroke: InkStroke, startIndex: number): void {
@@ -5966,8 +6045,9 @@ class InkSession {
       this.clearCurrentStroke();
       this.activeTouchId = null;
       this.redrawAll();
+      this.resizeOverlay(overlay);
       const center = getTouchCenter(event.touches);
-      const centerPoint = getNormalizedClientPoint(center.x, center.y, overlay.canvas);
+      const centerPoint = this.getOverlayInputPoint(overlay, center.x, center.y);
       const selected = this.getSelectedEditableElements(overlay.pageIndex);
       const bounds = normalizedElementsBounds(selected);
       const resizeSelection = this.tool === "select" && selected.length > 0 && bounds !== null && this.selectionBoxContainsPoint(overlay, centerPoint);
@@ -5999,7 +6079,8 @@ class InkSession {
     this.activeTouchId = touch.identifier;
     event.preventDefault();
     event.stopPropagation();
-    const point = getNormalizedClientPoint(touch.clientX, touch.clientY, overlay.canvas);
+    this.resizeOverlay(overlay);
+    const point = this.getOverlayInputPoint(overlay, touch.clientX, touch.clientY);
     const now = Date.now();
     const previousTap = this.lastTap;
     const isDoubleTap =
@@ -6062,10 +6143,7 @@ class InkSession {
       if (Math.abs(zoomDelta) > 26 && Math.abs(zoomDelta) > Math.max(moveY, moveX) * 1.8) {
         dispatchPdfZoomGesture(this.rootEl, zoomDelta);
         this.touchScroll.initialDistance = distance;
-        window.setTimeout(() => {
-          this.refreshOverlayGeometry();
-          this.redrawAll();
-        }, 80);
+        this.scheduleZoomGeometryRefresh();
       }
 
       this.touchScroll.scrollEl.scrollTop += this.touchScroll.lastY - center.y;
@@ -6087,7 +6165,7 @@ class InkSession {
     event.preventDefault();
     event.stopPropagation();
     this.currentStrokeHadTouchMove = true;
-    this.moveInkInteraction(getNormalizedClientPoint(touch.clientX, touch.clientY, overlay.canvas), overlay);
+    this.moveInkInteraction(this.getOverlayInputPoint(overlay, touch.clientX, touch.clientY), overlay);
   }
 
   private onTouchEnd(event: TouchEvent, overlay: PageOverlay): void {
@@ -6106,10 +6184,12 @@ class InkSession {
         this.scheduleAutoSave();
       }
       this.touchScroll = null;
+      this.scheduleZoomGeometryRefresh(80);
       return;
     }
 
     this.touchScroll = null;
+    this.scheduleZoomGeometryRefresh(80);
     if (this.activeTouchId === null) {
       return;
     }
@@ -6251,10 +6331,13 @@ class InkSession {
       overlay.redrawFrame = null;
       const pendingPreview = overlay.redrawPreviewStroke ?? undefined;
       overlay.redrawPreviewStroke = null;
+      let resized = false;
       if (!this.currentStroke || this.currentStroke.pageIndex !== overlay.pageIndex) {
-        this.resizeOverlay(overlay);
+        resized = this.resizeOverlay(overlay);
       }
-      this.redrawOverlay(overlay, pendingPreview);
+      if (!resized) {
+        this.redrawOverlay(overlay, pendingPreview);
+      }
     });
   }
 
@@ -6265,7 +6348,7 @@ class InkSession {
   }
 
   private redrawOverlay(overlay: PageOverlay, previewStroke?: InkStroke): void {
-    const ctx = overlay.canvas.getContext("2d");
+    const ctx = overlay.staticCanvas.getContext("2d");
     if (!ctx) {
       return;
     }
@@ -6307,10 +6390,6 @@ class InkSession {
       drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, selected);
     }
 
-    if (previewStroke && previewStroke.pageIndex === overlay.pageIndex) {
-      drawStroke(ctx, previewStroke, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(previewStroke.id));
-    }
-
     for (const text of this.textHistory) {
       if (text.pageIndex === overlay.pageIndex && (!text.saved || !this.savedTextIsBurnedIntoPdf)) {
         drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(text.id));
@@ -6333,6 +6412,31 @@ class InkSession {
     if (this.cropPreview?.pageIndexes.has(overlay.pageIndex)) {
       drawCropPreview(ctx, this.cropPreview.crop, overlay.cssWidth, overlay.cssHeight);
     }
+
+    const liveStroke = previewStroke ?? (this.currentStroke?.pageIndex === overlay.pageIndex ? this.currentStroke : undefined);
+    this.redrawLiveOverlay(overlay, liveStroke);
+  }
+
+  private clearLiveOverlay(overlay: PageOverlay): void {
+    const ctx = overlay.canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, overlay.canvas.width, overlay.canvas.height);
+  }
+
+  private redrawLiveOverlay(overlay: PageOverlay, stroke?: InkStroke): void {
+    this.clearLiveOverlay(overlay);
+    if (!stroke || stroke.pageIndex !== overlay.pageIndex) {
+      return;
+    }
+    const ctx = overlay.canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    ctx.setTransform(overlay.dpr, 0, 0, overlay.dpr, 0, 0);
+    drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, false);
   }
 
   private drawImageElement(ctx: CanvasRenderingContext2D, image: InkImage, cssWidth: number, cssHeight: number, selected = false): void {
@@ -7696,7 +7800,7 @@ class InkSession {
   }
 
   private rememberNativeInkHidePagesForCurrentPages(force = false): boolean {
-    const pageIndexes = this.getCurrentInkDetachPages(force);
+    const pageIndexes = this.getCurrentInkPreparePages(force);
     if (pageIndexes.size === 0) {
       return false;
     }
@@ -8442,7 +8546,7 @@ class InkSession {
   }
 
   private scheduleAutoSave(delay = AUTO_SAVE_IDLE_DELAY_MS): void {
-    if (!this.hasPendingPdfWrite()) {
+    if (this.destroyed || !this.hasPendingPdfWrite()) {
       return;
     }
     this.clearAutoSaveTimer();
@@ -8458,11 +8562,15 @@ class InkSession {
   }
 
   flushSoon(): void {
-    if (!this.hasPendingPdfWrite()) {
+    if (this.destroyed || !this.hasPendingPdfWrite()) {
       return;
     }
     this.clearAutoSaveTimer();
-    void this.saveIntoPdf(true);
+    if (this.enabled) {
+      void this.saveEditableState();
+    } else {
+      void this.saveIntoPdf(true);
+    }
   }
 
   private clearAutoSaveTimer(): void {
@@ -8518,7 +8626,11 @@ class InkSession {
       if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
         window.cancelAnimationFrame(overlay.redrawFrame);
       }
+      if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
+        window.clearTimeout(overlay.resizeTimer);
+      }
       overlay.canvas.remove();
+      overlay.staticCanvas.remove();
       pageEl.classList.remove("pdftion-page", "pdftion-hide-native-ink-layer");
       this.overlays.delete(pageEl);
     }
@@ -8663,37 +8775,6 @@ function extractPdfInkAnnotations(pdf: PDFDocument, pageIndexes?: Set<number>): 
         strokes.push(stroke);
       }
     }
-  }
-  return strokes;
-}
-
-function detachPdfInkAnnotations(pdf: PDFDocument, pageIndexes: Set<number>): InkStroke[] {
-  const strokes: InkStroke[] = [];
-  const pages = pdf.getPages();
-  for (const pageIndex of Array.from(pageIndexes).sort((a, b) => a - b)) {
-    const page = pages[pageIndex];
-    if (!page) {
-      continue;
-    }
-    const size = page.getSize();
-    const annots = page.node.Annots?.();
-    if (!annots) {
-      continue;
-    }
-    const pageStrokes: InkStroke[] = [];
-    for (let annotIndex = annots.size() - 1; annotIndex >= 0; annotIndex -= 1) {
-      const annot = annots.lookupMaybe(annotIndex, PDFDict);
-      if (!annot) {
-        continue;
-      }
-      const stroke = externalInkAnnotationToStroke(annot, pageIndex, annotIndex, size.width, size.height);
-      if (!stroke) {
-        continue;
-      }
-      annots.remove(annotIndex);
-      pageStrokes.push(stroke);
-    }
-    strokes.push(...pageStrokes.reverse());
   }
   return strokes;
 }
@@ -9530,18 +9611,6 @@ function getPageIndex(pageEl: HTMLElement, fallbackIndex: number): number {
   const raw = pageEl.dataset.pageNumber ?? pageEl.getAttribute("data-page-number");
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed - 1 : fallbackIndex;
-}
-
-function getNormalizedPoint(event: PointerEvent, canvas: HTMLCanvasElement): InkPoint {
-  return getNormalizedClientPoint(event.clientX, event.clientY, canvas);
-}
-
-function getNormalizedClientPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): InkPoint {
-  const rect = canvas.getBoundingClientRect();
-  return {
-    x: clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
-    y: clamp((clientY - rect.top) / Math.max(1, rect.height), 0, 1)
-  };
 }
 
 function getTouchCenter(touches: TouchList): InkPoint {
