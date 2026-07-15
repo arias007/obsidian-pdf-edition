@@ -15,6 +15,7 @@ const OVERLAY_HEALTH_CHECK_MS = 5000;
 const STROKE_FAST_SAVE_DELAY_MS = 180;
 const STROKE_MIN_POINT_DISTANCE_PX = 0.35;
 const STROKE_INTERPOLATION_STEP_PX = 0.75;
+const STROKE_LIVE_MAX_DPR = 2;
 let pdfFontkitModulePromise: Promise<PdfFontkitModule> | null = null;
 const PALETTE_COLORS = [
   "#000000",
@@ -2859,7 +2860,8 @@ class InkSession {
     const rect = visibleCanvas?.getBoundingClientRect() ?? overlay.pageEl.getBoundingClientRect();
     const cssWidth = Math.round(rect.width);
     const cssHeight = Math.round(rect.height);
-    const dpr = Math.max(1, Math.min(3, activeWindow.devicePixelRatio || 1));
+    const maxDpr = this.currentStroke?.pageIndex === overlay.pageIndex ? STROKE_LIVE_MAX_DPR : 3;
+    const dpr = Math.max(1, Math.min(maxDpr, activeWindow.devicePixelRatio || 1));
 
     if (cssWidth <= 0 || cssHeight <= 0) {
       this.scheduleScanPages(260);
@@ -3789,6 +3791,7 @@ class InkSession {
         tool,
         width: this.getToolWidth(tool)
       };
+      this.redrawOverlay(overlay, this.currentStroke);
       return;
     }
 
@@ -5704,7 +5707,6 @@ class InkSession {
     const last = stroke.points[stroke.points.length - 1];
     if (!last) {
       stroke.points.push(point);
-      this.requestOverlayRedraw(overlay, stroke);
       return;
     }
 
@@ -5714,6 +5716,7 @@ class InkSession {
     }
 
     this.currentStrokeMoved = true;
+    const startIndex = stroke.points.length - 1;
     const steps = Math.max(1, Math.ceil(distance / STROKE_INTERPOLATION_STEP_PX));
     for (let i = 1; i <= steps; i += 1) {
       const ratio = i / steps;
@@ -5723,7 +5726,31 @@ class InkSession {
       });
     }
 
-    this.requestOverlayRedraw(overlay, stroke);
+    this.drawLiveStrokeSegments(overlay, stroke, startIndex);
+  }
+
+  private drawLiveStrokeSegments(overlay: PageOverlay, stroke: InkStroke, startIndex: number): void {
+    const ctx = overlay.canvas.getContext("2d");
+    if (!ctx || startIndex < 0 || startIndex >= stroke.points.length - 1) {
+      this.requestOverlayRedraw(overlay, stroke);
+      return;
+    }
+    ctx.setTransform(overlay.dpr, 0, 0, overlay.dpr, 0, 0);
+    ctx.save();
+    ctx.globalAlpha = stroke.opacity;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = strokeDisplayWidth(stroke, overlay.cssWidth);
+    ctx.strokeStyle = stroke.color;
+    ctx.beginPath();
+    const first = stroke.points[startIndex];
+    ctx.moveTo(first.x * overlay.cssWidth, first.y * overlay.cssHeight);
+    for (let i = startIndex + 1; i < stroke.points.length; i += 1) {
+      const point = stroke.points[i];
+      ctx.lineTo(point.x * overlay.cssWidth, point.y * overlay.cssHeight);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   private moveSelectionInteraction(point: InkPoint, overlay: PageOverlay): void {
@@ -6224,7 +6251,9 @@ class InkSession {
       overlay.redrawFrame = null;
       const pendingPreview = overlay.redrawPreviewStroke ?? undefined;
       overlay.redrawPreviewStroke = null;
-      this.resizeOverlay(overlay);
+      if (!this.currentStroke || this.currentStroke.pageIndex !== overlay.pageIndex) {
+        this.resizeOverlay(overlay);
+      }
       this.redrawOverlay(overlay, pendingPreview);
     });
   }
@@ -9619,7 +9648,7 @@ function drawStroke(
   ctx.globalAlpha = selected ? Math.max(0.14, stroke.opacity * 0.38) : stroke.opacity;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.lineWidth = stroke.width;
+  ctx.lineWidth = strokeDisplayWidth(stroke, cssWidth);
   ctx.strokeStyle = stroke.color;
   ctx.beginPath();
   const first = stroke.points[0];
@@ -9643,6 +9672,10 @@ function drawStroke(
   ctx.stroke();
   ctx.restore();
 
+}
+
+function strokeDisplayWidth(stroke: InkStroke, cssWidth: number): number {
+  return Math.max(0.5, stroke.width * (cssWidth / Math.max(1, stroke.pageCssWidth)));
 }
 
 function drawTextElement(ctx: CanvasRenderingContext2D, text: InkText, cssWidth: number, cssHeight: number, selected = false): void {
@@ -9897,9 +9930,10 @@ function strokeBoxContainsPoint(stroke: InkStroke, point: InkPoint, cssWidth: nu
     return false;
   }
 
+  const displayWidth = strokeDisplayWidth(stroke, cssWidth);
   const pad = stroke.source === "external-ink"
-    ? Math.max(22, stroke.width * 4)
-    : Math.max(8, stroke.width * 1.8);
+    ? Math.max(22, displayWidth * 4)
+    : Math.max(8, displayWidth * 1.8);
   const px = point.x * cssWidth;
   const py = point.y * cssHeight;
 
@@ -9930,7 +9964,7 @@ function strokeIntersectsSelection(
   const maxX = Math.max(start.x, end.x) * cssWidth;
   const minY = Math.min(start.y, end.y) * cssHeight;
   const maxY = Math.max(start.y, end.y) * cssHeight;
-  const pad = Math.max(8, stroke.width * 1.8);
+  const pad = Math.max(8, strokeDisplayWidth(stroke, cssWidth) * 1.8);
 
   return box.maxX + pad >= minX && box.minX - pad <= maxX && box.maxY + pad >= minY && box.minY - pad <= maxY;
 }
@@ -10333,7 +10367,7 @@ function strokeContainsPoint(
 
   const px = point.x * cssWidth;
   const py = point.y * cssHeight;
-  const radius = Math.max(eraserWidth, stroke.width * 2.2);
+  const radius = Math.max(eraserWidth, strokeDisplayWidth(stroke, cssWidth) * 2.2);
 
   for (let i = 1; i < stroke.points.length; i += 1) {
     const start = stroke.points[i - 1];
