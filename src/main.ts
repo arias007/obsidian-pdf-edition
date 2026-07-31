@@ -2044,8 +2044,8 @@ class PdftionSettingTab extends PluginSettingTab {
 
     this.addSection(uiText("导出", "Export"));
     new Setting(containerEl)
-      .setName(uiText("导出后自动打开", "Open after PDF export"))
-      .setDesc(uiText("导出烧录 PDF 后自动打开生成的 PDF。", "Automatically open the generated burned-in PDF after export."))
+      .setName(uiText("导出后自动打开", "Open after export"))
+      .setDesc(uiText("自动打开生成的 PDF、MD、DOCX、PPTX、PNG 或 HTML 文件。", "Automatically open generated PDF, MD, DOCX, PPTX, PNG, or HTML files."))
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.openBurnedPdfAfterExport)
@@ -6909,9 +6909,10 @@ class InkSession {
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "docx");
       const docx = buildDocxFromPageImages(pages, this.file.basename);
       const buffer = toArrayBufferCopy(docx);
-      await this.plugin.app.vault.adapter.writeBinary(targetPath, buffer);
+      const targetFile = await this.plugin.app.vault.createBinary(targetPath, buffer);
+      const opened = await this.openConvertedFile(targetFile);
       if (options.notice !== false) {
-        new Notice(uiText(`已转换 DOCX：${targetPath}`, `Converted DOCX: ${targetPath}`));
+        new Notice(uiText(`已转换${opened ? "并打开" : ""} DOCX：${targetPath}`, `Converted${opened ? " and opened" : ""} DOCX: ${targetPath}`));
       }
       return targetPath;
     } catch (error) {
@@ -6922,6 +6923,9 @@ class InkSession {
   }
 
   private async openConvertedFile(file: TFile): Promise<boolean> {
+    if (!this.plugin.settings.openBurnedPdfAfterExport) {
+      return false;
+    }
     try {
       await this.plugin.app.workspace.getLeaf(false).openFile(file);
       return true;
@@ -6937,9 +6941,10 @@ class InkSession {
       const pages = await this.captureVisualConversionPages();
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "png");
       const png = await buildCombinedPagePng(pages);
-      await this.plugin.app.vault.adapter.writeBinary(targetPath, toArrayBufferCopy(png));
+      const targetFile = await this.plugin.app.vault.createBinary(targetPath, toArrayBufferCopy(png));
+      const opened = await this.openConvertedFile(targetFile);
       if (options.notice !== false) {
-        new Notice(uiText(`已转换 PNG：${targetPath}`, `Converted PNG: ${targetPath}`));
+        new Notice(uiText(`已转换${opened ? "并打开" : ""} PNG：${targetPath}`, `Converted${opened ? " and opened" : ""} PNG: ${targetPath}`));
       }
       return targetPath;
     } catch (error) {
@@ -6955,9 +6960,10 @@ class InkSession {
       const pages = await this.captureVisualConversionPages();
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "pptx");
       const pptx = await buildPptxFromPageImages(pages, this.file.basename);
-      await this.plugin.app.vault.adapter.writeBinary(targetPath, toArrayBufferCopy(pptx));
+      const targetFile = await this.plugin.app.vault.createBinary(targetPath, toArrayBufferCopy(pptx));
+      const opened = await this.openConvertedFile(targetFile);
       if (options.notice !== false) {
-        new Notice(uiText(`已转换 PPTX：${targetPath}`, `Converted PPTX: ${targetPath}`));
+        new Notice(uiText(`已转换${opened ? "并打开" : ""} PPTX：${targetPath}`, `Converted${opened ? " and opened" : ""} PPTX: ${targetPath}`));
       }
       return targetPath;
     } catch (error) {
@@ -6972,9 +6978,10 @@ class InkSession {
       await this.prepareExportSnapshot();
       const pages = await this.captureVisualConversionPages();
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "html");
-      await this.plugin.app.vault.adapter.write(targetPath, buildSelfContainedVisualHtml(this.file, pages));
+      const targetFile = await this.plugin.app.vault.create(targetPath, buildSelfContainedVisualHtml(this.file, pages));
+      const opened = await this.openConvertedFile(targetFile);
       if (options.notice !== false) {
-        new Notice(uiText(`已转换 HTML：${targetPath}`, `Converted HTML: ${targetPath}`));
+        new Notice(uiText(`已转换${opened ? "并打开" : ""} HTML：${targetPath}`, `Converted${opened ? " and opened" : ""} HTML: ${targetPath}`));
       }
       return targetPath;
     } catch (error) {
@@ -7223,7 +7230,7 @@ class InkSession {
       const buffer = new ArrayBuffer(saved.byteLength);
       new Uint8Array(buffer).set(saved);
       const exportedFile = await this.plugin.app.vault.createBinary(targetPath, buffer);
-      const opened = await this.openExportedPdfIfEnabled(exportedFile);
+      const opened = await this.openConvertedFile(exportedFile);
 
       const shared = options.share === false ? false : await trySharePdf(targetPath.split("/").pop() ?? targetFile.name, saved);
       if (progressNotice) {
@@ -7247,20 +7254,6 @@ class InkSession {
         new Notice(uiText(`导出 PDF 失败：${message}`, `PDF export failed: ${message}`));
       }
       return null;
-    }
-  }
-
-  private async openExportedPdfIfEnabled(file: TFile): Promise<boolean> {
-    if (!this.plugin.settings.openBurnedPdfAfterExport) {
-      return false;
-    }
-
-    try {
-      await this.plugin.app.workspace.getLeaf(false).openFile(file);
-      return true;
-    } catch (error) {
-      console.error(error);
-      return false;
     }
   }
 
@@ -9705,32 +9698,34 @@ function fitImageToOverlay(
 
 function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[]): string {
   const output = [
-    `<!-- Pdftion editable conversion from ${escapeHtmlText(file.path)}; PDF ink and floating images are stored as NoteDraw data. -->`,
+    `# ${escapeMarkdownInline(file.basename)}`,
+    "",
+    `> ${uiText("来源 PDF", "Source PDF")}：[[${escapeObsidianWikilink(file.path)}]]`,
     ""
   ];
 
   for (const [pagePosition, page] of pages.entries()) {
-    output.push(
-      `<section class="pdftion-converted-page" data-pdftion-page="${page.pageIndex + 1}" style="box-sizing:border-box;max-width:100%;min-height:${roundCssNumber(page.height)}px;padding:12px 0;">`
-    );
-    let cursorY = 0;
+    output.push(`## ${uiText(`第 ${page.pageIndex + 1} 页`, `Page ${page.pageIndex + 1}`)}`, "");
+    const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
     for (const line of page.lines) {
-      const lineTop = line.top * page.height;
-      const lineHeight = Math.max(12, line.height * page.height);
-      const marginTop = Math.max(0, lineTop - cursorY);
-      const marginLeft = Math.max(0, line.left * page.width);
-      output.push(
-        `<div style="box-sizing:border-box;line-height:${roundCssNumber(lineHeight)}px;margin-left:${roundCssNumber(marginLeft)}px;margin-top:${roundCssNumber(marginTop)}px;min-height:${roundCssNumber(lineHeight)}px;">${renderEditableMarkdownLine(line)}</div>`
-      );
-      cursorY = Math.max(cursorY, lineTop + lineHeight);
+      const rendered = renderEditableMarkdownLine(line, baseFontSize);
+      if (rendered) {
+        output.push(rendered, "");
+      }
     }
-    output.push("</section>");
     if (pagePosition < pages.length - 1) {
-      output.push("", "---");
+      output.push("---", "");
     }
-    output.push("");
   }
-  return output.join("\n");
+  return `${output.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
+}
+
+function getEditableMarkdownBaseFontSize(lines: EditableMarkdownLine[]): number {
+  const sizes = lines
+    .flatMap((line) => line.runs.map((run) => run.fontSize))
+    .filter((size) => Number.isFinite(size) && size > 0)
+    .sort((a, b) => a - b);
+  return sizes.length > 0 ? sizes[Math.floor(sizes.length / 2)] : 16;
 }
 
 function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLine[] {
@@ -9811,7 +9806,7 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
     .filter((line) => line.runs.some((run) => run.text.length > 0));
 }
 
-function renderEditableMarkdownLine(line: EditableMarkdownLine): string {
+function renderEditableMarkdownLine(line: EditableMarkdownLine, baseFontSize: number): string {
   const text = line.runs.map((run) => run.text).join("").trim();
   const task = text.match(/^(?:[☐□◻]\s*|[☑☒✅]\s*|未完成任务\s*|已完成任务\s*)/);
   const bullet = text.match(/^[•●○▪]\s*/);
@@ -9831,48 +9826,53 @@ function renderEditableMarkdownLine(line: EditableMarkdownLine): string {
   };
   if (task) {
     const checked = /已完成|☑|☒|✅/.test(task[0]);
-    return `<label class="pdftion-converted-task"><input type="checkbox"${checked ? " checked" : ""}> ${removePrefix(task[0]).map(renderEditableMarkdownRun).join("").trim()}</label>`;
+    return `- [${checked ? "x" : " "}] ${removePrefix(task[0]).map(renderEditableMarkdownRun).join("").trim()}`;
   }
   if (bullet) {
-    return `• ${removePrefix(bullet[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+    return `- ${removePrefix(bullet[0]).map(renderEditableMarkdownRun).join("").trim()}`;
   }
   if (ordered) {
     return `${ordered[1]}. ${removePrefix(ordered[0]).map(renderEditableMarkdownRun).join("").trim()}`;
   }
-  return line.runs.map(renderEditableMarkdownRun).join("") || escapeHtmlText(text);
+  const rendered = line.runs.map(renderEditableMarkdownRun).join("") || escapeMarkdownInline(text);
+  const largestFontSize = Math.max(baseFontSize, ...line.runs.map((run) => run.fontSize));
+  if (largestFontSize >= baseFontSize * 1.8) {
+    return `### ${rendered}`;
+  }
+  if (largestFontSize >= baseFontSize * 1.4) {
+    return `#### ${rendered}`;
+  }
+  return rendered;
 }
 
 function renderEditableMarkdownRun(run: EditableMarkdownTextRun): string {
-  let content = escapeHtmlText(run.text);
+  let content = escapeMarkdownInline(run.text);
+  if (run.bold && run.italic) {
+    content = `***${content}***`;
+  } else if (run.bold) {
+    content = `**${content}**`;
+  } else if (run.italic) {
+    content = `*${content}*`;
+  }
+  if (run.strike) {
+    content = `~~${content}~~`;
+  }
   if (run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link)) {
-    content = `<a href="${escapeHtmlAttribute(run.link)}">${content}</a>`;
+    content = `[${content}](${escapeMarkdownLinkDestination(run.link)})`;
   }
-  if (run.underline) content = `<u>${content}</u>`;
-  if (run.strike) content = `<s>${content}</s>`;
-  if (run.italic) content = `<em>${content}</em>`;
-  if (run.bold) content = `<strong>${content}</strong>`;
-  const styles = [`font-size:${roundCssNumber(run.fontSize)}px`];
-  if (run.color !== "#000000") styles.push(`color:${run.color}`);
-  if (run.fontFamily && !/sans-serif|serif|system-ui/i.test(run.fontFamily)) {
-    styles.push(`font-family:${escapeCssFontFamily(run.fontFamily)}`);
-  }
-  return `<span style="${styles.join(";")}">${content}</span>`;
+  return content;
 }
 
-function escapeHtmlText(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function escapeMarkdownInline(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/([`*_[\]{}<>#+!|~-])/g, "\\$1");
 }
 
-function escapeHtmlAttribute(value: string): string {
-  return escapeHtmlText(value).replace(/"/g, "&quot;");
+function escapeMarkdownLinkDestination(value: string): string {
+  return value.trim().replace(/\\/g, "%5C").replace(/ /g, "%20").replace(/\(/g, "%28").replace(/\)/g, "%29");
 }
 
-function escapeCssFontFamily(value: string): string {
-  return value.replace(/[;{}]/g, "").replace(/"/g, "&quot;");
-}
-
-function roundCssNumber(value: number): string {
-  return Math.round(value * 100) / 100 + "";
+function escapeObsidianWikilink(value: string): string {
+  return value.replace(/\\/g, "/").replace(/\|/g, "\\|").replace(/\]/g, "\\]");
 }
 
 function getNoteDrawWriteApi(): NoteDrawWriteApi | null {
