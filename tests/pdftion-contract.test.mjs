@@ -50,12 +50,26 @@ test("Markdown conversion delegates ink and floating images to NoteDraw", async 
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /const noteDraw = getNoteDrawWriteApi\(\)/);
-  assert.match(source, /includeImages: false, includeStrokes: false/);
+  assert.match(source, /const pages = await this\.captureEditableMarkdownPages\(\)/);
+  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages\)/);
+  assert.doesNotMatch(source, /writeVisualConversionImages\(pages\)/);
   assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData/);
+  assert.match(source, /const opened = await this\.openConvertedFile\(targetFile\)/);
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
   assert.match(source, /kind: "embed"/);
   assert.match(source, /embedType: "image"/);
   assert.match(source, /exportImageDataUrl: element\.dataUrl/);
+});
+
+test("Markdown conversion emits editable styled text instead of page screenshots", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /function buildEditableMarkdown\(file: TFile, pages: EditableMarkdownPage\[\]\)/);
+  assert.match(source, /function collectEditableMarkdownLines\(overlay: PageOverlay\)/);
+  assert.match(source, /font-size:\$\{roundCssNumber\(run\.fontSize\)\}px/);
+  assert.match(source, /checked \? "x" : " "/);
+  assert.match(source, /<strong>/);
+  assert.match(source, /<a href=/);
 });
 
 test("PPTX dependencies are browser-safe and the release bundle has no dynamic execution", async () => {

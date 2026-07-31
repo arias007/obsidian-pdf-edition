@@ -1237,6 +1237,32 @@ interface VisualConversionPage {
   width: number;
 }
 
+interface EditableMarkdownTextRun {
+  bold: boolean;
+  color: string;
+  fontFamily: string;
+  fontSize: number;
+  italic: boolean;
+  link?: string;
+  strike: boolean;
+  text: string;
+  underline: boolean;
+}
+
+interface EditableMarkdownLine {
+  height: number;
+  left: number;
+  runs: EditableMarkdownTextRun[];
+  top: number;
+}
+
+interface EditableMarkdownPage {
+  height: number;
+  lines: EditableMarkdownLine[];
+  pageIndex: number;
+  width: number;
+}
+
 interface VisualCaptureOptions {
   includeCovers?: boolean;
   includeImages?: boolean;
@@ -6855,20 +6881,18 @@ class InkSession {
     try {
       await this.prepareExportSnapshot();
       const noteDraw = getNoteDrawWriteApi();
-      const pages = await this.captureVisualConversionPages(noteDraw
-        ? { includeImages: false, includeStrokes: false }
-        : {});
-      const folderPath = await this.writeVisualConversionImages(pages);
+      const pages = await this.captureEditableMarkdownPages();
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "md");
-      const markdown = buildVisualConversionMarkdown(this.file, pages, folderPath);
+      const markdown = buildEditableMarkdown(this.file, pages);
       const targetFile = await this.plugin.app.vault.create(targetPath, markdown);
       if (noteDraw) {
         await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements()));
       }
+      const opened = await this.openConvertedFile(targetFile);
       if (options.notice !== false) {
         new Notice(noteDraw
-          ? uiText(`已转换 MD，涂鸦和悬浮图片已转为 NoteDraw：${targetPath}`, `Converted MD with NoteDraw ink and floating images: ${targetPath}`)
-          : uiText(`已转换 MD：${targetPath}`, `Converted MD: ${targetPath}`));
+          ? uiText(`已转换${opened ? "并打开" : ""} MD，文字可编辑，涂鸦和悬浮图片已转为 NoteDraw：${targetPath}`, `Converted${opened ? " and opened" : ""} editable MD with NoteDraw ink and floating images: ${targetPath}`)
+          : uiText(`已转换${opened ? "并打开" : ""} MD：${targetPath}`, `Converted${opened ? " and opened" : ""} MD: ${targetPath}`));
       }
       return targetPath;
     } catch (error) {
@@ -6894,6 +6918,16 @@ class InkSession {
       console.error(error);
       new Notice(uiText("转换 DOCX 失败，请查看控制台。", "DOCX conversion failed. Check the console."));
       return null;
+    }
+  }
+
+  private async openConvertedFile(file: TFile): Promise<boolean> {
+    try {
+      await this.plugin.app.workspace.getLeaf(false).openFile(file);
+      return true;
+    } catch (error) {
+      console.warn("pdftion could not open the converted file.", error);
+      return false;
     }
   }
 
@@ -6988,6 +7022,50 @@ class InkSession {
 
     if (pages.length !== pageCount) {
       throw new Error(`Only ${pages.length}/${pageCount} PDF pages rendered for conversion.`);
+    }
+    return pages;
+  }
+
+  private async captureEditableMarkdownPages(): Promise<EditableMarkdownPage[]> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const pages: EditableMarkdownPage[] = [];
+    const firstPage = this.findPdfPageElementForExport(0) ?? this.rootEl;
+    const scrollEl = findScrollableAncestor(firstPage);
+    const originalScrollLeft = scrollEl.scrollLeft;
+    const originalScrollTop = scrollEl.scrollTop;
+
+    try {
+      for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+        const pageEl = this.findPdfPageElementForExport(pageIndex);
+        pageEl?.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+        let overlay: PageOverlay | null = null;
+        for (let attempt = 0; attempt < 16 && !overlay; attempt += 1) {
+          await sleepMs(attempt === 0 ? 90 : 120);
+          this.scanPages();
+          overlay = this.findOverlayByPageIndex(pageIndex);
+          if (overlay) {
+            this.resizeOverlay(overlay);
+          }
+        }
+        if (!overlay) {
+          continue;
+        }
+        pages.push({
+          height: Math.max(1, overlay.cssHeight),
+          lines: collectEditableMarkdownLines(overlay),
+          pageIndex,
+          width: Math.max(1, overlay.cssWidth)
+        });
+      }
+    } finally {
+      scrollEl.scrollLeft = originalScrollLeft;
+      scrollEl.scrollTop = originalScrollTop;
+      scrollEl.dispatchEvent(new Event("scroll"));
+      this.scanPages();
+    }
+
+    if (pages.length !== pageCount) {
+      throw new Error(`Only ${pages.length}/${pageCount} PDF pages prepared for editable Markdown conversion.`);
     }
     return pages;
   }
@@ -9625,16 +9703,176 @@ function fitImageToOverlay(
   };
 }
 
-function buildVisualConversionMarkdown(file: TFile, pages: VisualConversionPage[], folderPath: string): string {
-  const lines = [
-    `<!-- Pdftion visual conversion from ${file.path}; floating ink and images are stored as NoteDraw data. -->`,
+function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[]): string {
+  const output = [
+    `<!-- Pdftion editable conversion from ${escapeHtmlText(file.path)}; PDF ink and floating images are stored as NoteDraw data. -->`,
     ""
   ];
-  for (const page of pages) {
-    const imagePath = `${folderPath}/page-${String(page.pageIndex + 1).padStart(3, "0")}.png`;
-    lines.push(`![[${imagePath}]]`, "");
+
+  for (const [pagePosition, page] of pages.entries()) {
+    output.push(
+      `<section class="pdftion-converted-page" data-pdftion-page="${page.pageIndex + 1}" style="box-sizing:border-box;max-width:100%;min-height:${roundCssNumber(page.height)}px;padding:12px 0;">`
+    );
+    let cursorY = 0;
+    for (const line of page.lines) {
+      const lineTop = line.top * page.height;
+      const lineHeight = Math.max(12, line.height * page.height);
+      const marginTop = Math.max(0, lineTop - cursorY);
+      const marginLeft = Math.max(0, line.left * page.width);
+      output.push(
+        `<div style="box-sizing:border-box;line-height:${roundCssNumber(lineHeight)}px;margin-left:${roundCssNumber(marginLeft)}px;margin-top:${roundCssNumber(marginTop)}px;min-height:${roundCssNumber(lineHeight)}px;">${renderEditableMarkdownLine(line)}</div>`
+      );
+      cursorY = Math.max(cursorY, lineTop + lineHeight);
+    }
+    output.push("</section>");
+    if (pagePosition < pages.length - 1) {
+      output.push("", "---");
+    }
+    output.push("");
   }
-  return lines.join("\n");
+  return output.join("\n");
+}
+
+function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLine[] {
+  const overlayRect = overlay.pageEl.getBoundingClientRect();
+  const textSpans = Array.from(overlay.pageEl.querySelectorAll<HTMLElement>(".textLayer span"));
+  const candidates = textSpans.length > 0
+    ? textSpans
+    : Array.from(overlay.pageEl.querySelectorAll<HTMLElement>("[data-canvas-width]"));
+  const fragments: Array<{
+    bottom: number;
+    left: number;
+    run: EditableMarkdownTextRun;
+    right: number;
+    top: number;
+  }> = [];
+
+  for (const span of candidates) {
+    const text = span.textContent?.replace(/\s+/g, " ").trim();
+    if (!text) {
+      continue;
+    }
+    const rect = span.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) {
+      continue;
+    }
+    const style = activeWindow.getComputedStyle(span);
+    const fontSize = Number.parseFloat(style.fontSize || "") || Math.max(4, rect.height * 0.82);
+    const fontWeight = Number.parseInt(style.fontWeight || "400", 10);
+    const decoration = style.textDecorationLine || style.textDecoration || "";
+    fragments.push({
+      bottom: rect.bottom,
+      left: rect.left,
+      right: rect.right,
+      run: {
+        bold: fontWeight >= 600 || /bold/i.test(style.fontWeight),
+        color: cssColorToHex(style.color) ?? "#000000",
+        fontFamily: style.fontFamily || "",
+        fontSize,
+        italic: /italic|oblique/i.test(style.fontStyle),
+        link: span.closest("a")?.getAttribute("href") ?? undefined,
+        strike: /line-through/i.test(decoration),
+        text,
+        underline: /underline/i.test(decoration)
+      },
+      top: rect.top
+    });
+  }
+
+  const sorted = fragments.sort((a, b) => (a.top - b.top) || (a.left - b.left));
+  const lines: Array<{ bottom: number; fragments: typeof fragments; left: number; right: number; top: number }> = [];
+  for (const fragment of sorted) {
+    const centerY = (fragment.top + fragment.bottom) / 2;
+    const existing = lines.find((line) => {
+      const lineCenter = (line.top + line.bottom) / 2;
+      return Math.abs(lineCenter - centerY) <= Math.max(3, fragment.run.fontSize * 0.45);
+    });
+    if (existing) {
+      existing.fragments.push(fragment);
+      existing.bottom = Math.max(existing.bottom, fragment.bottom);
+      existing.left = Math.min(existing.left, fragment.left);
+      existing.right = Math.max(existing.right, fragment.right);
+      existing.top = Math.min(existing.top, fragment.top);
+    } else {
+      lines.push({ bottom: fragment.bottom, fragments: [fragment], left: fragment.left, right: fragment.right, top: fragment.top });
+    }
+  }
+
+  return lines
+    .sort((a, b) => (a.top - b.top) || (a.left - b.left))
+    .map((line) => ({
+      height: clamp((line.bottom - line.top) / Math.max(1, overlay.cssHeight), 0.001, 1),
+      left: clamp((line.left - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+      runs: line.fragments
+        .sort((a, b) => a.left - b.left)
+        .map((fragment) => fragment.run),
+      top: clamp((line.top - overlayRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
+    }))
+    .filter((line) => line.runs.some((run) => run.text.length > 0));
+}
+
+function renderEditableMarkdownLine(line: EditableMarkdownLine): string {
+  const text = line.runs.map((run) => run.text).join("").trim();
+  const task = text.match(/^(?:[☐□◻]\s*|[☑☒✅]\s*|未完成任务\s*|已完成任务\s*)/);
+  const bullet = text.match(/^[•●○▪]\s*/);
+  const ordered = text.match(/^(\d+)[.、)]\s*/);
+  const removePrefix = (prefix: string): EditableMarkdownTextRun[] => {
+    let remaining = prefix.length;
+    return line.runs
+      .map((run) => {
+        if (remaining <= 0) {
+          return { ...run };
+        }
+        const removed = Math.min(remaining, run.text.length);
+        remaining -= removed;
+        return { ...run, text: run.text.slice(removed) };
+      })
+      .filter((run) => run.text.length > 0);
+  };
+  if (task) {
+    const checked = /已完成|☑|☒|✅/.test(task[0]);
+    return `- [${checked ? "x" : " "}] ${removePrefix(task[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+  }
+  if (bullet) {
+    return `- ${removePrefix(bullet[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+  }
+  if (ordered) {
+    return `${ordered[1]}. ${removePrefix(ordered[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+  }
+  return line.runs.map(renderEditableMarkdownRun).join("") || escapeHtmlText(text);
+}
+
+function renderEditableMarkdownRun(run: EditableMarkdownTextRun): string {
+  let content = escapeHtmlText(run.text);
+  if (run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link)) {
+    content = `<a href="${escapeHtmlAttribute(run.link)}">${content}</a>`;
+  }
+  if (run.underline) content = `<u>${content}</u>`;
+  if (run.strike) content = `<s>${content}</s>`;
+  if (run.italic) content = `<em>${content}</em>`;
+  if (run.bold) content = `<strong>${content}</strong>`;
+  const styles = [`font-size:${roundCssNumber(run.fontSize)}px`];
+  if (run.color !== "#000000") styles.push(`color:${run.color}`);
+  if (run.fontFamily && !/sans-serif|serif|system-ui/i.test(run.fontFamily)) {
+    styles.push(`font-family:${escapeCssFontFamily(run.fontFamily)}`);
+  }
+  return `<span style="${styles.join(";")}">${content}</span>`;
+}
+
+function escapeHtmlText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtmlText(value).replace(/"/g, "&quot;");
+}
+
+function escapeCssFontFamily(value: string): string {
+  return value.replace(/[;{}]/g, "").replace(/"/g, "&quot;");
+}
+
+function roundCssNumber(value: number): string {
+  return Math.round(value * 100) / 100 + "";
 }
 
 function getNoteDrawWriteApi(): NoteDrawWriteApi | null {
@@ -9645,7 +9883,11 @@ function getNoteDrawWriteApi(): NoteDrawWriteApi | null {
   return runtime && typeof runtime.writeDrawings === "function" ? runtime : null;
 }
 
-function buildNoteDrawExportData(sourcePath: string, pages: VisualConversionPage[], elements: InkElement[]): NoteDrawExportData {
+function buildNoteDrawExportData(
+  sourcePath: string,
+  pages: Array<Pick<VisualConversionPage, "height" | "pageIndex" | "width">>,
+  elements: InkElement[]
+): NoteDrawExportData {
   const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
   const logicalWidth = 1000;
   const logicalGap = logicalWidth * VISUAL_EXPORT_PAGE_GAP_RATIO;
