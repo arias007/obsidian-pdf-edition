@@ -1232,6 +1232,7 @@ interface RecentInkGroup {
 interface VisualConversionPage {
   bytes: Uint8Array;
   height: number;
+  lines: EditableMarkdownLine[];
   pageIndex: number;
   path?: string;
   width: number;
@@ -1243,10 +1244,12 @@ interface EditableMarkdownTextRun {
   fontFamily: string;
   fontSize: number;
   italic: boolean;
+  left?: number;
   link?: string;
   strike: boolean;
   text: string;
   underline: boolean;
+  width?: number;
 }
 
 interface EditableMarkdownLine {
@@ -1254,6 +1257,7 @@ interface EditableMarkdownLine {
   left: number;
   runs: EditableMarkdownTextRun[];
   top: number;
+  width: number;
 }
 
 interface EditableMarkdownPage {
@@ -6888,7 +6892,7 @@ class InkSession {
       if (noteDraw) {
         await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements()));
       }
-      const opened = await this.openConvertedFile(targetFile);
+      const opened = await this.openConvertedMarkdownFile(targetFile);
       if (options.notice !== false) {
         new Notice(noteDraw
           ? uiText(`已转换${opened ? "并打开" : ""} MD，文字可编辑，涂鸦和悬浮图片已转为 NoteDraw：${targetPath}`, `Converted${opened ? " and opened" : ""} editable MD with NoteDraw ink and floating images: ${targetPath}`)
@@ -6931,6 +6935,25 @@ class InkSession {
       return true;
     } catch (error) {
       console.warn("pdftion could not open the converted file.", error);
+      return false;
+    }
+  }
+
+  private async openConvertedMarkdownFile(file: TFile): Promise<boolean> {
+    if (!this.plugin.settings.openBurnedPdfAfterExport) {
+      return false;
+    }
+    try {
+      const leaf = this.plugin.app.workspace.getLeaf(false);
+      await leaf.openFile(file);
+      await leaf.setViewState({
+        active: true,
+        state: { file: file.path, mode: "preview", source: false },
+        type: "markdown"
+      });
+      return true;
+    } catch (error) {
+      console.warn("pdftion could not open converted Markdown in preview mode.", error);
       return false;
     }
   }
@@ -7138,6 +7161,7 @@ class InkSession {
     return {
       bytes: dataUrlToBytes(dataUrl),
       height: outputHeight,
+      lines: collectEditableMarkdownLines(overlay),
       pageIndex: overlay.pageIndex,
       width: outputWidth
     };
@@ -9743,7 +9767,7 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
   }> = [];
 
   for (const span of candidates) {
-    const text = span.textContent?.replace(/\s+/g, " ").trim();
+    const text = span.textContent?.replace(/\u00a0/g, " ").replace(/[\t\r\n ]+/g, " ").trim();
     if (!text) {
       continue;
     }
@@ -9777,11 +9801,19 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
   const sorted = fragments.sort((a, b) => (a.top - b.top) || (a.left - b.left));
   const lines: Array<{ bottom: number; fragments: typeof fragments; left: number; right: number; top: number }> = [];
   for (const fragment of sorted) {
-    const centerY = (fragment.top + fragment.bottom) / 2;
-    const existing = lines.find((line) => {
-      const lineCenter = (line.top + line.bottom) / 2;
-      return Math.abs(lineCenter - centerY) <= Math.max(3, fragment.run.fontSize * 0.45);
-    });
+    const fragmentHeight = Math.max(1, fragment.bottom - fragment.top);
+    const existing = lines
+      .map((line) => {
+        const overlap = Math.max(0, Math.min(line.bottom, fragment.bottom) - Math.max(line.top, fragment.top));
+        const lineHeight = Math.max(1, line.bottom - line.top);
+        const overlapRatio = overlap / Math.min(lineHeight, fragmentHeight);
+        const baselineDistance = Math.abs(line.bottom - fragment.bottom);
+        return { baselineDistance, line, overlapRatio };
+      })
+      .filter(({ baselineDistance, overlapRatio }) => (
+        overlapRatio >= 0.24 || baselineDistance <= Math.max(4, fragment.run.fontSize * 0.72)
+      ))
+      .sort((a, b) => (b.overlapRatio - a.overlapRatio) || (a.baselineDistance - b.baselineDistance))[0]?.line;
     if (existing) {
       existing.fragments.push(fragment);
       existing.bottom = Math.max(existing.bottom, fragment.bottom);
@@ -9795,14 +9827,31 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
 
   return lines
     .sort((a, b) => (a.top - b.top) || (a.left - b.left))
-    .map((line) => ({
-      height: clamp((line.bottom - line.top) / Math.max(1, overlay.cssHeight), 0.001, 1),
-      left: clamp((line.left - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
-      runs: line.fragments
-        .sort((a, b) => a.left - b.left)
-        .map((fragment) => fragment.run),
-      top: clamp((line.top - overlayRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
-    }))
+    .map((line) => {
+      const fragments = line.fragments.sort((a, b) => a.left - b.left);
+      let previous: typeof fragments[number] | null = null;
+      const runs = fragments.map((fragment) => {
+        const run = { ...fragment.run };
+        const gap = previous ? fragment.left - previous.right : 0;
+        const previousText = previous?.run.text ?? "";
+        const startsLatin = /^[A-Za-z0-9]/u.test(run.text);
+        const endsLatin = /[A-Za-z0-9]$/u.test(previousText);
+        if (previous && gap > Math.max(3, run.fontSize * 0.72) && startsLatin && endsLatin) {
+          run.text = ` ${run.text}`;
+        }
+        run.left = clamp((fragment.left - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1);
+        run.width = clamp(fragment.right - fragment.left, 0, overlay.cssWidth) / Math.max(1, overlay.cssWidth);
+        previous = fragment;
+        return run;
+      });
+      return {
+        height: clamp((line.bottom - line.top) / Math.max(1, overlay.cssHeight), 0.001, 1),
+        left: clamp((line.left - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+        runs,
+        top: clamp((line.top - overlayRect.top) / Math.max(1, overlay.cssHeight), 0, 1),
+        width: clamp((line.right - line.left) / Math.max(1, overlay.cssWidth), 0.001, 1)
+      };
+    })
     .filter((line) => line.runs.some((run) => run.text.length > 0));
 }
 
@@ -9826,26 +9875,36 @@ function renderEditableMarkdownLine(line: EditableMarkdownLine, baseFontSize: nu
   };
   if (task) {
     const checked = /已完成|☑|☒|✅/.test(task[0]);
-    return `- [${checked ? "x" : " "}] ${removePrefix(task[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+    return `- [${checked ? "x" : " "}] ${removePrefix(task[0]).map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
   }
   if (bullet) {
-    return `- ${removePrefix(bullet[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+    return `- ${removePrefix(bullet[0]).map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
   }
   if (ordered) {
-    return `${ordered[1]}. ${removePrefix(ordered[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+    return `${ordered[1]}. ${removePrefix(ordered[0]).map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
   }
-  const rendered = line.runs.map(renderEditableMarkdownRun).join("") || escapeMarkdownInline(text);
-  const largestFontSize = Math.max(baseFontSize, ...line.runs.map((run) => run.fontSize));
-  if (largestFontSize >= baseFontSize * 1.8) {
-    return `### ${rendered}`;
-  }
-  if (largestFontSize >= baseFontSize * 1.4) {
-    return `#### ${rendered}`;
-  }
-  return rendered;
+  return line.runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("") || escapeMarkdownInline(text);
 }
 
-function renderEditableMarkdownRun(run: EditableMarkdownTextRun): string {
+function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16): string {
+  const validLink = run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link) ? run.link : undefined;
+  const customFont = Boolean(run.fontFamily && !/^(?:inherit|initial|unset|system-ui|sans-serif)$/i.test(run.fontFamily));
+  const customSize = Math.abs(run.fontSize - baseFontSize) > 0.75;
+  const customColor = run.color.toLowerCase() !== "#000000";
+  if (run.underline || customFont || customSize || customColor) {
+    const styles = [
+      customColor ? `color:${run.color}` : "",
+      run.underline ? "text-decoration:underline" : "",
+      run.strike ? "text-decoration:line-through" : "",
+      customSize ? `font-size:${Math.max(1, run.fontSize).toFixed(1)}px` : "",
+      customFont ? `font-family:${htmlAttributeEscape(run.fontFamily)}` : "",
+      run.bold ? "font-weight:700" : "",
+      run.italic ? "font-style:italic" : ""
+    ].filter(Boolean).join(";");
+    const escaped = htmlEscape(run.text);
+    const linked = validLink ? `<a href="${htmlAttributeEscape(validLink)}">${escaped}</a>` : escaped;
+    return `<span style="${styles}">${linked}</span>`;
+  }
   let content = escapeMarkdownInline(run.text);
   if (run.bold && run.italic) {
     content = `***${content}***`;
@@ -9857,8 +9916,8 @@ function renderEditableMarkdownRun(run: EditableMarkdownTextRun): string {
   if (run.strike) {
     content = `~~${content}~~`;
   }
-  if (run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link)) {
-    content = `[${content}](${escapeMarkdownLinkDestination(run.link)})`;
+  if (validLink) {
+    content = `[${content}](${escapeMarkdownLinkDestination(validLink)})`;
   }
   return content;
 }
@@ -10009,6 +10068,38 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
       x: (slideWidth - width) / 2,
       y: (slideHeight - height) / 2
     });
+    const imageX = (slideWidth - width) / 2;
+    const imageY = (slideHeight - height) / 2;
+    for (const line of page.lines) {
+      const textRuns = line.runs.map((run) => ({
+        text: run.text,
+        options: {
+          bold: run.bold,
+          breakLine: false,
+          color: exportHexColor(run.color),
+          fontFace: exportFontFace(run.fontFamily),
+          fontSize: Math.max(4, run.fontSize * 0.75),
+          italic: run.italic,
+          strike: run.strike ? ("sngStrike" as const) : undefined,
+          transparency: 100,
+          underline: run.underline ? { style: "sng" as const } : undefined
+        }
+      }));
+      if (textRuns.length === 0) {
+        continue;
+      }
+      slide.addText(textRuns, {
+        fit: "shrink",
+        h: Math.max(0.05, line.height * height),
+        margin: 0,
+        paraSpaceAfter: 0,
+        transparency: 100,
+        valign: "middle",
+        w: Math.max(0.05, line.width * width),
+        x: imageX + line.left * width,
+        y: imageY + line.top * height
+      });
+    }
   }
 
   const output = await pptx.write({ outputType: "arraybuffer" });
@@ -10027,9 +10118,30 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
 function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]): string {
   const figures = [...pages]
     .sort((a, b) => a.pageIndex - b.pageIndex)
-    .map((page) => `<figure><img src="${uint8ArrayToDataUrl(page.bytes, "image/png")}" alt="Page ${page.pageIndex + 1}"><figcaption>Page ${page.pageIndex + 1}</figcaption></figure>`)
+    .map((page) => {
+      const textLayer = page.lines.map((line) => {
+        const runs = line.runs.map((run) => {
+          const styles = [
+            "color:transparent",
+            "-webkit-text-fill-color:transparent",
+            `font-size:${Math.max(4, run.fontSize).toFixed(1)}px`,
+            run.bold ? "font-weight:700" : "",
+            run.italic ? "font-style:italic" : "",
+            run.underline ? "text-decoration:underline" : "",
+            run.strike ? "text-decoration:line-through" : "",
+            run.fontFamily ? `font-family:${htmlAttributeEscape(run.fontFamily)}` : ""
+          ].filter(Boolean).join(";");
+          const text = htmlEscape(run.text);
+          return run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link)
+            ? `<a href="${htmlAttributeEscape(run.link)}" style="${styles}">${text}</a>`
+            : `<span style="${styles}">${text}</span>`;
+        }).join("");
+        return `<div class="text-line" style="left:${(line.left * 100).toFixed(4)}%;top:${(line.top * 100).toFixed(4)}%;width:${(line.width * 100).toFixed(4)}%;height:${(line.height * 100).toFixed(4)}%">${runs}</div>`;
+      }).join("");
+      return `<figure><div class="page-surface"><img src="${uint8ArrayToDataUrl(page.bytes, "image/png")}" alt="Page ${page.pageIndex + 1}"><div class="text-layer" aria-label="Page ${page.pageIndex + 1} text">${textLayer}</div></div><figcaption>Page ${page.pageIndex + 1}</figcaption></figure>`;
+    })
     .join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}img{display:block;height:auto;width:100%}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}.page-surface{position:relative}.page-surface>img{display:block;height:auto;width:100%}.text-layer{inset:0;overflow:hidden;position:absolute;user-select:text;-webkit-user-select:text}.text-line{line-height:1;position:absolute;white-space:pre;user-select:text;-webkit-user-select:text}.text-line span,.text-line a{cursor:text;user-select:text;-webkit-user-select:text}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}.text-layer{display:none}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
 }
 
 function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Uint8Array {
@@ -10054,24 +10166,72 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
     const widthEmu = Math.round(rawWidthEmu * scale);
     const heightEmu = Math.round(rawHeightEmu * scale);
 
-    body.push(`<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${page.pageIndex + 1}" name="${xmlEscape(title)} page ${page.pageIndex + 1}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${imageRelId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`);
+    const textLayer = buildDocxTextLayer(page, widthEmu, heightEmu);
+    const drawing = `<w:p><w:pPr><w:jc w:val="center"/><w:keepNext/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${page.pageIndex + 1}" name="${xmlEscape(title)} page ${page.pageIndex + 1}"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${imageRelId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>${textLayer}</w:p>`;
+    body.push(drawing);
     if (index < sortedPages.length - 1) {
       body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
     }
   }
 
-  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
-  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
-  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}</Relationships>`;
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`;
+  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>`;
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
+  const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
+  const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.83</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
     { name: "_rels/.rels", data: utf8Bytes(relsXml) },
+    { name: "docProps/core.xml", data: utf8Bytes(coreXml) },
+    { name: "docProps/app.xml", data: utf8Bytes(appXml) },
     { name: "word/document.xml", data: utf8Bytes(documentXml) },
     { name: "word/_rels/document.xml.rels", data: utf8Bytes(docRelsXml) },
+    { name: "word/styles.xml", data: utf8Bytes(stylesXml) },
+    { name: "word/settings.xml", data: utf8Bytes(settingsXml) },
     ...mediaFiles
   ]);
+}
+
+function buildDocxTextLayer(page: VisualConversionPage, widthEmu: number, heightEmu: number): string {
+  const pageWidthPt = 11906 / 20;
+  const imageWidthPt = widthEmu / 12700;
+  const imageHeightPt = heightEmu / 12700;
+  const imageLeftPt = (pageWidthPt - imageWidthPt) / 2;
+  const imageTopPt = 36;
+  return page.lines.map((line, lineIndex) => {
+    const runs = line.runs.map((run) => {
+      const rPr = [
+        "<w:vanish/>",
+        run.bold ? "<w:b/>" : "",
+        run.italic ? "<w:i/>" : "",
+        run.strike ? "<w:strike/>" : "",
+        run.underline ? "<w:u w:val=\"single\"/>" : "",
+        `<w:color w:val=\"${exportHexColor(run.color)}\"/>`,
+        `<w:sz w:val=\"${Math.max(2, Math.round(run.fontSize * 1.5))}\"/>`,
+        `<w:rFonts w:ascii=\"${xmlEscape(exportFontFace(run.fontFamily))}\" w:hAnsi=\"${xmlEscape(exportFontFace(run.fontFamily))}\"/>`
+      ].filter(Boolean).join("");
+      return `<w:r><w:rPr>${rPr}</w:rPr><w:t xml:space=\"preserve\">${xmlEscape(run.text)}</w:t></w:r>`;
+    }).join("");
+    const left = imageLeftPt + line.left * imageWidthPt;
+    const top = imageTopPt + line.top * imageHeightPt;
+    const width = Math.max(1, line.width * imageWidthPt);
+    const height = Math.max(1, line.height * imageHeightPt * 1.2);
+    const shapeId = `_x0000_s${page.pageIndex + 1}${String(lineIndex + 1).padStart(4, "0")}`;
+    return `<w:r><w:pict><v:shape id=\"${shapeId}\" o:spt=\"202\" filled=\"f\" stroked=\"f\" style=\"position:absolute;margin-left:${left.toFixed(2)}pt;margin-top:${top.toFixed(2)}pt;width:${width.toFixed(2)}pt;height:${height.toFixed(2)}pt;z-index:251659264;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-distance-left:0;mso-wrap-distance-top:0;mso-wrap-distance-right:0;mso-wrap-distance-bottom:0\"><v:textbox inset=\"0,0,0,0\"><w:txbxContent><w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"1\"/></w:pPr>${runs}</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+  }).join("");
+}
+
+function exportHexColor(value: string): string {
+  const match = value.match(/#?([0-9a-f]{6})/i);
+  return (match?.[1] ?? "000000").toUpperCase();
+}
+
+function exportFontFace(value: string): string {
+  return (value.split(",")[0] ?? "Arial").trim().replace(/["']/g, "") || "Arial";
 }
 
 function xmlEscape(value: string): string {
@@ -10080,6 +10240,10 @@ function xmlEscape(value: string): string {
 
 function htmlEscape(value: string): string {
   return xmlEscape(value).replace(/'/g, "&#39;");
+}
+
+function htmlAttributeEscape(value: string): string {
+  return htmlEscape(value);
 }
 
 function utf8Bytes(value: string): Uint8Array {

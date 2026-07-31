@@ -44,7 +44,8 @@ test("all requested visual formats share the page capture pipeline", async () =>
   assert.match(source, /Only \$\{pages\.length}\s*\/\s*\$\{pageCount} PDF pages rendered/);
   assert.match(source, /const recentLeaf = this\.app\.workspace\.getMostRecentLeaf\(\)/);
   assert.match(source, /return visibleMatched \?\? matched/);
-  assert.equal((source.match(/await this\.openConvertedFile\((?:targetFile|exportedFile)\)/g) ?? []).length, 6);
+  assert.equal((source.match(/await this\.openConvertedFile\((?:targetFile|exportedFile)\)/g) ?? []).length, 5);
+  assert.match(source, /await this\.openConvertedMarkdownFile\(targetFile\)/);
 });
 
 test("Markdown conversion delegates ink and floating images to NoteDraw", async () => {
@@ -62,7 +63,7 @@ test("Markdown conversion delegates ink and floating images to NoteDraw", async 
   assert.match(source, /exportImageDataUrl: element\.dataUrl/);
 });
 
-test("Markdown conversion emits editable pure Markdown instead of HTML or page screenshots", async () => {
+test("Markdown conversion keeps native Markdown and uses minimal HTML for non-native styles", async () => {
   const source = await readFile(sourceUrl, "utf8");
   const markdownSource = source.slice(
     source.indexOf("function buildEditableMarkdown"),
@@ -74,8 +75,20 @@ test("Markdown conversion emits editable pure Markdown instead of HTML or page s
   assert.match(markdownSource, /function escapeMarkdownInline/);
   assert.ok(markdownSource.includes('return `- [${checked ? "x" : " "}]'));
   assert.ok(markdownSource.includes('content = `**${content}**`;'));
-  assert.ok(markdownSource.includes('content = `[${content}](${escapeMarkdownLinkDestination(run.link)})`;'));
-  assert.doesNotMatch(markdownSource, /<(?:section|div|span|input|label|strong|em|a)\b/i);
+  assert.match(markdownSource, /escapeMarkdownLinkDestination\(validLink\)/);
+  assert.match(markdownSource, /<span style=/);
+  assert.doesNotMatch(markdownSource, /<section\b|<div\b|<input\b|<label\b/i);
+});
+
+test("visual exports retain the page image and add a real selectable text layer", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /lines: collectEditableMarkdownLines\(overlay\)/);
+  assert.match(source, /slide\.addText\(textRuns/);
+  assert.match(source, /<div class="text-layer"/);
+  assert.ok(source.includes('<w:t xml:space=\\"preserve\\">'));
+  assert.match(source, /buildDocxTextLayer\(page, widthEmu, heightEmu\)/);
+  assert.match(source, /mso-position-horizontal-relative:page/);
 });
 
 test("PPTX dependencies are browser-safe and the release bundle has no dynamic execution", async () => {
