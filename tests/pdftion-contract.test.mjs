@@ -67,7 +67,7 @@ test("Markdown conversion emits editable styled text instead of page screenshots
   assert.match(source, /function buildEditableMarkdown\(file: TFile, pages: EditableMarkdownPage\[\]\)/);
   assert.match(source, /function collectEditableMarkdownLines\(overlay: PageOverlay\)/);
   assert.match(source, /font-size:\$\{roundCssNumber\(run\.fontSize\)\}px/);
-  assert.match(source, /checked \? "x" : " "/);
+  assert.match(source, /<input type="checkbox"/);
   assert.match(source, /<strong>/);
   assert.match(source, /<a href=/);
 });

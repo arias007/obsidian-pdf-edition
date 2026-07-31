@@ -9831,10 +9831,10 @@ function renderEditableMarkdownLine(line: EditableMarkdownLine): string {
   };
   if (task) {
     const checked = /已完成|☑|☒|✅/.test(task[0]);
-    return `- [${checked ? "x" : " "}] ${removePrefix(task[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+    return `<label class="pdftion-converted-task"><input type="checkbox"${checked ? " checked" : ""}> ${removePrefix(task[0]).map(renderEditableMarkdownRun).join("").trim()}</label>`;
   }
   if (bullet) {
-    return `- ${removePrefix(bullet[0]).map(renderEditableMarkdownRun).join("").trim()}`;
+    return `• ${removePrefix(bullet[0]).map(renderEditableMarkdownRun).join("").trim()}`;
   }
   if (ordered) {
     return `${ordered[1]}. ${removePrefix(ordered[0]).map(renderEditableMarkdownRun).join("").trim()}`;
