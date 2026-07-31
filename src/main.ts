@@ -21,6 +21,7 @@ const NATIVE_POPUP_SUPPRESS_MS = 650;
 const STROKE_FAST_SAVE_DELAY_MS = 180;
 const STROKE_MIN_POINT_DISTANCE_PX = 0.35;
 const STROKE_INTERPOLATION_STEP_PX = 0.75;
+const VISUAL_EXPORT_PAGE_GAP_RATIO = 0.025;
 let pdfFontkitModulePromise: Promise<PdfFontkitModule> | null = null;
 const PALETTE_COLORS = [
   "#000000",
@@ -1236,6 +1237,52 @@ interface VisualConversionPage {
   width: number;
 }
 
+interface VisualCaptureOptions {
+  includeCovers?: boolean;
+  includeImages?: boolean;
+  includeStrokes?: boolean;
+  includeText?: boolean;
+}
+
+interface NoteDrawExportPoint {
+  t: number;
+  x: number;
+  y: number;
+}
+
+interface NoteDrawExportStroke {
+  assetMime?: string;
+  assetName?: string;
+  brush: "pen" | "watercolor";
+  color: string;
+  count: number;
+  embedType?: "image";
+  exportImageDataUrl?: string;
+  kind?: "embed";
+  opacity: number;
+  points: NoteDrawExportPoint[];
+  previewHeight?: number;
+  previewWidth?: number;
+  text?: string;
+  width: number;
+}
+
+interface NoteDrawExportData {
+  sourcePath: string;
+  strokes: NoteDrawExportStroke[];
+  version: number;
+  visible: boolean;
+  webEdits: unknown[];
+}
+
+interface NoteDrawWriteApi {
+  writeDrawings(fileOrPath: string | TFile, data: NoteDrawExportData): Promise<unknown>;
+}
+
+interface NoteDrawRuntime extends NoteDrawWriteApi {
+  v1?: NoteDrawWriteApi;
+}
+
 interface TouchScrollState {
   historyRecorded?: boolean;
   initialDistance: number;
@@ -1324,7 +1371,10 @@ interface PdftionAiApi {
   deleteElements(ids: string[]): number;
   exportAnnotatedPdf(): Promise<string | null>;
   exportAnnotationsDocx(): Promise<string | null>;
+  exportAnnotationsHtml(): Promise<string | null>;
   exportAnnotationsMarkdown(): Promise<string | null>;
+  exportAnnotationsPng(): Promise<string | null>;
+  exportAnnotationsPptx(): Promise<string | null>;
   exportMarkdownDocxBridge(): Promise<string | null>;
   findElements(query?: PdftionElementQuery): InkElement[];
   getAnnotationsMarkdown(): string;
@@ -1347,6 +1397,7 @@ interface PdftionAiApi {
 
 declare global {
   interface Window {
+    NoteDraw?: NoteDrawRuntime;
     PdftionAI?: PdftionAiApi;
   }
 }
@@ -1738,14 +1789,26 @@ export default class PdftionPlugin extends Plugin {
   }
 
   private findLeafForFile(file: TFile): WorkspaceLeaf | null {
+    const recentLeaf = this.app.workspace.getMostRecentLeaf();
+    const recentView = recentLeaf?.view as unknown as PdfViewLike | undefined;
+    if (recentLeaf && recentView?.file?.path === file.path) {
+      return recentLeaf;
+    }
+
     let matched: WorkspaceLeaf | null = null;
+    let visibleMatched: WorkspaceLeaf | null = null;
     this.app.workspace.iterateAllLeaves((leaf) => {
       const view = leaf.view as unknown as PdfViewLike;
       if (view.file?.path === file.path) {
         matched = leaf;
+        const rootEl = view.containerEl ?? view.contentEl;
+        const rect = rootEl?.getBoundingClientRect();
+        if (rect && rect.width > 0 && rect.height > 0) {
+          visibleMatched = leaf;
+        }
       }
     });
-    return matched;
+    return visibleMatched ?? matched;
   }
 
   private flushAllSessionsSoon(): void {
@@ -1912,7 +1975,10 @@ export default class PdftionPlugin extends Plugin {
       deleteElements: (ids) => this.getActivePdfSession()?.aiDeleteElements(ids) ?? 0,
       exportAnnotatedPdf: () => this.getActivePdfSession()?.exportAnnotatedPdf() ?? Promise.resolve(null),
       exportAnnotationsDocx: () => this.getActivePdfSession()?.exportAnnotationsDocx() ?? Promise.resolve(null),
+      exportAnnotationsHtml: () => this.getActivePdfSession()?.exportConvertedHtml() ?? Promise.resolve(null),
       exportAnnotationsMarkdown: () => this.getActivePdfSession()?.exportAnnotationsMarkdown() ?? Promise.resolve(null),
+      exportAnnotationsPng: () => this.getActivePdfSession()?.exportConvertedPng() ?? Promise.resolve(null),
+      exportAnnotationsPptx: () => this.getActivePdfSession()?.exportConvertedPptx() ?? Promise.resolve(null),
       exportMarkdownDocxBridge: () => this.getActivePdfSession()?.exportMarkdownDocxBridge() ?? Promise.resolve(null),
       findElements: (query) => this.getActivePdfSession()?.aiFindElements(query) ?? [],
       getAnnotationsMarkdown: () => this.getActivePdfSession()?.getAnnotationsMarkdown() ?? "",
@@ -3760,11 +3826,38 @@ class InkSession {
     });
     panel.appendChild(md);
 
+    const png = createIconButton("image", uiText("导出 PNG", "Export PNG"));
+    png.classList.add("pdftion-share-menu-button");
+    png.addEventListener("click", () => {
+      panel.remove();
+      this.shareMenu = null;
+      void this.exportConvertedPng();
+    });
+    panel.appendChild(png);
+
+    const pptx = createIconButton("presentation", uiText("导出 PPTX", "Export PPTX"));
+    pptx.classList.add("pdftion-share-menu-button");
+    pptx.addEventListener("click", () => {
+      panel.remove();
+      this.shareMenu = null;
+      void this.exportConvertedPptx();
+    });
+    panel.appendChild(pptx);
+
+    const html = createIconButton("file-code-2", uiText("导出 HTML", "Export HTML"));
+    html.classList.add("pdftion-share-menu-button");
+    html.addEventListener("click", () => {
+      panel.remove();
+      this.shareMenu = null;
+      void this.exportConvertedHtml();
+    });
+    panel.appendChild(html);
+
     appendToActiveBody(panel);
     const rect = button?.getBoundingClientRect();
     const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + 6);
     panel.setCssStyles({
-      left: `${Math.min(activeWindow.innerWidth - 190, Math.max(8, rect ? rect.left : 16))}px`,
+      left: `${Math.min(activeWindow.innerWidth - 232, Math.max(8, rect ? rect.left : 16))}px`,
       top: `${Math.min(activeWindow.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`
     });
     this.shareMenu = panel;
@@ -6735,65 +6828,11 @@ class InkSession {
   }
 
   async exportAnnotationsMarkdown(): Promise<string | null> {
-    this.commitNativeTextEditor();
-    const targetFile = this.file;
-    const base = targetFile.path.replace(/\.pdf$/i, "");
-    let targetPath = `${base}-pdftion-content.md`;
-    let index = 2;
-    while (await this.plugin.app.vault.adapter.exists(targetPath)) {
-      targetPath = `${base}-pdftion-content-${index}.md`;
-      index += 1;
-    }
-
-    const markdown = await this.getPdfContentMarkdown();
-    await this.plugin.app.vault.adapter.write(targetPath, markdown);
-    new Notice(uiText(`已导出 Markdown：${targetPath}`, `Exported Markdown: ${targetPath}`));
-    return targetPath;
+    return this.exportConvertedMarkdown();
   }
 
   async exportAnnotationsDocx(): Promise<string | null> {
-    this.commitNativeTextEditor();
-    const targetFile = this.file;
-    const base = targetFile.path.replace(/\.pdf$/i, "");
-    let targetPath = `${base}-pdftion-content.docx`;
-    let index = 2;
-    while (await this.plugin.app.vault.adapter.exists(targetPath)) {
-      targetPath = `${base}-pdftion-content-${index}.docx`;
-      index += 1;
-    }
-
-    const docx = buildDocxFromParagraphs(markdownToDocxParagraphs(await this.getPdfContentMarkdown()), targetFile.basename);
-    const buffer = toArrayBufferCopy(docx);
-    await this.plugin.app.vault.adapter.writeBinary(targetPath, buffer);
-    new Notice(uiText(`已导出 DOCX：${targetPath}`, `Exported DOCX: ${targetPath}`));
-    return targetPath;
-  }
-
-  private async getPdfContentMarkdown(): Promise<string> {
-    const pageCount = await this.getCurrentPdfPageCount();
-    const lines = [
-      `# ${this.file.basename} PDF content`,
-      "",
-      `PDF: [[${this.file.path}]]`,
-      `Exported: ${new Date().toISOString()}`,
-      ""
-    ];
-    let extractedPages = 0;
-    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
-      const overlay = this.findOverlayByPageIndex(pageIndex);
-      const text = overlay ? this.extractNativeTextInRegion(overlay, 0, 0, 1, 1) : "";
-      if (!text) {
-        continue;
-      }
-      extractedPages += 1;
-      lines.push(`## Page ${pageIndex + 1}`, "", text, "");
-    }
-    if (extractedPages === 0) {
-      lines.push("> 当前 PDF 页面尚未渲染文字层；请先滚动到需要导出的页面后再导出，或后续接入完整 PDF 文本解析引擎。", "");
-    } else if (extractedPages < pageCount) {
-      lines.push(`> 已导出当前渲染到文字层的 ${extractedPages}/${pageCount} 页；未渲染页请滚动到对应页面后再次导出。`, "");
-    }
-    return lines.join("\n");
+    return this.exportConvertedDocx();
   }
 
   async exportMarkdownDocxBridge(): Promise<string | null> {
@@ -6815,13 +6854,21 @@ class InkSession {
   async exportConvertedMarkdown(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
       await this.prepareExportSnapshot();
-      const pages = await this.captureVisualConversionPages();
+      const noteDraw = getNoteDrawWriteApi();
+      const pages = await this.captureVisualConversionPages(noteDraw
+        ? { includeImages: false, includeStrokes: false }
+        : {});
       const folderPath = await this.writeVisualConversionImages(pages);
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "md");
       const markdown = buildVisualConversionMarkdown(this.file, pages, folderPath);
-      await this.plugin.app.vault.adapter.write(targetPath, markdown);
+      const targetFile = await this.plugin.app.vault.create(targetPath, markdown);
+      if (noteDraw) {
+        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements()));
+      }
       if (options.notice !== false) {
-        new Notice(uiText(`已转换 MD：${targetPath}`, `Converted MD: ${targetPath}`));
+        new Notice(noteDraw
+          ? uiText(`已转换 MD，涂鸦和悬浮图片已转为 NoteDraw：${targetPath}`, `Converted MD with NoteDraw ink and floating images: ${targetPath}`)
+          : uiText(`已转换 MD：${targetPath}`, `Converted MD: ${targetPath}`));
       }
       return targetPath;
     } catch (error) {
@@ -6850,24 +6897,111 @@ class InkSession {
     }
   }
 
-  private async captureVisualConversionPages(): Promise<VisualConversionPage[]> {
-    const overlays = Array.from(this.overlays.values()).sort((a, b) => a.pageIndex - b.pageIndex);
-    const pages: VisualConversionPage[] = [];
-    for (const overlay of overlays) {
-      const captured = await this.captureVisualPageImage(overlay);
-      if (captured) {
-        pages.push(captured);
+  async exportConvertedPng(options: { notice?: boolean } = {}): Promise<string | null> {
+    try {
+      await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages();
+      const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "png");
+      const png = await buildCombinedPagePng(pages);
+      await this.plugin.app.vault.adapter.writeBinary(targetPath, toArrayBufferCopy(png));
+      if (options.notice !== false) {
+        new Notice(uiText(`已转换 PNG：${targetPath}`, `Converted PNG: ${targetPath}`));
       }
+      return targetPath;
+    } catch (error) {
+      console.error(error);
+      new Notice(uiText("转换 PNG 失败，请查看控制台。", "PNG conversion failed. Check the console."));
+      return null;
     }
-    if (pages.length === 0) {
-      throw new Error("No rendered PDF pages are available for conversion.");
+  }
+
+  async exportConvertedPptx(options: { notice?: boolean } = {}): Promise<string | null> {
+    try {
+      await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages();
+      const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "pptx");
+      const pptx = await buildPptxFromPageImages(pages, this.file.basename);
+      await this.plugin.app.vault.adapter.writeBinary(targetPath, toArrayBufferCopy(pptx));
+      if (options.notice !== false) {
+        new Notice(uiText(`已转换 PPTX：${targetPath}`, `Converted PPTX: ${targetPath}`));
+      }
+      return targetPath;
+    } catch (error) {
+      console.error(error);
+      new Notice(uiText("转换 PPTX 失败，请查看控制台。", "PPTX conversion failed. Check the console."));
+      return null;
+    }
+  }
+
+  async exportConvertedHtml(options: { notice?: boolean } = {}): Promise<string | null> {
+    try {
+      await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages();
+      const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "html");
+      await this.plugin.app.vault.adapter.write(targetPath, buildSelfContainedVisualHtml(this.file, pages));
+      if (options.notice !== false) {
+        new Notice(uiText(`已转换 HTML：${targetPath}`, `Converted HTML: ${targetPath}`));
+      }
+      return targetPath;
+    } catch (error) {
+      console.error(error);
+      new Notice(uiText("转换 HTML 失败，请查看控制台。", "HTML conversion failed. Check the console."));
+      return null;
+    }
+  }
+
+  private async captureVisualConversionPages(options: VisualCaptureOptions = {}): Promise<VisualConversionPage[]> {
+    const pageCount = await this.getCurrentPdfPageCount();
+    const pages: VisualConversionPage[] = [];
+    const firstPage = this.findPdfPageElementForExport(0) ?? this.rootEl;
+    const scrollEl = findScrollableAncestor(firstPage);
+    const originalScrollLeft = scrollEl.scrollLeft;
+    const originalScrollTop = scrollEl.scrollTop;
+
+    try {
+      for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+        let overlay = this.findOverlayByPageIndex(pageIndex);
+        let captured = overlay ? await this.captureVisualPageImage(overlay, options) : null;
+        if (!captured) {
+          const pageEl = this.findPdfPageElementForExport(pageIndex);
+          pageEl?.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+          for (let attempt = 0; attempt < 16 && !captured; attempt += 1) {
+            await sleepMs(attempt === 0 ? 90 : 120);
+            this.scanPages();
+            overlay = this.findOverlayByPageIndex(pageIndex);
+            if (overlay) {
+              this.resizeOverlay(overlay);
+              captured = await this.captureVisualPageImage(overlay, options);
+            }
+          }
+        }
+        if (captured) {
+          pages.push(captured);
+        }
+      }
+    } finally {
+      scrollEl.scrollLeft = originalScrollLeft;
+      scrollEl.scrollTop = originalScrollTop;
+      scrollEl.dispatchEvent(new Event("scroll"));
+      this.scanPages();
+    }
+
+    if (pages.length !== pageCount) {
+      throw new Error(`Only ${pages.length}/${pageCount} PDF pages rendered for conversion.`);
     }
     return pages;
   }
 
-  private async captureVisualPageImage(overlay: PageOverlay): Promise<VisualConversionPage | null> {
+  private findPdfPageElementForExport(pageIndex: number): HTMLElement | null {
+    const candidates = Array.from(this.rootEl.querySelectorAll<HTMLElement>(
+      ".pdfViewer .page, .pdf-viewer .page, .pdf-container .page, .page[data-page-number]"
+    ));
+    return candidates.find((page, index) => getPageIndex(page, index) === pageIndex) ?? candidates[pageIndex] ?? null;
+  }
+
+  private async captureVisualPageImage(overlay: PageOverlay, options: VisualCaptureOptions = {}): Promise<VisualConversionPage | null> {
     const pdfCanvas = this.getPdfCanvas(overlay);
-    if (!pdfCanvas) {
+    if (!pdfCanvas || pdfCanvas.width <= 1 || pdfCanvas.height <= 1) {
       return null;
     }
 
@@ -6889,21 +7023,29 @@ class InkSession {
     ctx.save();
     ctx.scale(outputWidth / Math.max(1, overlay.cssWidth), outputHeight / Math.max(1, overlay.cssHeight));
     const elements = this.getEditableElements();
-    for (const cover of elements.filter((element): element is InkCover => element.kind === "cover" && element.pageIndex === overlay.pageIndex && !element.saved)) {
-      drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, false);
+    if (options.includeCovers !== false) {
+      for (const cover of elements.filter((element): element is InkCover => element.kind === "cover" && element.pageIndex === overlay.pageIndex)) {
+        drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, false);
+      }
     }
-    for (const image of elements.filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
-      await this.drawImageElementForExport(ctx, image, overlay.cssWidth, overlay.cssHeight);
+    if (options.includeImages !== false) {
+      for (const image of elements.filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
+        await this.drawImageElementForExport(ctx, image, overlay.cssWidth, overlay.cssHeight);
+      }
     }
-    for (const stroke of elements.filter((element): element is InkStroke => (
-      element.kind === "stroke" &&
-      element.pageIndex === overlay.pageIndex &&
-      (!element.saved || !this.savedInkIsBurnedIntoPdf || Array.isArray(element.pdfPoints))
-    ))) {
-      drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, false);
+    if (options.includeStrokes !== false) {
+      for (const stroke of elements.filter((element): element is InkStroke => (
+        element.kind === "stroke" &&
+        element.pageIndex === overlay.pageIndex &&
+        (!element.saved || !this.savedInkIsBurnedIntoPdf || Array.isArray(element.pdfPoints))
+      ))) {
+        drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, false);
+      }
     }
-    for (const text of elements.filter((element): element is InkText => element.kind === "text" && element.pageIndex === overlay.pageIndex && (!element.saved || !this.savedTextIsBurnedIntoPdf))) {
-      drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, false);
+    if (options.includeText !== false) {
+      for (const text of elements.filter((element): element is InkText => element.kind === "text" && element.pageIndex === overlay.pageIndex && (!element.saved || !this.savedTextIsBurnedIntoPdf))) {
+        drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, false);
+      }
     }
     ctx.restore();
 
@@ -7872,7 +8014,7 @@ class InkSession {
   }
 
   private canMoveFreshSelection(): boolean {
-    return this.selectionWasExplicitTap && Date.now() - this.selectionChangedAt >= 500;
+    return this.selectionWasExplicitTap;
   }
 
   private canDragSelectedElements(pageIndex?: number): boolean {
@@ -8053,8 +8195,7 @@ class InkSession {
       return null;
     }
 
-    const textOnly = selected.length > 0 && selected.every((element) => element.kind === "text");
-    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, textOnly ? 10 : 5, textOnly ? 12 : 0);
+    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, 5, 0);
   }
 
   private resizeSelectedElements(drag: SelectionDragState, point: InkPoint): void {
@@ -8209,6 +8350,7 @@ class InkSession {
       this.markInkPageDirty(element.pageIndex);
       if (element.pdfSaved === true && !element.pdfPoints) {
         element.pdfPoints = element.points.map((point) => ({ ...point }));
+        this.updateExternalInkLayerState();
       }
       if (element.source === "external-ink") {
         element.externalDirty = true;
@@ -9425,6 +9567,23 @@ function arrayBufferToDataUrl(buffer: ArrayBuffer, mime: string): string {
   return `data:${mime};base64,${btoa(binary)}`;
 }
 
+function uint8ArrayToDataUrl(bytes: Uint8Array, mime: string): string {
+  return arrayBufferToDataUrl(toArrayBufferCopy(bytes), mime);
+}
+
+function dataUrlMimeType(dataUrl: string): string {
+  return dataUrl.match(/^data:([^;,]+)/i)?.[1]?.toLowerCase() ?? "image/png";
+}
+
+function dataUrlImageExtension(dataUrl: string): string {
+  const mime = dataUrlMimeType(dataUrl);
+  if (mime === "image/jpeg") return "jpg";
+  if (mime === "image/webp") return "webp";
+  if (mime === "image/gif") return "gif";
+  if (mime === "image/svg+xml") return "svg";
+  return "png";
+}
+
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -9466,52 +9625,179 @@ function fitImageToOverlay(
   };
 }
 
-function markdownToDocxParagraphs(markdown: string): string[] {
-  return markdown
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^#{1,6}\s+/, "").replace(/^-\s+/, "• ").trim())
-    .filter((line) => line.length > 0);
-}
-
-function buildDocxFromParagraphs(paragraphs: string[], title: string): Uint8Array {
-  const content = [
-    xmlEscape(title),
-    ...paragraphs.map(xmlEscape)
-  ];
-  const body = content.map((paragraph) => `<w:p><w:r><w:t xml:space="preserve">${paragraph}</w:t></w:r></w:p>`).join("");
-  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/activeDocument.xml" ContentType="application/vnd.openxmlformats-officeactiveDocument.wordprocessingml.activeDocument.main+xml"/></Types>`;
-  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/activeDocument.xml"/></Relationships>`;
-  return zipStoreFiles([
-    { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
-    { name: "_rels/.rels", data: utf8Bytes(rels) },
-    { name: "word/activeDocument.xml", data: utf8Bytes(documentXml) }
-  ]);
-}
-
 function buildVisualConversionMarkdown(file: TFile, pages: VisualConversionPage[], folderPath: string): string {
   const lines = [
-    `# ${file.basename} pdftion conversion`,
-    "",
-    `PDF: [[${file.path}]]`,
-    `Images: ${folderPath}`,
-    `Exported: ${new Date().toISOString()}`,
+    `<!-- Pdftion visual conversion from ${file.path}; floating ink and images are stored as NoteDraw data. -->`,
     ""
   ];
   for (const page of pages) {
     const imagePath = `${folderPath}/page-${String(page.pageIndex + 1).padStart(3, "0")}.png`;
-    lines.push(`## Page ${page.pageIndex + 1}`, "", `![[${imagePath}]]`, "");
+    lines.push(`![[${imagePath}]]`, "");
   }
   return lines.join("\n");
+}
+
+function getNoteDrawWriteApi(): NoteDrawWriteApi | null {
+  const runtime = activeWindow.NoteDraw;
+  if (runtime?.v1 && typeof runtime.v1.writeDrawings === "function") {
+    return runtime.v1;
+  }
+  return runtime && typeof runtime.writeDrawings === "function" ? runtime : null;
+}
+
+function buildNoteDrawExportData(sourcePath: string, pages: VisualConversionPage[], elements: InkElement[]): NoteDrawExportData {
+  const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
+  const logicalWidth = 1000;
+  const logicalGap = logicalWidth * VISUAL_EXPORT_PAGE_GAP_RATIO;
+  const layouts = new Map<number, { height: number; top: number }>();
+  let top = 0;
+  for (const page of sortedPages) {
+    const height = logicalWidth * page.height / Math.max(1, page.width);
+    layouts.set(page.pageIndex, { height, top });
+    top += height + logicalGap;
+  }
+  const totalHeight = Math.max(1, top - (sortedPages.length > 0 ? logicalGap : 0));
+  const exported: NoteDrawExportStroke[] = [];
+
+  for (const element of elements) {
+    const layout = layouts.get(element.pageIndex);
+    if (!layout) {
+      continue;
+    }
+    const mapPoint = (point: InkPoint, timestamp: number): NoteDrawExportPoint => ({
+      t: timestamp,
+      x: clamp(point.x, 0, 1),
+      y: clamp((layout.top + point.y * layout.height) / totalHeight, 0, 1)
+    });
+
+    if (element.kind === "stroke" && element.points.length > 0) {
+      const createdAt = element.createdAt ?? Date.now();
+      exported.push({
+        brush: element.tool === "highlight" ? "watercolor" : "pen",
+        color: element.color,
+        count: 1,
+        opacity: element.opacity,
+        points: element.points.map((point, index) => mapPoint(point, createdAt + index)),
+        width: clamp(element.width, 0.5, 80)
+      });
+    } else if (element.kind === "image") {
+      const extension = dataUrlImageExtension(element.dataUrl);
+      exported.push({
+        assetMime: dataUrlMimeType(element.dataUrl),
+        assetName: `pdftion-image-${element.id}.${extension}`,
+        brush: "pen",
+        color: "#1971c2",
+        count: 1,
+        embedType: "image",
+        exportImageDataUrl: element.dataUrl,
+        kind: "embed",
+        opacity: element.opacity,
+        points: [mapPoint({ x: element.x, y: element.y }, Date.now())],
+        previewHeight: Math.max(40, element.height * layout.height),
+        previewWidth: Math.max(80, element.width * logicalWidth),
+        text: `Pdftion image ${element.id}`,
+        width: 3
+      });
+    }
+  }
+
+  return {
+    sourcePath,
+    strokes: exported,
+    version: 3,
+    visible: true,
+    webEdits: []
+  };
+}
+
+async function buildCombinedPagePng(pages: VisualConversionPage[]): Promise<Uint8Array> {
+  const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
+  const margin = 24;
+  const gap = 24;
+  const rawWidth = Math.max(1, ...sortedPages.map((page) => page.width)) + margin * 2;
+  const rawHeight = sortedPages.reduce((sum, page) => sum + page.height, margin * 2 + gap * Math.max(0, sortedPages.length - 1));
+  const maxPixels = 16_000_000;
+  const scale = Math.min(1, 30_000 / Math.max(rawWidth, rawHeight), Math.sqrt(maxPixels / Math.max(1, rawWidth * rawHeight)));
+  const canvas = activeDocument.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(rawWidth * scale));
+  canvas.height = Math.max(1, Math.round(rawHeight * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Could not create PNG export canvas.");
+  }
+  ctx.fillStyle = "#dfe3e8";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  let y = margin;
+  for (const page of sortedPages) {
+    const image = await loadDataUrlImage(uint8ArrayToDataUrl(page.bytes, "image/png"));
+    const x = margin + (rawWidth - margin * 2 - page.width) / 2;
+    ctx.drawImage(image, Math.round(x * scale), Math.round(y * scale), Math.round(page.width * scale), Math.round(page.height * scale));
+    y += page.height + gap;
+  }
+  return dataUrlToBytes(canvas.toDataURL("image/png"));
+}
+
+async function buildPptxFromPageImages(pages: VisualConversionPage[], title: string): Promise<Uint8Array> {
+  const module = await import("pptxgenjs");
+  const PptxGenJS = module.default;
+  const pptx = new PptxGenJS();
+  const first = pages[0];
+  if (!first) {
+    throw new Error("No pages are available for PPTX export.");
+  }
+  const slideWidth = 10;
+  const slideHeight = clamp(slideWidth * first.height / Math.max(1, first.width), 5.625, 14.2);
+  pptx.defineLayout({ name: "PDFTION_EXPORT", width: slideWidth, height: slideHeight });
+  pptx.layout = "PDFTION_EXPORT";
+  pptx.author = "Murat";
+  pptx.subject = title;
+  pptx.title = title;
+
+  for (const page of [...pages].sort((a, b) => a.pageIndex - b.pageIndex)) {
+    const slide = pptx.addSlide();
+    slide.background = { color: "FFFFFF" };
+    const pageRatio = page.width / Math.max(1, page.height);
+    const slideRatio = slideWidth / slideHeight;
+    const width = pageRatio >= slideRatio ? slideWidth : slideHeight * pageRatio;
+    const height = pageRatio >= slideRatio ? slideWidth / pageRatio : slideHeight;
+    slide.addImage({
+      data: uint8ArrayToDataUrl(page.bytes, "image/png"),
+      h: height,
+      w: width,
+      x: (slideWidth - width) / 2,
+      y: (slideHeight - height) / 2
+    });
+  }
+
+  const output = await pptx.write({ outputType: "arraybuffer" });
+  if (output instanceof ArrayBuffer) {
+    return new Uint8Array(output);
+  }
+  if (output instanceof Uint8Array) {
+    return output;
+  }
+  if (output instanceof Blob) {
+    return new Uint8Array(await output.arrayBuffer());
+  }
+  throw new Error("PPTX generation returned an unsupported output type.");
+}
+
+function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]): string {
+  const figures = [...pages]
+    .sort((a, b) => a.pageIndex - b.pageIndex)
+    .map((page) => `<figure><img src="${uint8ArrayToDataUrl(page.bytes, "image/png")}" alt="Page ${page.pageIndex + 1}"><figcaption>Page ${page.pageIndex + 1}</figcaption></figure>`)
+    .join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}img{display:block;height:auto;width:100%}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
 }
 
 function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Uint8Array {
   const mediaFiles: Array<{ data: Uint8Array; name: string }> = [];
   const rels: string[] = [];
   let relId = 1;
-  const body = [`<w:p><w:r><w:t xml:space="preserve">${xmlEscape(title)}</w:t></w:r></w:p>`];
+  const body: string[] = [];
+  const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
 
-  for (const page of pages) {
+  for (const [index, page] of sortedPages.entries()) {
     const imageName = `image${page.pageIndex + 1}.png`;
     mediaFiles.push({ name: `word/media/${imageName}`, data: page.bytes });
     const imageRelId = `rId${relId}`;
@@ -9526,28 +9812,32 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
     const widthEmu = Math.round(rawWidthEmu * scale);
     const heightEmu = Math.round(rawHeightEmu * scale);
 
-    body.push(
-      `<w:p><w:r><w:t xml:space="preserve">Page ${page.pageIndex + 1}</w:t></w:r></w:p>`,
-      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${imageRelId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`
-    );
+    body.push(`<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${page.pageIndex + 1}" name="${xmlEscape(title)} page ${page.pageIndex + 1}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${imageRelId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`);
+    if (index < sortedPages.length - 1) {
+      body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
+    }
   }
 
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/activeDocument.xml" ContentType="application/vnd.openxmlformats-officeactiveDocument.wordprocessingml.activeDocument.main+xml"/></Types>`;
-  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/activeDocument.xml"/></Relationships>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
   const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}</Relationships>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
     { name: "_rels/.rels", data: utf8Bytes(relsXml) },
-    { name: "word/activeDocument.xml", data: utf8Bytes(documentXml) },
-    { name: "word/_rels/activeDocument.xml.rels", data: utf8Bytes(docRelsXml) },
+    { name: "word/document.xml", data: utf8Bytes(documentXml) },
+    { name: "word/_rels/document.xml.rels", data: utf8Bytes(docRelsXml) },
     ...mediaFiles
   ]);
 }
 
 function xmlEscape(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function htmlEscape(value: string): string {
+  return xmlEscape(value).replace(/'/g, "&#39;");
 }
 
 function utf8Bytes(value: string): Uint8Array {

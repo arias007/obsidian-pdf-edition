@@ -1,6 +1,6 @@
 # Pdftion
 
-Pdftion is a PDF annotation and editing plugin for note-focused PDF workflows. It adds editable ink, highlights, text overlays, cover blocks, image overlays, visual PDF export, Markdown and DOCX helpers, and an AI-friendly operation API to PDF views and embedded PDF previews.
+Pdftion is a PDF annotation and editing plugin for note-focused PDF workflows. It adds editable ink, highlights, text overlays, cover blocks, image overlays, visual PDF/DOCX/PPTX/PNG/HTML export, NoteDraw-aware Markdown conversion, and an AI-friendly operation API to PDF views and embedded PDF previews.
 
 The plugin is designed for quick annotation inside a note vault: open a PDF, press the pen button in the PDF toolbar, write or edit on the page, and let Pdftion save editable annotation data automatically. When you need a portable file, use the share menu to export a burned-in PDF copy that matches the visible annotated view.
 
@@ -19,7 +19,8 @@ The plugin is designed for quick annotation inside a note vault: open a PDF, pre
 - Attach the annotation button to normal PDF views and embedded PDF previews where possible.
 - Save editable annotation data automatically without modifying the source PDF on every stroke.
 - Export a visible burned-in PDF copy for sharing.
-- Export visual Markdown and DOCX helper documents.
+- Export visually faithful DOCX, PPTX, PNG, and self-contained HTML documents.
+- Convert PDFs to Markdown page layouts while preserving Pdftion ink and floating images as editable NoteDraw elements.
 - Use the Pdftion AI API to inspect, select, update, delete, and export annotation data from scripts or AI agents.
 
 ## Installation
