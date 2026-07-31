@@ -11,7 +11,7 @@ const packageUrl = new URL("../package.json", import.meta.url);
 test("saved PDF ink hides its original native layer as soon as editing begins", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
-  assert.match(source, /if \(element\.pdfSaved === true && !element\.pdfPoints\) \{\s*element\.pdfPoints = element\.points\.map[\s\S]*?this\.updateExternalInkLayerState\(\)/);
+  assert.match(source, /if \(element\.pdfSaved === true\) \{[\s\S]*?this\.pendingNativeInkHidePages\.add\(element\.pageIndex\);\s*this\.updateExternalInkLayerState\(\)/);
   assert.match(source, /translateElement\(element, dx, dy\)/);
 });
 
@@ -38,29 +38,33 @@ test("all requested visual formats share the page capture pipeline", async () =>
   assert.match(source, /buildPptxFromPageImages\(pages, this\.file\.basename\)/);
   assert.match(source, /buildSelfContainedVisualHtml\(this\.file, pages\)/);
   assert.match(source, /buildDocxFromPageImages\(pages, this\.file\.basename\)/);
-  assert.match(source, /element\.kind === "cover" && element\.pageIndex === overlay\.pageIndex\)\) \{/);
-  assert.doesNotMatch(source, /element\.kind === "cover" && element\.pageIndex === overlay\.pageIndex && !element\.saved/);
+  assert.match(source, /for \(const element of elements\.filter\(\(candidate\) => candidate\.pageIndex === overlay\.pageIndex\)\) \{/);
+  assert.match(source, /element\.kind === "cover" && options\.includeCovers !== false/);
   assert.match(source, /for \(let pageIndex = 0; pageIndex < pageCount; pageIndex \+= 1\)/);
   assert.match(source, /Only \$\{pages\.length}\s*\/\s*\$\{pageCount} PDF pages rendered/);
   assert.match(source, /const recentLeaf = this\.app\.workspace\.getMostRecentLeaf\(\)/);
   assert.match(source, /return visibleMatched \?\? matched/);
   assert.equal((source.match(/await this\.openConvertedFile\((?:targetFile|exportedFile)\)/g) ?? []).length, 5);
   assert.match(source, /await this\.openConvertedMarkdownFile\(targetFile\)/);
+  assert.match(source, /const timeout = window\.setTimeout\(finish, 120\)/);
 });
 
 test("Markdown conversion delegates ink and floating images to NoteDraw", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /const noteDraw = getNoteDrawWriteApi\(\)/);
-  assert.match(source, /const pages = await this\.captureEditableMarkdownPages\(\)/);
+  assert.match(source, /const visualPages = await this\.captureVisualConversionPages\(\{/);
   assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages\)/);
   assert.doesNotMatch(source, /writeVisualConversionImages\(pages\)/);
+  assert.match(source, /persistNoteDrawExportImages/);
+  assert.match(source, /assetPath: image\.assetPath/);
+  assert.match(source, /page\.lines\.length > 0 \|\| page\.sourceVisualRatio < 0\.045/);
   assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData/);
-  assert.match(source, /const opened = await this\.openConvertedFile\(targetFile\)/);
+  assert.match(source, /const opened = await this\.openConvertedMarkdownFile\(targetFile\)/);
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
   assert.match(source, /kind: "embed"/);
   assert.match(source, /embedType: "image"/);
-  assert.match(source, /exportImageDataUrl: element\.dataUrl/);
+  assert.match(source, /exportImageDataUrl: image\.dataUrl/);
 });
 
 test("Markdown conversion keeps native Markdown and uses minimal HTML for non-native styles", async () => {
@@ -80,15 +84,39 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
   assert.doesNotMatch(markdownSource, /<section\b|<div\b|<input\b|<label\b/i);
 });
 
-test("visual exports retain the page image and add a real selectable text layer", async () => {
+test("visual exports reuse the HTML-quality snapshot and keep editable text", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /lines: collectEditableMarkdownLines\(overlay\)/);
+  assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\)/);
   assert.match(source, /slide\.addText\(textRuns/);
+  assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
+  assert.match(source, /await this\.drawImageElementForExport/);
   assert.match(source, /<div class="text-layer"/);
-  assert.ok(source.includes('<w:t xml:space=\\"preserve\\">'));
-  assert.match(source, /buildDocxTextLayer\(page, widthEmu, heightEmu\)/);
+  assert.ok(source.includes('<w:t xml:space="preserve">'));
+  assert.match(source, /const imageRelId = addImage\(page\.bytes, "png"\)/);
+  assert.match(source, /buildDocxVisualPageParagraph\(/);
+  assert.match(source, /buildDocxAbsoluteTextLayer\(/);
+  assert.doesNotMatch(source, /<w:vanish\/>/);
   assert.match(source, /mso-position-horizontal-relative:page/);
+});
+
+test("comments and element layers are interactive, persistent, and shared by rendering and export", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /type ToolMode = [^;]*"comment"/);
+  assert.match(source, /presentation\?: "text" \| "comment"/);
+  assert.match(source, /private showTextMenu\(\)/);
+  assert.match(source, /private showCommentManager\(\)/);
+  assert.match(source, /private showCommentPopover\(comment: InkText, overlay: PageOverlay\)/);
+  assert.match(source, /addStandardTextCommentAnnotation\(pdf, page, element/);
+  assert.match(source, /zIndex\?: number/);
+  assert.match(source, /private reorderSelectedLayers\(mode: "up" \| "down" \| "top" \| "bottom"\)/);
+  assert.match(source, /normalizeInkElementLayers\(elements\)/);
+  assert.match(source, /return elements\.sort\(compareInkElements\)/);
+  assert.match(source, /const orderedElements = this\.getEditableElements\(\)\.filter/);
+  assert.match(source, /const ordered = this\.getEditableElements\(\).*\.reverse\(\)/);
+  assert.match(source, /elements\.sort\(compareInkElements\)/);
 });
 
 test("PPTX dependencies are browser-safe and the release bundle has no dynamic execution", async () => {

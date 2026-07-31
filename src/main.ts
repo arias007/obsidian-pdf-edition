@@ -5,7 +5,7 @@ import { PDFArray, PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, PDFSt
 const activeWindow = window;
 const activeDocument = document;
 
-type ToolMode = "select" | "pen" | "highlight" | "eraser" | "text" | "cover" | "image-crop";
+type ToolMode = "select" | "pen" | "highlight" | "eraser" | "text" | "comment" | "cover" | "image-crop";
 type ResizeHandle = "nw" | "ne" | "sw" | "se";
 type PdfFontkitModule = typeof import("@pdf-lib/fontkit");
 
@@ -1049,10 +1049,12 @@ interface InkStroke {
   source?: "external-ink" | "pdftion";
   tool: Exclude<ToolMode, "eraser" | "select">;
   width: number;
+  zIndex?: number;
 }
 
 interface InkText {
   color: string;
+  createdAt?: number;
   fontFamily?: string;
   fontSize: number;
   id: string;
@@ -1063,8 +1065,10 @@ interface InkText {
   pageIndex: number;
   saved: boolean;
   text: string;
+  presentation?: "text" | "comment";
   x: number;
   y: number;
+  zIndex?: number;
 }
 
 interface InkCover {
@@ -1081,6 +1085,7 @@ interface InkCover {
   width: number;
   x: number;
   y: number;
+  zIndex?: number;
 }
 
 interface InkImage {
@@ -1096,6 +1101,7 @@ interface InkImage {
   width: number;
   x: number;
   y: number;
+  zIndex?: number;
 }
 
 type InkElement = InkStroke | InkText | InkCover | InkImage;
@@ -1232,10 +1238,22 @@ interface RecentInkGroup {
 interface VisualConversionPage {
   bytes: Uint8Array;
   height: number;
+  images: VisualConversionImage[];
   lines: EditableMarkdownLine[];
   pageIndex: number;
   path?: string;
+  sourceVisualRatio: number;
   width: number;
+}
+
+interface VisualConversionImage {
+  dataUrl: string;
+  height: number;
+  id: string;
+  opacity: number;
+  width: number;
+  x: number;
+  y: number;
 }
 
 interface EditableMarkdownTextRun {
@@ -1283,6 +1301,8 @@ interface NoteDrawExportPoint {
 interface NoteDrawExportStroke {
   assetMime?: string;
   assetName?: string;
+  assetPath?: string;
+  assetSize?: number;
   brush: "pen" | "watercolor";
   color: string;
   count: number;
@@ -1295,6 +1315,15 @@ interface NoteDrawExportStroke {
   previewWidth?: number;
   text?: string;
   width: number;
+}
+
+interface NoteDrawExportImage extends VisualConversionImage {
+  assetMime: string;
+  assetName: string;
+  assetPath?: string;
+  assetSize?: number;
+  pageIndex: number;
+  zIndex?: number;
 }
 
 interface NoteDrawExportData {
@@ -1636,7 +1665,7 @@ export default class PdftionPlugin extends Plugin {
           overlayTextOnly: true,
           pdfFingerprint,
           updatedAt: new Date().toISOString(),
-          version: 6,
+          version: 7,
           elements
         },
         null,
@@ -1658,7 +1687,7 @@ export default class PdftionPlugin extends Plugin {
           overlayTextOnly: true,
           pdfFingerprint,
           updatedAt: new Date().toISOString(),
-          version: 6,
+          version: 7,
           elements
         },
         null,
@@ -2314,6 +2343,7 @@ class InkSession {
   private enabled = false;
   private imageCache = new Map<string, HTMLImageElement>();
   private imageMenu: HTMLElement | null = null;
+  private textMenu: HTMLElement | null = null;
   private shareMenu: HTMLElement | null = null;
   private mutationObserver: MutationObserver;
   private hiddenNativeAnnotationStyles = new Map<HTMLElement, NativeAnnotationStyleSnapshot>();
@@ -2357,6 +2387,8 @@ class InkSession {
   private nativeSelection: PdfNativeObject | null = null;
   private pendingImageCrop: PdfNativeObject | null = null;
   private pageNavigator: HTMLElement | null = null;
+  private commentManager: HTMLElement | null = null;
+  private commentPopover: HTMLElement | null = null;
   private selectedPageIndexes = new Set<number>();
   private selectedStrokeIds = new Set<string>();
   private selectionChangedAt = 0;
@@ -2472,7 +2504,10 @@ class InkSession {
     this.clearNativeTextSelectionTimer();
     this.nativeTextSelectionAbort.abort();
     this.pageNavigator?.remove();
+    this.commentManager?.remove();
+    this.commentPopover?.remove();
     this.imageMenu?.remove();
+    this.textMenu?.remove();
     this.shareMenu?.remove();
     this.toolbar?.remove();
     this.toolbarHost?.remove();
@@ -2530,6 +2565,12 @@ class InkSession {
     this.textHistory = [];
     this.coverHistory = [];
     this.imageHistory = [];
+    this.textMenu?.remove();
+    this.textMenu = null;
+    this.commentManager?.remove();
+    this.commentManager = null;
+    this.commentPopover?.remove();
+    this.commentPopover = null;
     this.detachedInkEditPages.clear();
     this.loadedAnnotationState = false;
     this.annotationLoadToken += 1;
@@ -2600,6 +2641,7 @@ class InkSession {
     }
     this.loadedAnnotationState = true;
     this.redrawAll();
+    this.refreshCommentManager();
   }
 
   toggle(): void {
@@ -2667,7 +2709,7 @@ class InkSession {
     if (node.closest(".pdftion-root") && node.classList.contains("pdftion-canvas")) {
       return false;
     }
-    if (node.closest(".pdftion-toolbar-host, .pdftion-toolbar, .pdftion-palette-panel, .pdftion-image-menu, .pdftion-share-menu, .pdftion-embed-actions, .pdftion-inline-actions")) {
+    if (node.closest(".pdftion-toolbar-host, .pdftion-toolbar, .pdftion-palette-panel, .pdftion-image-menu, .pdftion-text-menu, .pdftion-share-menu, .pdftion-comment-popover, .pdftion-embed-actions, .pdftion-inline-actions")) {
       return false;
     }
     if (
@@ -3288,8 +3330,14 @@ class InkSession {
       this.palette = null;
       this.imageMenu?.remove();
       this.imageMenu = null;
+      this.textMenu?.remove();
+      this.textMenu = null;
       this.shareMenu?.remove();
       this.shareMenu = null;
+      this.commentManager?.remove();
+      this.commentManager = null;
+      this.commentPopover?.remove();
+      this.commentPopover = null;
       this.toolbar?.remove();
       this.toolbar = null;
       if (this.hasPendingPdfWrite()) {
@@ -3502,7 +3550,14 @@ class InkSession {
     const text = createIconButton("type", uiText("文字", "Text"));
     text.dataset.tool = "text";
     text.classList.add("pdftion-color-tool", "pdftion-text-button");
-    text.addEventListener("click", () => this.setTool("text"));
+    text.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.tool !== "text" && this.tool !== "comment") {
+        this.setTool("text");
+      }
+      this.toggleTextMenu();
+    });
     toolbar.appendChild(text);
 
     const image = createIconButton("image", uiText("图片", "Image"));
@@ -3678,6 +3733,7 @@ class InkSession {
     for (const button of Array.from(this.toolbar.querySelectorAll("[data-tool]")).filter(isHTMLElement)) {
       button.classList.toggle("is-active", button.dataset.tool === this.tool);
     }
+    this.toolbar.querySelector<HTMLElement>(".pdftion-text-button")?.classList.toggle("is-active", this.tool === "text" || this.tool === "comment");
     this.toolbar.querySelector<HTMLElement>(".pdftion-image-button")?.classList.toggle("is-active", this.tool === "image-crop");
     this.setToolbarIconColor(".pdftion-pen-button", this.penColor);
     this.setToolbarIconColor(".pdftion-highlight-button", this.highlightColor);
@@ -3714,7 +3770,7 @@ class InkSession {
     if (this.tool === "highlight") {
       return normalizeHexColor(this.highlightColor);
     }
-    if (this.tool === "text" || this.hasSelectedText()) {
+    if (this.tool === "text" || this.tool === "comment" || this.hasSelectedText()) {
       return normalizeHexColor(this.getTextPaletteColor());
     }
     return normalizeHexColor(this.penColor);
@@ -3759,12 +3815,71 @@ class InkSession {
     }
     this.imageMenu?.remove();
     this.imageMenu = null;
+    this.textMenu?.remove();
+    this.textMenu = null;
     this.shareMenu?.remove();
     this.shareMenu = null;
     if (this.palette?.isConnected) {
       this.showPalette();
     }
     this.updateToolbarState();
+  }
+
+  private toggleTextMenu(): void {
+    if (this.textMenu?.isConnected) {
+      this.textMenu.remove();
+      this.textMenu = null;
+      return;
+    }
+    this.imageMenu?.remove();
+    this.imageMenu = null;
+    this.shareMenu?.remove();
+    this.shareMenu = null;
+    this.showTextMenu();
+  }
+
+  private showTextMenu(): void {
+    this.textMenu?.remove();
+    const button = this.toolbar?.querySelector<HTMLElement>(".pdftion-text-button");
+    const panel = activeDocument.createElement("div");
+    panel.className = "pdftion-text-menu";
+
+    const text = createIconButton("type", uiText("文字", "Text"));
+    text.classList.add("pdftion-text-menu-button");
+    text.addEventListener("click", () => {
+      panel.remove();
+      this.textMenu = null;
+      this.setTool("text");
+    });
+    panel.appendChild(text);
+
+    const comment = createIconButton("message-square-text", uiText("批注", "Comment"));
+    comment.classList.add("pdftion-text-menu-button");
+    comment.addEventListener("click", () => {
+      panel.remove();
+      this.textMenu = null;
+      this.setTool("comment");
+      new Notice(uiText("点击页面添加批注。", "Click the page to add a comment."));
+    });
+    panel.appendChild(comment);
+
+    const manage = createIconButton("list-tree", uiText("批注管理", "Comment manager"));
+    manage.classList.add("pdftion-text-menu-button");
+    manage.addEventListener("click", () => {
+      panel.remove();
+      this.textMenu = null;
+      this.showCommentManager();
+    });
+    panel.appendChild(manage);
+
+    appendToActiveBody(panel);
+    const rect = button?.getBoundingClientRect();
+    const fallbackTop = Math.max(76, (this.toolbarHost?.getBoundingClientRect().bottom ?? 68) + 6);
+    panel.setCssStyles({
+      left: `${Math.min(activeWindow.innerWidth - 150, Math.max(8, rect ? rect.left : 16))}px`,
+      top: `${Math.min(activeWindow.innerHeight - 96, Math.max(8, rect ? rect.bottom + 6 : fallbackTop))}px`
+    });
+    this.textMenu = panel;
   }
 
   private toggleImageMenu(): void {
@@ -3775,6 +3890,8 @@ class InkSession {
     }
     this.shareMenu?.remove();
     this.shareMenu = null;
+    this.textMenu?.remove();
+    this.textMenu = null;
     this.showImageMenu();
   }
 
@@ -3820,6 +3937,8 @@ class InkSession {
     }
     this.imageMenu?.remove();
     this.imageMenu = null;
+    this.textMenu?.remove();
+    this.textMenu = null;
     this.showShareMenu();
   }
 
@@ -3925,14 +4044,18 @@ class InkSession {
   }
 
   private openEditorAtPoint(point: InkPoint, overlay: PageOverlay): boolean {
-    const element = this.findTextElementAt(overlay, point) ?? this.findElementAt(overlay, point);
+    const element = this.findElementAt(overlay, point);
     if (element?.kind === "text") {
       this.clearCurrentStroke();
       this.currentCover = null;
       this.selectionDrag = null;
       this.setSingleSelectedElement(element.id);
       this.nativeSelection = null;
-      this.openExistingTextEditor(element, overlay);
+      if (element.presentation === "comment") {
+        void this.editCommentAnnotation(element);
+      } else {
+        this.openExistingTextEditor(element, overlay);
+      }
       this.redrawAll();
       return true;
     }
@@ -4002,6 +4125,13 @@ class InkSession {
       return;
     }
 
+    if (hitElement?.kind === "text" && hitElement.presentation === "comment" && tool !== "eraser" && tool !== "cover") {
+      this.setSingleSelectedElement(hitElement.id);
+      this.showCommentPopover(hitElement, overlay);
+      this.redrawAll();
+      return;
+    }
+
     if (drawingTool) {
       this.selectionDrag = null;
       this.currentStrokeMoved = false;
@@ -4042,6 +4172,11 @@ class InkSession {
 
     if (tool === "text") {
       this.addTextAnnotation(point, overlay);
+      return;
+    }
+
+    if (tool === "comment") {
+      void this.addCommentAnnotation(point, overlay);
       return;
     }
 
@@ -4089,6 +4224,132 @@ class InkSession {
     this.markDirty();
     this.redrawOverlay(overlay);
     this.openExistingTextEditor(textElement, overlay);
+  }
+
+  private async addCommentAnnotation(point: InkPoint, overlay: PageOverlay): Promise<void> {
+    const targetPath = this.file.path;
+    const content = await showPromptModal({
+      actionLabel: uiText("添加", "Add"),
+      message: uiText("输入批注内容。", "Enter the comment content."),
+      title: uiText("添加批注", "Add comment")
+    });
+    if (!content || this.destroyed || this.file.path !== targetPath) {
+      return;
+    }
+    const comment: InkText = {
+      color: this.textColor,
+      createdAt: Date.now(),
+      fontFamily: this.textFontFamily,
+      fontSize: this.textFontSize,
+      id: makeStrokeId(),
+      kind: "text",
+      opacity: 1,
+      pageCssHeight: overlay.cssHeight,
+      pageCssWidth: overlay.cssWidth,
+      pageIndex: overlay.pageIndex,
+      presentation: "comment",
+      saved: false,
+      text: content,
+      x: point.x,
+      y: point.y,
+      zIndex: this.getNextLayerIndex(overlay.pageIndex)
+    };
+    this.rememberHistory();
+    this.textHistory.push(comment);
+    this.redoStack = [];
+    this.setSingleSelectedElement(comment.id);
+    this.markDirty();
+    this.redrawOverlay(overlay);
+    this.scheduleAutoSave();
+    this.refreshCommentManager();
+    this.showCommentPopover(comment, overlay);
+  }
+
+  private async editCommentAnnotation(comment: InkText): Promise<void> {
+    if (comment.presentation !== "comment") {
+      return;
+    }
+    const content = await showPromptModal({
+      actionLabel: uiText("保存", "Save"),
+      defaultValue: comment.text,
+      message: uiText("修改批注内容。", "Edit the comment content."),
+      title: uiText("编辑批注", "Edit comment")
+    });
+    if (!content || content === comment.text || !this.findElementById(comment.id)) {
+      return;
+    }
+    this.rememberHistory();
+    comment.text = content;
+    comment.saved = false;
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
+    this.refreshCommentManager();
+    const overlay = this.findOverlayByPageIndex(comment.pageIndex);
+    if (overlay) {
+      this.showCommentPopover(comment, overlay);
+    }
+  }
+
+  private deleteCommentAnnotation(comment: InkText): void {
+    if (comment.presentation !== "comment" || !this.findElementById(comment.id)) {
+      return;
+    }
+    this.rememberHistory();
+    this.removeElementById(comment.id);
+    this.selectedStrokeIds.delete(comment.id);
+    this.commentPopover?.remove();
+    this.commentPopover = null;
+    this.markDirty();
+    this.redrawAll();
+    this.scheduleAutoSave();
+    this.refreshCommentManager();
+  }
+
+  private showCommentPopover(comment: InkText, overlay: PageOverlay): void {
+    this.commentPopover?.remove();
+    const panel = activeDocument.createElement("div");
+    panel.className = "pdftion-comment-popover";
+    panel.addEventListener("pointerdown", (event) => event.stopPropagation());
+    panel.addEventListener("click", (event) => event.stopPropagation());
+
+    const header = activeDocument.createElement("div");
+    header.className = "pdftion-comment-popover-header";
+    const page = activeDocument.createElement("span");
+    page.textContent = uiText(`第 ${comment.pageIndex + 1} 页批注`, `Page ${comment.pageIndex + 1} comment`);
+    header.appendChild(page);
+    const close = createIconButton("x", uiText("关闭", "Close"));
+    close.addEventListener("click", () => {
+      panel.remove();
+      this.commentPopover = null;
+    });
+    header.appendChild(close);
+    panel.appendChild(header);
+
+    const content = activeDocument.createElement("div");
+    content.className = "pdftion-comment-content";
+    content.textContent = comment.text;
+    panel.appendChild(content);
+
+    const actions = activeDocument.createElement("div");
+    actions.className = "pdftion-comment-actions";
+    const edit = createIconButton("pencil", uiText("编辑批注", "Edit comment"));
+    edit.addEventListener("click", () => void this.editCommentAnnotation(comment));
+    actions.appendChild(edit);
+    const remove = createIconButton("trash-2", uiText("删除批注", "Delete comment"));
+    remove.addEventListener("click", () => this.deleteCommentAnnotation(comment));
+    actions.appendChild(remove);
+    panel.appendChild(actions);
+
+    appendToActiveBody(panel);
+    const overlayRect = this.getOverlayClientRect(overlay);
+    const iconX = overlayRect.left + comment.x * overlay.cssWidth;
+    const iconY = overlayRect.top + comment.y * overlay.cssHeight;
+    panel.setCssStyles({
+      left: `${clamp(iconX + 18, 8, Math.max(8, activeWindow.innerWidth - 292))}px`,
+      top: `${clamp(iconY - 8, 8, Math.max(8, activeWindow.innerHeight - 220))}px`
+    });
+    this.commentPopover = panel;
   }
 
   private openNativeTextEditor(selection: PdfNativeObject, overlay: PageOverlay): void {
@@ -4736,7 +4997,7 @@ class InkSession {
     const fromPdftionInteraction = path.some((value) => (
       isHTMLElement(value) &&
       value.closest(
-        ".pdftion-live-canvas, .pdftion-native-editor, .pdftion-native-selection-menu, .pdftion-palette-panel, .pdftion-panel"
+        ".pdftion-live-canvas, .pdftion-native-editor, .pdftion-native-selection-menu, .pdftion-palette-panel, .pdftion-text-menu, .pdftion-comment-popover, .pdftion-panel"
       ) !== null
     ));
     if (
@@ -4799,7 +5060,7 @@ class InkSession {
       "[role='menu']"
     ];
     for (const candidate of Array.from(activeDocument.querySelectorAll<HTMLElement>(selectors.join(",")))) {
-      if (candidate.closest(".pdftion-root, .pdftion-toolbar, .pdftion-panel, .pdftion-palette-panel, .pdftion-native-selection-menu")) {
+      if (candidate.closest(".pdftion-root, .pdftion-toolbar, .pdftion-panel, .pdftion-palette-panel, .pdftion-text-menu, .pdftion-comment-popover, .pdftion-native-selection-menu")) {
         continue;
       }
       const rect = candidate.getBoundingClientRect();
@@ -4990,7 +5251,7 @@ class InkSession {
       panel.appendChild(this.createPaletteToolGroup("highlight", uiText("水彩", "Highlighter")));
     } else if (this.hasSelectedText()) {
       panel.appendChild(this.createPaletteTextGroup());
-    } else if (this.tool === "text") {
+    } else if (this.tool === "text" || this.tool === "comment") {
       panel.appendChild(this.createPaletteTextGroup());
     } else {
       panel.appendChild(this.createPaletteToolGroup("pen", uiText("笔", "Pen")));
@@ -5148,6 +5409,26 @@ class InkSession {
     }
     colorRow.appendChild(this.createAdvancedColorInput("selection", this.getSelectedPaletteColor(), (color) => this.setSelectedPaletteColor(color)));
     group.appendChild(colorRow);
+
+    const layerHeading = activeDocument.createElement("div");
+    layerHeading.className = "pdftion-palette-heading";
+    layerHeading.textContent = uiText("元素层级", "Element layer");
+    group.appendChild(layerHeading);
+
+    const layerRow = activeDocument.createElement("div");
+    layerRow.className = "pdftion-layer-actions";
+    const layerActions: Array<{ icon: string; mode: "up" | "down" | "top" | "bottom"; title: string }> = [
+      { icon: "arrow-up", mode: "up", title: uiText("上移一层", "Move one layer up") },
+      { icon: "arrow-down", mode: "down", title: uiText("下移一层", "Move one layer down") },
+      { icon: "chevrons-up", mode: "top", title: uiText("置于顶层", "Bring to front") },
+      { icon: "chevrons-down", mode: "bottom", title: uiText("置于底层", "Send to back") }
+    ];
+    for (const action of layerActions) {
+      const button = createIconButton(action.icon, action.title);
+      button.addEventListener("click", () => this.reorderSelectedLayers(action.mode));
+      layerRow.appendChild(button);
+    }
+    group.appendChild(layerRow);
 
     return group;
   }
@@ -5339,6 +5620,106 @@ class InkSession {
     this.markDirty();
     this.redrawAll();
     this.scheduleAutoSave();
+  }
+
+  private getCommentElements(): InkText[] {
+    return this.textHistory
+      .filter((text) => text.presentation === "comment")
+      .sort(compareInkElements);
+  }
+
+  private showCommentManager(): void {
+    if (this.commentManager?.isConnected) {
+      this.commentManager.remove();
+      this.commentManager = null;
+      return;
+    }
+
+    const panel = activeDocument.createElement("div");
+    panel.className = "pdftion-panel pdftion-comment-manager";
+    panel.addEventListener("pointerdown", (event) => event.stopPropagation());
+    panel.addEventListener("click", (event) => event.stopPropagation());
+
+    const header = activeDocument.createElement("div");
+    header.className = "pdftion-panel-header";
+    header.textContent = uiText("批注管理", "Comment manager");
+    const close = createIconButton("x", uiText("关闭", "Close"));
+    close.addEventListener("click", () => {
+      panel.remove();
+      this.commentManager = null;
+    });
+    header.appendChild(close);
+    panel.appendChild(header);
+
+    const list = activeDocument.createElement("div");
+    list.className = "pdftion-comment-list";
+    panel.appendChild(list);
+    this.populateCommentManagerList(list);
+
+    appendToActiveBody(panel);
+    const button = this.toolbar?.querySelector<HTMLElement>(".pdftion-text-button");
+    const rect = button?.getBoundingClientRect();
+    panel.setCssStyles({
+      left: `${clamp(rect?.left ?? 12, 8, Math.max(8, activeWindow.innerWidth - 340))}px`,
+      top: `${clamp((rect?.bottom ?? 72) + 8, 8, Math.max(8, activeWindow.innerHeight - 420))}px`
+    });
+    this.commentManager = panel;
+  }
+
+  private populateCommentManagerList(list: HTMLElement): void {
+    list.textContent = "";
+    const comments = this.getCommentElements();
+    if (comments.length === 0) {
+      const empty = activeDocument.createElement("div");
+      empty.className = "pdftion-comment-empty";
+      empty.textContent = uiText("暂无批注", "No comments");
+      list.appendChild(empty);
+      return;
+    }
+
+    for (const comment of comments) {
+      const row = activeDocument.createElement("div");
+      row.className = "pdftion-comment-row";
+
+      const locate = activeDocument.createElement("button");
+      locate.type = "button";
+      locate.className = "pdftion-comment-locate";
+      const page = activeDocument.createElement("span");
+      page.className = "pdftion-comment-page";
+      page.textContent = uiText(`第 ${comment.pageIndex + 1} 页`, `Page ${comment.pageIndex + 1}`);
+      locate.appendChild(page);
+      const preview = activeDocument.createElement("span");
+      preview.className = "pdftion-comment-preview";
+      preview.textContent = comment.text.replace(/\s+/g, " ").trim();
+      locate.appendChild(preview);
+      locate.addEventListener("click", () => {
+        this.setSingleSelectedElement(comment.id);
+        this.jumpToPage(comment.pageIndex);
+        window.setTimeout(() => {
+          const overlay = this.findOverlayByPageIndex(comment.pageIndex);
+          if (overlay) {
+            this.showCommentPopover(comment, overlay);
+            this.redrawAll();
+          }
+        }, 180);
+      });
+      row.appendChild(locate);
+
+      const edit = createIconButton("pencil", uiText("编辑批注", "Edit comment"));
+      edit.addEventListener("click", () => void this.editCommentAnnotation(comment));
+      row.appendChild(edit);
+      const remove = createIconButton("trash-2", uiText("删除批注", "Delete comment"));
+      remove.addEventListener("click", () => this.deleteCommentAnnotation(comment));
+      row.appendChild(remove);
+      list.appendChild(row);
+    }
+  }
+
+  private refreshCommentManager(): void {
+    const list = this.commentManager?.querySelector<HTMLElement>(".pdftion-comment-list");
+    if (list) {
+      this.populateCommentManagerList(list);
+    }
   }
 
   showPageNavigator(): void {
@@ -5850,6 +6231,7 @@ class InkSession {
     this.redoStack = [];
     this.markDirty();
     this.redrawAll();
+    this.refreshCommentManager();
     this.scheduleAutoSave();
   }
 
@@ -6512,6 +6894,7 @@ class InkSession {
         this.redoStack = [];
         this.markDirty();
         this.redrawAll();
+        this.refreshCommentManager();
         this.scheduleAutoSave();
         return;
       }
@@ -6550,6 +6933,7 @@ class InkSession {
     this.pruneSelection();
     this.markDirty();
     this.redrawAll();
+    this.refreshCommentManager();
     this.scheduleAutoSave();
   }
 
@@ -6601,41 +6985,28 @@ class InkSession {
     const tintEditableSelection = !editingText;
     const showEditableSelectionControls = !editingText && this.shouldShowEditableSelection();
 
-    for (const cover of this.coverHistory) {
-      if (cover.pageIndex === overlay.pageIndex) {
-        drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(cover.id));
+    if (this.nativeTextEditorCover && this.nativeTextEditorCover.pageIndex === overlay.pageIndex) {
+      drawCoverElement(ctx, this.nativeTextEditorCover, overlay.cssWidth, overlay.cssHeight, false);
+    }
+
+    const orderedElements = this.getEditableElements().filter((element) => element.pageIndex === overlay.pageIndex);
+    for (const element of orderedElements) {
+      const selected = tintEditableSelection && this.selectedStrokeIds.has(element.id);
+      if (element.kind === "cover") {
+        drawCoverElement(ctx, element, overlay.cssWidth, overlay.cssHeight, selected);
+      } else if (element.kind === "image") {
+        this.drawImageElement(ctx, element, overlay.cssWidth, overlay.cssHeight, selected);
+      } else if (element.kind === "stroke") {
+        if (!this.savedInkIsBurnedIntoPdf || !element.saved || Array.isArray(element.pdfPoints)) {
+          drawStroke(ctx, element, overlay.cssWidth, overlay.cssHeight, selected);
+        }
+      } else if (!element.saved || !this.savedTextIsBurnedIntoPdf || element.presentation === "comment") {
+        drawTextElement(ctx, element, overlay.cssWidth, overlay.cssHeight, selected);
       }
     }
 
     if (this.currentCover && this.currentCover.pageIndex === overlay.pageIndex) {
       drawCoverElement(ctx, this.currentCover, overlay.cssWidth, overlay.cssHeight, false);
-    }
-
-    if (this.nativeTextEditorCover && this.nativeTextEditorCover.pageIndex === overlay.pageIndex) {
-      drawCoverElement(ctx, this.nativeTextEditorCover, overlay.cssWidth, overlay.cssHeight, false);
-    }
-
-    for (const image of this.imageHistory) {
-      if (image.pageIndex === overlay.pageIndex) {
-        this.drawImageElement(ctx, image, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(image.id));
-      }
-    }
-
-    for (const stroke of this.strokeHistory) {
-      if (stroke.pageIndex !== overlay.pageIndex) {
-        continue;
-      }
-      if (this.savedInkIsBurnedIntoPdf && stroke.saved && !Array.isArray(stroke.pdfPoints)) {
-        continue;
-      }
-      const selected = tintEditableSelection && this.selectedStrokeIds.has(stroke.id);
-      drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, selected);
-    }
-
-    for (const text of this.textHistory) {
-      if (text.pageIndex === overlay.pageIndex && (!text.saved || !this.savedTextIsBurnedIntoPdf)) {
-        drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, tintEditableSelection && this.selectedStrokeIds.has(text.id));
-      }
     }
 
     if (showEditableSelectionControls && this.selectionDrag?.mode === "marquee" && this.selectionDrag.pageIndex === overlay.pageIndex) {
@@ -6885,12 +7256,27 @@ class InkSession {
     try {
       await this.prepareExportSnapshot();
       const noteDraw = getNoteDrawWriteApi();
-      const pages = await this.captureEditableMarkdownPages();
+      const visualPages = await this.captureVisualConversionPages({
+        includeCovers: false,
+        includeImages: false,
+        includeStrokes: false,
+        includeText: false
+      });
+      const pages: EditableMarkdownPage[] = visualPages.map((page) => ({
+        height: page.height,
+        lines: page.lines,
+        pageIndex: page.pageIndex,
+        width: page.width
+      }));
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "md");
       const markdown = buildEditableMarkdown(this.file, pages);
       const targetFile = await this.plugin.app.vault.create(targetPath, markdown);
       if (noteDraw) {
-        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements()));
+        const images = await this.persistNoteDrawExportImages(
+          targetPath,
+          collectNoteDrawExportImages(visualPages, this.getEditableElements())
+        );
+        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements(), images));
       }
       const opened = await this.openConvertedMarkdownFile(targetFile);
       if (options.notice !== false) {
@@ -7056,50 +7442,6 @@ class InkSession {
     return pages;
   }
 
-  private async captureEditableMarkdownPages(): Promise<EditableMarkdownPage[]> {
-    const pageCount = await this.getCurrentPdfPageCount();
-    const pages: EditableMarkdownPage[] = [];
-    const firstPage = this.findPdfPageElementForExport(0) ?? this.rootEl;
-    const scrollEl = findScrollableAncestor(firstPage);
-    const originalScrollLeft = scrollEl.scrollLeft;
-    const originalScrollTop = scrollEl.scrollTop;
-
-    try {
-      for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
-        const pageEl = this.findPdfPageElementForExport(pageIndex);
-        pageEl?.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
-        let overlay: PageOverlay | null = null;
-        for (let attempt = 0; attempt < 16 && !overlay; attempt += 1) {
-          await sleepMs(attempt === 0 ? 90 : 120);
-          this.scanPages();
-          overlay = this.findOverlayByPageIndex(pageIndex);
-          if (overlay) {
-            this.resizeOverlay(overlay);
-          }
-        }
-        if (!overlay) {
-          continue;
-        }
-        pages.push({
-          height: Math.max(1, overlay.cssHeight),
-          lines: collectEditableMarkdownLines(overlay),
-          pageIndex,
-          width: Math.max(1, overlay.cssWidth)
-        });
-      }
-    } finally {
-      scrollEl.scrollLeft = originalScrollLeft;
-      scrollEl.scrollTop = originalScrollTop;
-      scrollEl.dispatchEvent(new Event("scroll"));
-      this.scanPages();
-    }
-
-    if (pages.length !== pageCount) {
-      throw new Error(`Only ${pages.length}/${pageCount} PDF pages prepared for editable Markdown conversion.`);
-    }
-    return pages;
-  }
-
   private findPdfPageElementForExport(pageIndex: number): HTMLElement | null {
     const candidates = Array.from(this.rootEl.querySelectorAll<HTMLElement>(
       ".pdfViewer .page, .pdf-viewer .page, .pdf-container .page, .page[data-page-number]"
@@ -7131,28 +7473,34 @@ class InkSession {
     ctx.save();
     ctx.scale(outputWidth / Math.max(1, overlay.cssWidth), outputHeight / Math.max(1, overlay.cssHeight));
     const elements = this.getEditableElements();
-    if (options.includeCovers !== false) {
-      for (const cover of elements.filter((element): element is InkCover => element.kind === "cover" && element.pageIndex === overlay.pageIndex)) {
-        drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, false);
-      }
-    }
-    if (options.includeImages !== false) {
-      for (const image of elements.filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
-        await this.drawImageElementForExport(ctx, image, overlay.cssWidth, overlay.cssHeight);
-      }
-    }
-    if (options.includeStrokes !== false) {
-      for (const stroke of elements.filter((element): element is InkStroke => (
+    const images = elements
+      .filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)
+      .map((image) => ({
+        dataUrl: image.dataUrl,
+        height: image.height,
+        id: image.id,
+        opacity: image.opacity,
+        width: image.width,
+        x: image.x,
+        y: image.y
+      }));
+    for (const element of elements.filter((candidate) => candidate.pageIndex === overlay.pageIndex)) {
+      if (element.kind === "cover" && options.includeCovers !== false) {
+        drawCoverElement(ctx, element, overlay.cssWidth, overlay.cssHeight, false);
+      } else if (element.kind === "image" && options.includeImages !== false) {
+        await this.drawImageElementForExport(ctx, element, overlay.cssWidth, overlay.cssHeight);
+      } else if (
         element.kind === "stroke" &&
-        element.pageIndex === overlay.pageIndex &&
+        options.includeStrokes !== false &&
         (!element.saved || !this.savedInkIsBurnedIntoPdf || Array.isArray(element.pdfPoints))
-      ))) {
-        drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, false);
-      }
-    }
-    if (options.includeText !== false) {
-      for (const text of elements.filter((element): element is InkText => element.kind === "text" && element.pageIndex === overlay.pageIndex && (!element.saved || !this.savedTextIsBurnedIntoPdf))) {
-        drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, false);
+      ) {
+        drawStroke(ctx, element, overlay.cssWidth, overlay.cssHeight, false);
+      } else if (
+        element.kind === "text" &&
+        options.includeText !== false &&
+        (!element.saved || !this.savedTextIsBurnedIntoPdf || element.presentation === "comment")
+      ) {
+        drawTextElement(ctx, element, overlay.cssWidth, overlay.cssHeight, false);
       }
     }
     ctx.restore();
@@ -7161,10 +7509,39 @@ class InkSession {
     return {
       bytes: dataUrlToBytes(dataUrl),
       height: outputHeight,
+      images,
       lines: collectEditableMarkdownLines(overlay),
       pageIndex: overlay.pageIndex,
+      sourceVisualRatio: measureCanvasVisualRatio(pdfCanvas),
       width: outputWidth
     };
+  }
+
+  private async persistNoteDrawExportImages(targetPath: string, images: NoteDrawExportImage[]): Promise<NoteDrawExportImage[]> {
+    if (images.length === 0) {
+      return [];
+    }
+    const assetDir = `${this.plugin.app.vault.configDir}/plugins/notedraw/assets`;
+    if (!await this.plugin.app.vault.adapter.exists(assetDir)) {
+      await this.plugin.app.vault.adapter.mkdir(assetDir);
+    }
+    const targetBase = sanitizeNoteDrawAssetName(targetPath.replace(/\.md$/i, ""));
+    const persisted: NoteDrawExportImage[] = [];
+    for (const [index, image] of images.entries()) {
+      const extension = dataUrlImageExtension(image.dataUrl);
+      const assetName = `${targetBase}-${sanitizeNoteDrawAssetName(image.id || String(index + 1))}.${extension}`;
+      const assetPath = `${assetDir}/${assetName}`;
+      const bytes = dataUrlToBytes(image.dataUrl);
+      await this.plugin.app.vault.adapter.writeBinary(assetPath, toArrayBufferCopy(bytes));
+      persisted.push({
+        ...image,
+        assetMime: dataUrlMimeType(image.dataUrl),
+        assetName,
+        assetPath,
+        assetSize: bytes.byteLength
+      });
+    }
+    return persisted;
   }
 
   private async drawImageElementForExport(ctx: CanvasRenderingContext2D, image: InkImage, cssWidth: number, cssHeight: number): Promise<void> {
@@ -7247,7 +7624,7 @@ class InkSession {
         };
         pdf = await PDFDocument.load(binary, { ignoreEncryption: true, updateMetadata: false });
       }
-      const fontBytes = elements.some((element) => element.kind === "text") ? await this.plugin.loadAnnotationFontBytes() : null;
+      const fontBytes = elements.some((element) => element.kind === "text" && element.presentation !== "comment") ? await this.plugin.loadAnnotationFontBytes() : null;
       await drawVisibleInkElementsOnPdf(pdf, elements, fontBytes);
 
       const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
@@ -7356,18 +7733,16 @@ class InkSession {
     ctx.save();
     ctx.scale(scaleX, scaleY);
 
-    for (const cover of elements.filter((element): element is InkCover => element.kind === "cover")) {
-      drawCoverElement(ctx, cover, overlay.cssWidth, overlay.cssHeight, false);
-    }
-    if (mode === "all") {
-      for (const image of elements.filter((element): element is InkImage => element.kind === "image")) {
-        await drawImageDataUrl(ctx, image, overlay.cssWidth, overlay.cssHeight);
-      }
-      for (const stroke of elements.filter((element): element is InkStroke => element.kind === "stroke")) {
-        drawStroke(ctx, stroke, overlay.cssWidth, overlay.cssHeight, false);
-      }
-      for (const text of elements.filter((element): element is InkText => element.kind === "text")) {
-        drawTextElement(ctx, text, overlay.cssWidth, overlay.cssHeight, false);
+    normalizeInkElementLayers(elements);
+    for (const element of elements.sort(compareInkElements)) {
+      if (element.kind === "cover") {
+        drawCoverElement(ctx, element, overlay.cssWidth, overlay.cssHeight, false);
+      } else if (mode === "all" && element.kind === "image") {
+        await drawImageDataUrl(ctx, element, overlay.cssWidth, overlay.cssHeight);
+      } else if (mode === "all" && element.kind === "stroke") {
+        drawStroke(ctx, element, overlay.cssWidth, overlay.cssHeight, false);
+      } else if (mode === "all" && element.kind === "text") {
+        drawTextElement(ctx, element, overlay.cssWidth, overlay.cssHeight, false);
       }
     }
 
@@ -7396,22 +7771,27 @@ class InkSession {
   }
 
   private findElementAt(overlay: PageOverlay, point: InkPoint): InkElement | null {
-    const text = this.findTextElementAt(overlay, point);
-    if (text) {
-      return text;
+    const ordered = this.getEditableElements().filter((element) => element.pageIndex === overlay.pageIndex).reverse();
+    for (const element of ordered) {
+      if (element.kind === "text" && textBoxContainsPoint(element, point, overlay.cssWidth, overlay.cssHeight)) {
+        return element;
+      }
+      if (element.kind === "image" && imageBoxContainsPoint(element, point)) {
+        return element;
+      }
+      if (element.kind === "stroke" && strokeBoxContainsPoint(element, point, overlay.cssWidth, overlay.cssHeight)) {
+        return element;
+      }
+      if (element.kind === "cover" && coverBoxContainsPoint(element, point)) {
+        return element;
+      }
     }
-
-    const image = this.findImageElementAt(overlay, point);
-    if (image) {
-      return image;
-    }
-
-    return this.findStrokeElementAt(overlay, point);
+    return null;
   }
 
   private findCoverElementAt(overlay: PageOverlay, point: InkPoint, includeNativeTextCover = true): InkCover | null {
-    for (let i = this.coverHistory.length - 1; i >= 0; i -= 1) {
-      const cover = this.coverHistory[i];
+    const covers = this.getEditableElements().filter((element): element is InkCover => element.kind === "cover").reverse();
+    for (const cover of covers) {
       if (cover.pageIndex !== overlay.pageIndex) {
         continue;
       }
@@ -7426,69 +7806,19 @@ class InkSession {
     return null;
   }
 
-  private findTextElementAt(overlay: PageOverlay, point: InkPoint): InkText | null {
-    for (let i = this.textHistory.length - 1; i >= 0; i -= 1) {
-      const text = this.textHistory[i];
-      if (text.pageIndex !== overlay.pageIndex) {
-        continue;
-      }
-      if (textBoxContainsPoint(text, point, overlay.cssWidth, overlay.cssHeight)) {
-        return text;
-      }
-    }
-
-    return null;
-  }
-
-  private findStrokeElementAt(overlay: PageOverlay, point: InkPoint): InkStroke | null {
-    for (let i = this.strokeHistory.length - 1; i >= 0; i -= 1) {
-      const stroke = this.strokeHistory[i];
-      if (stroke.pageIndex !== overlay.pageIndex) {
-        continue;
-      }
-      if (strokeBoxContainsPoint(stroke, point, overlay.cssWidth, overlay.cssHeight)) {
-        return stroke;
-      }
-    }
-    return null;
-  }
-
-  private findImageElementAt(overlay: PageOverlay, point: InkPoint): InkImage | null {
-    for (let i = this.imageHistory.length - 1; i >= 0; i -= 1) {
-      const image = this.imageHistory[i];
-      if (image.pageIndex !== overlay.pageIndex) {
-        continue;
-      }
-      if (imageBoxContainsPoint(image, point)) {
-        return image;
-      }
-    }
-    return null;
-  }
-
   private findElementsInSelection(overlay: PageOverlay, start: InkPoint, end: InkPoint): InkElement[] {
-    const strokes = this.strokeHistory.filter((stroke) => {
-      if (stroke.pageIndex !== overlay.pageIndex) {
+    return this.getEditableElements().filter((element) => {
+      if (element.pageIndex !== overlay.pageIndex) {
         return false;
       }
-      return strokeIntersectsSelection(stroke, start, end, overlay.cssWidth, overlay.cssHeight);
-    });
-
-    const texts = this.textHistory.filter((text) => {
-      if (text.pageIndex !== overlay.pageIndex) {
-        return false;
+      if (element.kind === "stroke") {
+        return strokeIntersectsSelection(element, start, end, overlay.cssWidth, overlay.cssHeight);
       }
-      return textIntersectsSelection(text, start, end, overlay.cssWidth, overlay.cssHeight);
-    });
-
-    const images = this.imageHistory.filter((image) => {
-      if (image.pageIndex !== overlay.pageIndex) {
-        return false;
+      if (element.kind === "text") {
+        return textIntersectsSelection(element, start, end, overlay.cssWidth, overlay.cssHeight);
       }
-      return imageIntersectsSelection(image, start, end);
+      return coverIntersectsSelection(element, start, end);
     });
-
-    return [...strokes, ...texts, ...images];
   }
 
   private findNativeObjectAt(overlay: PageOverlay, point: InkPoint): PdfNativeObject | null {
@@ -8339,7 +8669,66 @@ class InkSession {
   }
 
   private getEditableElements(): InkElement[] {
-    return [...this.strokeHistory, ...this.textHistory, ...this.coverHistory, ...this.imageHistory];
+    const elements = [...this.strokeHistory, ...this.textHistory, ...this.coverHistory, ...this.imageHistory];
+    normalizeInkElementLayers(elements);
+    return elements.sort(compareInkElements);
+  }
+
+  private getNextLayerIndex(pageIndex: number): number {
+    const layers = this.getEditableElements()
+      .filter((element) => element.pageIndex === pageIndex)
+      .map((element) => element.zIndex ?? 0);
+    return (layers.length > 0 ? Math.max(...layers) : 0) + 1;
+  }
+
+  private reorderSelectedLayers(mode: "up" | "down" | "top" | "bottom"): void {
+    const selected = this.getSelectedEditableElements();
+    if (selected.length === 0) {
+      return;
+    }
+    this.rememberHistory();
+    const selectedIds = new Set(selected.map((element) => element.id));
+    const pages = new Set(selected.map((element) => element.pageIndex));
+
+    for (const pageIndex of pages) {
+      const ordered = this.getEditableElements().filter((element) => element.pageIndex === pageIndex);
+      let next = [...ordered];
+      if (mode === "top") {
+        next = [
+          ...ordered.filter((element) => !selectedIds.has(element.id)),
+          ...ordered.filter((element) => selectedIds.has(element.id))
+        ];
+      } else if (mode === "bottom") {
+        next = [
+          ...ordered.filter((element) => selectedIds.has(element.id)),
+          ...ordered.filter((element) => !selectedIds.has(element.id))
+        ];
+      } else if (mode === "up") {
+        for (let index = next.length - 2; index >= 0; index -= 1) {
+          if (selectedIds.has(next[index].id) && !selectedIds.has(next[index + 1].id)) {
+            [next[index], next[index + 1]] = [next[index + 1], next[index]];
+          }
+        }
+      } else {
+        for (let index = 1; index < next.length; index += 1) {
+          if (selectedIds.has(next[index].id) && !selectedIds.has(next[index - 1].id)) {
+            [next[index], next[index - 1]] = [next[index - 1], next[index]];
+          }
+        }
+      }
+
+      next.forEach((element, index) => {
+        if (element.zIndex !== index + 1) {
+          element.zIndex = index + 1;
+          element.saved = false;
+        }
+      });
+    }
+
+    this.markDirty();
+    this.redrawAll();
+    this.refreshCommentManager();
+    this.scheduleAutoSave();
   }
 
   private createHistorySnapshot(): HistorySnapshot {
@@ -8364,6 +8753,7 @@ class InkSession {
     this.selectionDrag = null;
     this.dirty = true;
     this.redrawAll();
+    this.refreshCommentManager();
     this.scheduleAutoSave();
   }
 
@@ -8443,8 +8833,11 @@ class InkSession {
     element.saved = false;
     if (element.kind === "stroke") {
       this.markInkPageDirty(element.pageIndex);
-      if (element.pdfSaved === true && !element.pdfPoints) {
-        element.pdfPoints = element.points.map((point) => ({ ...point }));
+      if (element.pdfSaved === true) {
+        if (!element.pdfPoints) {
+          element.pdfPoints = element.points.map((point) => ({ ...point }));
+        }
+        this.pendingNativeInkHidePages.add(element.pageIndex);
         this.updateExternalInkLayerState();
       }
       if (element.source === "external-ink") {
@@ -8662,6 +9055,7 @@ class InkSession {
     if (count > 0) {
       this.markDirty();
       this.redrawAll();
+      this.refreshCommentManager();
       this.scheduleAutoSave();
     }
     return count;
@@ -8681,6 +9075,7 @@ class InkSession {
     if (count > 0) {
       this.markDirty();
       this.redrawAll();
+      this.refreshCommentManager();
       this.scheduleAutoSave();
     }
     return count;
@@ -9423,12 +9818,8 @@ function drawStrokeAsPdfLines(page: ReturnType<PDFDocument["getPage"]>, stroke: 
 async function drawVisibleInkElementsOnPdf(pdf: PDFDocument, elements: InkElement[], fontBytes: Uint8Array | null): Promise<void> {
   const pages = pdf.getPages();
   const font = fontBytes ? await embedAnnotationFont(pdf, fontBytes) : null;
-  const orderedElements = [
-    ...elements.filter((element): element is InkCover => element.kind === "cover"),
-    ...elements.filter((element): element is InkImage => element.kind === "image"),
-    ...elements.filter((element): element is InkStroke => element.kind === "stroke"),
-    ...elements.filter((element): element is InkText => element.kind === "text")
-  ];
+  normalizeInkElementLayers(elements);
+  const orderedElements = elements.sort(compareInkElements);
 
   for (const element of orderedElements) {
     const page = pages[element.pageIndex];
@@ -9482,6 +9873,11 @@ async function drawVisibleInkElementsOnPdf(pdf: PDFDocument, elements: InkElemen
         x: element.x * size.width,
         y: size.height - (element.y + element.height) * size.height
       });
+      continue;
+    }
+
+    if (element.presentation === "comment") {
+      addStandardTextCommentAnnotation(pdf, page, element, size.width, size.height);
       continue;
     }
 
@@ -9541,7 +9937,8 @@ async function trySharePdf(fileName: string, bytes: Uint8Array): Promise<boolean
 
 function formatElementForMarkdown(element: InkElement): string {
   if (element.kind === "text") {
-    return `Text (${element.id}): ${element.text.replace(/\s+/g, " ")}; x=${element.x.toFixed(3)}, y=${element.y.toFixed(3)}, size=${element.fontSize}`;
+    const type = element.presentation === "comment" ? "Comment" : "Text";
+    return `${type} (${element.id}): ${element.text.replace(/\s+/g, " ")}; x=${element.x.toFixed(3)}, y=${element.y.toFixed(3)}, size=${element.fontSize}, layer=${element.zIndex ?? 0}`;
   }
   if (element.kind === "stroke") {
     return `Stroke (${element.id}): ${element.points.length} points, color ${element.color}, width ${element.width}`;
@@ -9684,7 +10081,19 @@ function sleepMs(ms: number): Promise<void> {
 }
 
 function waitForNextFrame(): Promise<void> {
-  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = window.setTimeout(finish, 120);
+    window.requestAnimationFrame(finish);
+  });
 }
 
 function loadDataUrlImage(dataUrl: string): Promise<HTMLImageElement> {
@@ -9945,7 +10354,8 @@ function getNoteDrawWriteApi(): NoteDrawWriteApi | null {
 function buildNoteDrawExportData(
   sourcePath: string,
   pages: Array<Pick<VisualConversionPage, "height" | "pageIndex" | "width">>,
-  elements: InkElement[]
+  elements: InkElement[],
+  images: NoteDrawExportImage[] = []
 ): NoteDrawExportData {
   const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
   const logicalWidth = 1000;
@@ -9960,8 +10370,18 @@ function buildNoteDrawExportData(
   const totalHeight = Math.max(1, top - (sortedPages.length > 0 ? logicalGap : 0));
   const exported: NoteDrawExportStroke[] = [];
 
-  for (const element of elements) {
-    const layout = layouts.get(element.pageIndex);
+  const orderedItems: Array<
+    | { element: InkStroke; kind: "stroke"; pageIndex: number; zIndex: number }
+    | { image: NoteDrawExportImage; kind: "image"; pageIndex: number; zIndex: number }
+  > = [
+    ...elements
+      .filter((element): element is InkStroke => element.kind === "stroke" && element.points.length > 0)
+      .map((element) => ({ element, kind: "stroke" as const, pageIndex: element.pageIndex, zIndex: element.zIndex ?? 0 })),
+    ...images.map((image) => ({ image, kind: "image" as const, pageIndex: image.pageIndex, zIndex: image.zIndex ?? 0 }))
+  ].sort((a, b) => (a.pageIndex - b.pageIndex) || (a.zIndex - b.zIndex));
+
+  for (const item of orderedItems) {
+    const layout = layouts.get(item.pageIndex);
     if (!layout) {
       continue;
     }
@@ -9971,7 +10391,8 @@ function buildNoteDrawExportData(
       y: clamp((layout.top + point.y * layout.height) / totalHeight, 0, 1)
     });
 
-    if (element.kind === "stroke" && element.points.length > 0) {
+    if (item.kind === "stroke") {
+      const element = item.element;
       const createdAt = element.createdAt ?? Date.now();
       exported.push({
         brush: element.tool === "highlight" ? "watercolor" : "pen",
@@ -9981,25 +10402,32 @@ function buildNoteDrawExportData(
         points: element.points.map((point, index) => mapPoint(point, createdAt + index)),
         width: clamp(element.width, 0.5, 80)
       });
-    } else if (element.kind === "image") {
-      const extension = dataUrlImageExtension(element.dataUrl);
-      exported.push({
-        assetMime: dataUrlMimeType(element.dataUrl),
-        assetName: `pdftion-image-${element.id}.${extension}`,
-        brush: "pen",
-        color: "#1971c2",
-        count: 1,
-        embedType: "image",
-        exportImageDataUrl: element.dataUrl,
-        kind: "embed",
-        opacity: element.opacity,
-        points: [mapPoint({ x: element.x, y: element.y }, Date.now())],
-        previewHeight: Math.max(40, element.height * layout.height),
-        previewWidth: Math.max(80, element.width * logicalWidth),
-        text: `Pdftion image ${element.id}`,
-        width: 3
-      });
+      continue;
     }
+
+    const image = item.image;
+    exported.push({
+      assetMime: image.assetMime,
+      assetName: image.assetName,
+      assetPath: image.assetPath,
+      assetSize: image.assetSize,
+      brush: "pen",
+      color: "#1971c2",
+      count: 1,
+      embedType: "image",
+      exportImageDataUrl: image.dataUrl,
+      kind: "embed",
+      opacity: image.opacity,
+      points: [{
+        t: Date.now(),
+        x: clamp(image.x, 0, 1),
+        y: clamp((layout.top + image.y * layout.height) / totalHeight, 0, 1)
+      }],
+      previewHeight: Math.max(40, image.height * layout.height),
+      previewWidth: Math.max(80, image.width * logicalWidth),
+      text: image.assetName,
+      width: 3
+    });
   }
 
   return {
@@ -10009,6 +10437,75 @@ function buildNoteDrawExportData(
     visible: true,
     webEdits: []
   };
+}
+
+function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: InkElement[]): NoteDrawExportImage[] {
+  const images: NoteDrawExportImage[] = elements
+    .filter((element): element is InkImage => element.kind === "image")
+    .map((image) => ({
+      assetMime: dataUrlMimeType(image.dataUrl),
+      assetName: `pdftion-image-${image.id}.${dataUrlImageExtension(image.dataUrl)}`,
+      dataUrl: image.dataUrl,
+      height: image.height,
+      id: image.id,
+      opacity: image.opacity,
+      pageIndex: image.pageIndex,
+      width: image.width,
+      x: image.x,
+      y: image.y,
+      zIndex: image.zIndex
+    }));
+
+  for (const page of pages) {
+    if (page.lines.length > 0 || page.sourceVisualRatio < 0.045) {
+      continue;
+    }
+    images.push({
+      assetMime: "image/png",
+      assetName: `pdf-page-${page.pageIndex + 1}.png`,
+      dataUrl: uint8ArrayToDataUrl(page.bytes, "image/png"),
+      height: 1,
+      id: `native-page-${page.pageIndex + 1}`,
+      opacity: 1,
+      pageIndex: page.pageIndex,
+      width: 1,
+      x: 0,
+      y: 0,
+      zIndex: 0
+    });
+  }
+  return images;
+}
+
+function sanitizeNoteDrawAssetName(value: string): string {
+  const normalized = value
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/\s+/g, "-")
+    .replace(/_+/g, "_")
+    .replace(/-+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "");
+  return (normalized || "pdftion-image").slice(-120);
+}
+
+function measureCanvasVisualRatio(canvas: HTMLCanvasElement): number {
+  const sample = activeDocument.createElement("canvas");
+  sample.width = 48;
+  sample.height = 48;
+  const ctx = sample.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    return 0;
+  }
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, sample.width, sample.height);
+  ctx.drawImage(canvas, 0, 0, sample.width, sample.height);
+  const pixels = ctx.getImageData(0, 0, sample.width, sample.height).data;
+  let visual = 0;
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    if (pixels[offset + 3] > 16 && (pixels[offset] < 245 || pixels[offset + 1] < 245 || pixels[offset + 2] < 245)) {
+      visual += 1;
+    }
+  }
+  return visual / Math.max(1, pixels.length / 4);
 }
 
 async function buildCombinedPagePng(pages: VisualConversionPage[]): Promise<Uint8Array> {
@@ -10148,40 +10645,51 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   const mediaFiles: Array<{ data: Uint8Array; name: string }> = [];
   const rels: string[] = [];
   let relId = 1;
+  let drawingId = 1;
+  let mediaId = 1;
   const body: string[] = [];
   const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
+  const contentWidthTwips = 11906 - 1440;
+  const contentHeightTwips = 16838 - 1440;
 
-  for (const [index, page] of sortedPages.entries()) {
-    const imageName = `image${page.pageIndex + 1}.png`;
-    mediaFiles.push({ name: `word/media/${imageName}`, data: page.bytes });
+  const addImage = (bytes: Uint8Array, extension: string): string => {
+    const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
+    const imageName = `image${mediaId}.${safeExtension}`;
+    mediaId += 1;
+    mediaFiles.push({ name: `word/media/${imageName}`, data: bytes });
     const imageRelId = `rId${relId}`;
     relId += 1;
     rels.push(`<Relationship Id="${imageRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${imageName}"/>`);
+    return imageRelId;
+  };
 
-    const widthPx = Math.max(1, page.width);
-    const heightPx = Math.max(1, page.height);
-    const rawWidthEmu = Math.max(914400, Math.round(widthPx * 9525));
-    const rawHeightEmu = Math.max(914400, Math.round(heightPx * 9525));
-    const scale = Math.min(1, 6600000 / rawWidthEmu);
-    const widthEmu = Math.round(rawWidthEmu * scale);
-    const heightEmu = Math.round(rawHeightEmu * scale);
-
-    const textLayer = buildDocxTextLayer(page, widthEmu, heightEmu);
-    const drawing = `<w:p><w:pPr><w:jc w:val="center"/><w:keepNext/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${page.pageIndex + 1}" name="${xmlEscape(title)} page ${page.pageIndex + 1}"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${page.pageIndex + 1}" name="Page ${page.pageIndex + 1}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${imageRelId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>${textLayer}</w:p>`;
-    body.push(drawing);
+  for (const [index, page] of sortedPages.entries()) {
+    const imageRelId = addImage(page.bytes, "png");
+    const fitted = fitDocxImage(page.width * 15, page.height * 15, contentWidthTwips, contentHeightTwips);
+    const leftTwips = Math.max(0, Math.round((contentWidthTwips - fitted.widthTwips) / 2));
+    body.push(buildDocxVisualPageParagraph(
+      page,
+      imageRelId,
+      fitted.widthTwips,
+      fitted.heightTwips,
+      drawingId,
+      `${title} page ${page.pageIndex + 1}`,
+      leftTwips
+    ));
+    drawingId += 1;
     if (index < sortedPages.length - 1) {
       body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
     }
   }
 
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="gif" ContentType="image/gif"/><Default Extension="webp" ContentType="image/webp"/><Default Extension="svg" ContentType="image/svg+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>`;
   const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`;
   const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>`;
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
   const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
   const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.83</AppVersion></Properties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.84</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
@@ -10196,33 +10704,61 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   ]);
 }
 
-function buildDocxTextLayer(page: VisualConversionPage, widthEmu: number, heightEmu: number): string {
-  const pageWidthPt = 11906 / 20;
-  const imageWidthPt = widthEmu / 12700;
-  const imageHeightPt = heightEmu / 12700;
-  const imageLeftPt = (pageWidthPt - imageWidthPt) / 2;
-  const imageTopPt = 36;
+function buildDocxVisualPageParagraph(
+  page: VisualConversionPage,
+  relId: string,
+  widthTwips: number,
+  heightTwips: number,
+  drawingId: number,
+  name: string,
+  leftTwips: number
+): string {
+  const widthEmu = Math.max(635, Math.round(widthTwips * 635));
+  const heightEmu = Math.max(635, Math.round(heightTwips * 635));
+  const safeName = xmlEscape(name || `Image ${drawingId}`);
+  const textLayer = buildDocxAbsoluteTextLayer(page, widthTwips, heightTwips, leftTwips, 0);
+  return `<w:p><w:pPr><w:ind w:left="${Math.max(0, leftTwips)}"/><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${drawingId}" name="${safeName}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${safeName}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>${textLayer}</w:p>`;
+}
+
+function buildDocxAbsoluteTextLayer(
+  page: VisualConversionPage,
+  widthTwips: number,
+  heightTwips: number,
+  leftTwips: number,
+  topTwips: number
+): string {
   return page.lines.map((line, lineIndex) => {
     const runs = line.runs.map((run) => {
+      const font = xmlEscape(exportFontFace(run.fontFamily));
+      const size = Math.max(2, Math.round(run.fontSize * 1.5));
       const rPr = [
-        "<w:vanish/>",
         run.bold ? "<w:b/>" : "",
         run.italic ? "<w:i/>" : "",
         run.strike ? "<w:strike/>" : "",
         run.underline ? "<w:u w:val=\"single\"/>" : "",
-        `<w:color w:val=\"${exportHexColor(run.color)}\"/>`,
-        `<w:sz w:val=\"${Math.max(2, Math.round(run.fontSize * 1.5))}\"/>`,
-        `<w:rFonts w:ascii=\"${xmlEscape(exportFontFace(run.fontFamily))}\" w:hAnsi=\"${xmlEscape(exportFontFace(run.fontFamily))}\"/>`
+        `<w:color w:val="${exportHexColor(run.color)}"/>`,
+        `<w:sz w:val="${size}"/><w:szCs w:val="${size}"/>`,
+        `<w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:eastAsia="${font}"/>`
       ].filter(Boolean).join("");
-      return `<w:r><w:rPr>${rPr}</w:rPr><w:t xml:space=\"preserve\">${xmlEscape(run.text)}</w:t></w:r>`;
+      return `<w:r><w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${xmlEscape(run.text)}</w:t></w:r>`;
     }).join("");
-    const left = imageLeftPt + line.left * imageWidthPt;
-    const top = imageTopPt + line.top * imageHeightPt;
-    const width = Math.max(1, line.width * imageWidthPt);
-    const height = Math.max(1, line.height * imageHeightPt * 1.2);
+    const leftPt = (leftTwips + line.left * widthTwips) / 20;
+    const topPt = (topTwips + line.top * heightTwips) / 20;
+    const widthPt = Math.max(1, line.width * widthTwips / 20);
+    const heightPt = Math.max(1, line.height * heightTwips / 20);
     const shapeId = `_x0000_s${page.pageIndex + 1}${String(lineIndex + 1).padStart(4, "0")}`;
-    return `<w:r><w:pict><v:shape id=\"${shapeId}\" o:spt=\"202\" filled=\"f\" stroked=\"f\" style=\"position:absolute;margin-left:${left.toFixed(2)}pt;margin-top:${top.toFixed(2)}pt;width:${width.toFixed(2)}pt;height:${height.toFixed(2)}pt;z-index:251659264;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-distance-left:0;mso-wrap-distance-top:0;mso-wrap-distance-right:0;mso-wrap-distance-bottom:0\"><v:textbox inset=\"0,0,0,0\"><w:txbxContent><w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"1\"/></w:pPr>${runs}</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+    return `<w:r><w:pict><v:shape id="${shapeId}" o:spt="202" filled="f" stroked="f" style="position:absolute;margin-left:${leftPt.toFixed(2)}pt;margin-top:${topPt.toFixed(2)}pt;width:${widthPt.toFixed(2)}pt;height:${heightPt.toFixed(2)}pt;z-index:251659264;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-distance-left:0;mso-wrap-distance-top:0;mso-wrap-distance-right:0;mso-wrap-distance-bottom:0"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1"/></w:pPr>${runs}</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
   }).join("");
+}
+
+function fitDocxImage(width: number, height: number, maxWidthTwips: number, maxHeightTwips: number): { heightTwips: number; widthTwips: number } {
+  const sourceWidth = Math.max(1, width);
+  const sourceHeight = Math.max(1, height);
+  const scale = Math.min(1, maxWidthTwips / sourceWidth, maxHeightTwips / sourceHeight);
+  return {
+    heightTwips: Math.max(1, Math.round(sourceHeight * scale)),
+    widthTwips: Math.max(1, Math.round(sourceWidth * scale))
+  };
 }
 
 function exportHexColor(value: string): string {
@@ -10610,17 +11146,41 @@ function strokeDisplayWidth(stroke: InkStroke, cssWidth: number): number {
 }
 
 function drawTextElement(ctx: CanvasRenderingContext2D, text: InkText, cssWidth: number, cssHeight: number, selected = false): void {
-  const lines = text.text.split(/\r?\n/);
   ctx.save();
   ctx.globalAlpha = selected ? Math.max(0.14, text.opacity * 0.38) : text.opacity;
+  const x = text.x * cssWidth;
+  const y = text.y * cssHeight;
+  if (text.presentation === "comment") {
+    const size = clamp(text.fontSize * 1.65, 22, 32);
+    const radius = size * 0.42;
+    const centerX = x + radius;
+    const centerY = y + radius;
+    ctx.fillStyle = text.color;
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x + size * 0.28, y + size * 0.72);
+    ctx.lineTo(x + size * 0.18, y + size);
+    ctx.lineTo(x + size * 0.52, y + size * 0.78);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = selected ? 0.7 : 0.94;
+    ctx.fillStyle = readableTextColor(text.color);
+    for (let index = 0; index < 3; index += 1) {
+      ctx.fillRect(x + size * 0.28, y + size * (0.29 + index * 0.16), size * (index === 2 ? 0.3 : 0.46), Math.max(1.5, size * 0.055));
+    }
+    ctx.restore();
+    return;
+  }
+  const lines = text.text.split(/\r?\n/);
   ctx.fillStyle = text.color;
   ctx.font = `${text.fontSize}px ${text.fontFamily ?? "sans-serif"}`;
   ctx.textBaseline = "top";
-  const x = text.x * cssWidth;
-  let y = text.y * cssHeight;
+  let lineY = y;
   for (const line of lines) {
-    ctx.fillText(line, x, y);
-    y += text.fontSize * 1.2;
+    ctx.fillText(line, x, lineY);
+    lineY += text.fontSize * 1.2;
   }
   ctx.restore();
 }
@@ -10841,6 +11401,12 @@ function strokeBounds(
 }
 
 function textBounds(text: InkText, cssWidth: number, cssHeight: number): { maxX: number; maxY: number; minX: number; minY: number } {
+  if (text.presentation === "comment") {
+    const size = clamp(text.fontSize * 1.65, 22, 32);
+    const minX = text.x * cssWidth;
+    const minY = text.y * cssHeight;
+    return { maxX: minX + size, maxY: minY + size, minX, minY };
+  }
   const lines = text.text.split(/\r?\n/);
   const maxChars = Math.max(1, ...lines.map((line) => line.length));
   const width = Math.max(text.fontSize, maxChars * text.fontSize * 0.58);
@@ -10968,6 +11534,97 @@ function cloneElement(element: InkElement): InkElement {
   return element.kind === "stroke" ? cloneStroke(element) : { ...element };
 }
 
+function legacyInkLayerRank(element: InkElement): number {
+  if (element.kind === "cover") {
+    return 0;
+  }
+  if (element.kind === "image") {
+    return 1;
+  }
+  if (element.kind === "stroke") {
+    return 2;
+  }
+  return 3;
+}
+
+function compareInkElements(a: InkElement, b: InkElement): number {
+  return (
+    (a.pageIndex - b.pageIndex) ||
+    ((a.zIndex ?? Number.MAX_SAFE_INTEGER) - (b.zIndex ?? Number.MAX_SAFE_INTEGER)) ||
+    (legacyInkLayerRank(a) - legacyInkLayerRank(b)) ||
+    a.id.localeCompare(b.id)
+  );
+}
+
+function normalizeInkElementLayers(elements: InkElement[]): void {
+  const pages = new Map<number, Array<{ element: InkElement; index: number }>>();
+  elements.forEach((element, index) => {
+    const page = pages.get(element.pageIndex) ?? [];
+    page.push({ element, index });
+    pages.set(element.pageIndex, page);
+  });
+
+  for (const page of pages.values()) {
+    const hasStoredLayers = page.some(({ element }) => Number.isFinite(element.zIndex));
+    if (hasStoredLayers) {
+      let nextLayer = page.reduce((max, { element }) => Math.max(max, Number.isFinite(element.zIndex) ? element.zIndex ?? 0 : 0), 0) + 1;
+      for (const item of page) {
+        if (!Number.isFinite(item.element.zIndex)) {
+          item.element.zIndex = nextLayer;
+          nextLayer += 1;
+        }
+      }
+      page.sort((a, b) => ((a.element.zIndex ?? 0) - (b.element.zIndex ?? 0)) || (a.index - b.index));
+    } else {
+      page.sort((a, b) => (legacyInkLayerRank(a.element) - legacyInkLayerRank(b.element)) || (a.index - b.index));
+    }
+    page.forEach(({ element }, index) => {
+      element.zIndex = index + 1;
+    });
+  }
+}
+
+function addStandardTextCommentAnnotation(
+  pdf: PDFDocument,
+  page: ReturnType<PDFDocument["getPage"]>,
+  comment: InkText,
+  pageWidth: number,
+  pageHeight: number
+): void {
+  const iconSize = Math.max(16, Math.min(28, comment.fontSize * 1.65)) * (pageWidth / Math.max(1, comment.pageCssWidth));
+  const x = comment.x * pageWidth;
+  const y = pageHeight - comment.y * pageHeight;
+  const annotation = pdf.context.obj({
+    C: pdf.context.obj([hexToRgb(comment.color).r, hexToRgb(comment.color).g, hexToRgb(comment.color).b]),
+    Contents: PDFHexString.fromText(comment.text),
+    F: PDFNumber.of(4),
+    M: PDFHexString.fromText(new Date(comment.createdAt ?? Date.now()).toISOString()),
+    Name: PDFName.of("Comment"),
+    NM: PDFHexString.fromText(`PdftionComment:${comment.id}`),
+    Open: false,
+    Rect: pdf.context.obj([x, Math.max(0, y - iconSize), Math.min(pageWidth, x + iconSize), Math.min(pageHeight, y)]),
+    Subtype: PDFName.of("Text"),
+    T: PDFHexString.fromText("Pdftion"),
+    Type: PDFName.of("Annot")
+  });
+  const annotationRef = pdf.context.register(annotation);
+  const pageNode = page.node as unknown as {
+    addAnnot?: (annotRef: unknown) => void;
+    Annots?: () => PDFArray | undefined;
+    set: (key: PDFName, value: PDFArray) => void;
+  };
+  if (typeof pageNode.addAnnot === "function") {
+    pageNode.addAnnot(annotationRef);
+    return;
+  }
+  let annots = pageNode.Annots?.();
+  if (!annots) {
+    annots = pdf.context.obj([]);
+    pageNode.set(PDFName.of("Annots"), annots);
+  }
+  annots.push(annotationRef);
+}
+
 function inkStrokesEquivalentForPdf(a: InkStroke, b: InkStroke): boolean {
   return (
     a.pageIndex === b.pageIndex &&
@@ -11034,6 +11691,15 @@ function strokesAreVisuallyConnected(
 }
 
 function normalizedTextBounds(text: InkText): NormalizedBounds {
+  if (text.presentation === "comment") {
+    const size = clamp(text.fontSize * 1.65, 22, 32);
+    return {
+      maxX: text.x + size / Math.max(1, text.pageCssWidth),
+      maxY: text.y + size / Math.max(1, text.pageCssHeight),
+      minX: text.x,
+      minY: text.y
+    };
+  }
   const lines = text.text.split(/\r?\n/);
   const maxChars = Math.max(1, ...lines.map((line) => line.length));
   const width = Math.max(text.fontSize, maxChars * text.fontSize * 0.58) / Math.max(1, text.pageCssWidth);
