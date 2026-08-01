@@ -1341,6 +1341,12 @@ interface EditableMarkdownPage {
   width: number;
 }
 
+interface EditableMarkdownSemanticSection {
+  baseLeft?: number;
+  kind: "emphasis" | "ordered" | "task" | "unordered";
+  nextOrdinal: number;
+}
+
 interface VisualCaptureOptions {
   includeCovers?: boolean;
   includeImages?: boolean;
@@ -8154,7 +8160,7 @@ class InkSession {
       const capturedPages = await this.captureVisualConversionPages();
       const pages = await buildMarkdownInlineVisualExportPages(capturedPages, this.getEditableElements());
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "docx");
-      const docx = buildDocxFromPageImages(pages, this.file.basename);
+      const docx = await buildDocxFromPageImages(pages, this.file.basename);
       const buffer = toArrayBufferCopy(docx);
       const targetFile = await this.plugin.app.vault.createBinary(targetPath, buffer);
       const opened = await this.openConvertedFile(targetFile);
@@ -11144,6 +11150,7 @@ function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[], image
   for (const [pagePosition, page] of pages.entries()) {
     output.push(`## ${uiText(`第 ${page.pageIndex + 1} 页`, `Page ${page.pageIndex + 1}`)}`, "");
     const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
+    let semanticSection: EditableMarkdownSemanticSection | null = null;
     const tables = detectEditableMarkdownTables(page.lines);
     const tableLines = new Set(tables.flatMap((table) => table.lines));
     const pageImages = images
@@ -11167,7 +11174,13 @@ function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[], image
         output.push(...renderEditableMarkdownTable(item.value, baseFontSize), "");
         continue;
       }
-      const rendered = renderEditableMarkdownLine(item.value, baseFontSize);
+      const lineText = item.value.runs.map((run) => run.text).join("").trim();
+      if (getEditableMarkdownHeadingLevel(item.value, baseFontSize, lineText) !== null) {
+        semanticSection = getEditableMarkdownSemanticSection(lineText);
+      } else if (semanticSection && typeof semanticSection.baseLeft !== "number") {
+        semanticSection.baseLeft = item.value.left;
+      }
+      const rendered = renderEditableMarkdownLine(item.value, baseFontSize, semanticSection);
       if (rendered) {
         output.push(rendered, "");
       }
@@ -11514,9 +11527,14 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
     .filter((line) => line.runs.some((run) => run.text.length > 0));
 }
 
-function renderEditableMarkdownLine(line: EditableMarkdownLine, baseFontSize: number): string {
+function renderEditableMarkdownLine(
+  line: EditableMarkdownLine,
+  baseFontSize: number,
+  semanticSection: EditableMarkdownSemanticSection | null = null
+): string {
   const text = line.runs.map((run) => run.text).join("").trim();
-  const task = text.match(/^(?:[☐□◻]\s*|[☑☒✅]\s*|未完成任务\s*|已完成任务\s*)/);
+  const taskMarker = text.match(/^[☐□◻☑☒✅]\s*/);
+  const inferredTask = /^(?:未完成任务|已完成任务)(?:\s|$)/.test(text) || semanticSection?.kind === "task";
   const bullet = text.match(/^[•●○▪]\s*/);
   const ordered = text.match(/^(\d+)[.、)]\s*/);
   const removePrefix = (prefix: string): EditableMarkdownTextRun[] => {
@@ -11533,21 +11551,79 @@ function renderEditableMarkdownLine(line: EditableMarkdownLine, baseFontSize: nu
       .filter((run) => run.text.length > 0);
   };
   const headingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text);
-  if (headingLevel !== null && !task && !bullet && !ordered) {
+  if (headingLevel !== null && !taskMarker && !bullet && !ordered) {
     const heading = line.runs.map((run) => renderEditableMarkdownRun(run, baseFontSize, true)).join("").trim();
     return `${"#".repeat(headingLevel)} ${heading || escapeMarkdownInline(text)}`;
   }
-  if (task) {
-    const checked = /已完成|☑|☒|✅/.test(task[0]);
-    return `- [${checked ? "x" : " "}] ${removePrefix(task[0]).map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
+  if (taskMarker || inferredTask) {
+    const checked = /^(?:已完成任务|[☑☒✅])/.test(text);
+    const runs = taskMarker ? removePrefix(taskMarker[0]) : line.runs;
+    return `- [${checked ? "x" : " "}] ${runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
   }
-  if (bullet) {
-    return `- ${removePrefix(bullet[0]).map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
+  if (bullet || semanticSection?.kind === "unordered") {
+    const runs = bullet ? removePrefix(bullet[0]) : line.runs;
+    const indent = getEditableMarkdownListIndent(line, semanticSection);
+    return `${indent}- ${runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
   }
-  if (ordered) {
-    return `${ordered[1]}. ${removePrefix(ordered[0]).map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
+  if (ordered || semanticSection?.kind === "ordered") {
+    const number = ordered ? Number.parseInt(ordered[1], 10) : semanticSection?.nextOrdinal ?? 1;
+    if (semanticSection?.kind === "ordered") {
+      semanticSection.nextOrdinal = Math.max(semanticSection.nextOrdinal + 1, number + 1);
+    }
+    const runs = ordered ? removePrefix(ordered[0]) : line.runs;
+    const indent = getEditableMarkdownListIndent(line, semanticSection);
+    return `${indent}${number}. ${runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
   }
-  return line.runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("") || escapeMarkdownInline(text);
+  const runs = applyEditableMarkdownSemanticStyles(line.runs, text, semanticSection);
+  return runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("") || escapeMarkdownInline(text);
+}
+
+function getEditableMarkdownSemanticSection(text: string): EditableMarkdownSemanticSection | null {
+  const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+  if (/无序列表|unordered\s+list/.test(normalized)) {
+    return { kind: "unordered", nextOrdinal: 1 };
+  }
+  if (/有序列表|ordered\s+list/.test(normalized)) {
+    return { kind: "ordered", nextOrdinal: 1 };
+  }
+  if (/任务列表|task\s+list/.test(normalized)) {
+    return { kind: "task", nextOrdinal: 1 };
+  }
+  if (/强调|emphasis/.test(normalized)) {
+    return { kind: "emphasis", nextOrdinal: 1 };
+  }
+  return null;
+}
+
+function getEditableMarkdownListIndent(
+  line: EditableMarkdownLine,
+  semanticSection: EditableMarkdownSemanticSection | null
+): string {
+  if (!semanticSection || typeof semanticSection.baseLeft !== "number") {
+    return "";
+  }
+  return line.left - semanticSection.baseLeft >= 0.035 ? "    " : "";
+}
+
+function applyEditableMarkdownSemanticStyles(
+  runs: EditableMarkdownTextRun[],
+  text: string,
+  semanticSection: EditableMarkdownSemanticSection | null
+): EditableMarkdownTextRun[] {
+  if (semanticSection?.kind !== "emphasis" || runs.some((run) => run.bold || run.italic || run.strike)) {
+    return runs;
+  }
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const style = /粗斜体|bold\s+italic/i.test(normalized)
+    ? { bold: true, italic: true, strike: false }
+    : /删除线|strikethrough|strike\s*through/i.test(normalized)
+      ? { bold: false, italic: false, strike: true }
+      : /粗体|\bbold\b/i.test(normalized)
+        ? { bold: true, italic: false, strike: false }
+        : /斜体|\bitalic\b/i.test(normalized)
+          ? { bold: false, italic: true, strike: false }
+          : null;
+  return style ? runs.map((run) => ({ ...run, ...style })) : runs;
 }
 
 function getEditableMarkdownHeadingLevel(
@@ -11560,13 +11636,13 @@ function getEditableMarkdownHeadingLevel(
   }
   const largestFontSize = Math.max(...line.runs.map((run) => run.fontSize), baseFontSize);
   const ratio = largestFontSize / baseFontSize;
-  if (ratio >= 1.23) {
+  if (ratio >= 1.55) {
     return 3;
   }
-  if (ratio >= 1.16) {
+  if (ratio >= 1.35) {
     return 4;
   }
-  if (ratio >= 1.09) {
+  if (ratio >= 1.16) {
     return 5;
   }
   return null;
@@ -11807,15 +11883,8 @@ async function buildMarkdownInlineVisualExportPages(
   pages: VisualConversionPage[],
   elements: InkElement[]
 ): Promise<VisualConversionPage[]> {
-  const editablePages: EditableMarkdownPage[] = pages.map((page) => ({
-    height: page.height,
-    lines: page.lines,
-    pageIndex: page.pageIndex,
-    width: page.width
-  }));
   const extractedImages = collectNoteDrawExportImages(pages, elements).filter(isUsefulMarkdownExportImage);
-  const inlineImages = partitionMarkdownExportImages(editablePages, extractedImages).inline;
-  const visibleImages = await Promise.all(inlineImages.map(async (image) => ({
+  const visibleImages = await Promise.all(extractedImages.map(async (image) => ({
     ...image,
     dataUrl: await flattenImageDataUrlOnWhite(image.dataUrl, image.opacity),
     opacity: 1
@@ -12241,226 +12310,171 @@ function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}.page-surface{position:relative}.page-surface>img{display:block;height:auto;width:100%}.text-layer{inset:0;overflow:hidden;position:absolute;user-select:text;-webkit-user-select:text}.text-line{line-height:1;position:absolute;white-space:pre;user-select:text;-webkit-user-select:text}.text-line span,.text-line a{cursor:text;user-select:text;-webkit-user-select:text}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}.text-layer{display:none}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
 }
 
-function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Uint8Array {
-  const mediaFiles: Array<{ data: Uint8Array; name: string }> = [];
-  const rels: string[] = [];
-  let relId = 1;
-  let drawingId = 1;
-  let mediaId = 1;
-  const body: string[] = [];
-  const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
+async function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Promise<Uint8Array> {
+  const {
+    AlignmentType,
+    Document,
+    ExternalHyperlink,
+    ImageRun,
+    Packer,
+    Paragraph,
+    ShadingType,
+    Table,
+    TableCell,
+    TableRow,
+    TextRun,
+    UnderlineType,
+    VerticalAlign,
+    WidthType
+  } = await import("docx");
+  const pageWidthTwips = 11906;
+  const pageHeightTwips = 16838;
   const pageMarginTwips = 360;
-  const contentWidthTwips = 11906 - pageMarginTwips * 2;
-  const contentHeightTwips = 16838 - pageMarginTwips * 2;
+  const contentWidthTwips = pageWidthTwips - pageMarginTwips * 2;
+  const contentHeightTwips = pageHeightTwips - pageMarginTwips * 2;
+  const contentWidthPx = contentWidthTwips / 15;
+  const contentHeightPx = contentHeightTwips / 15;
 
-  const addImage = (bytes: Uint8Array, extension: string): string => {
-    const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
-    const imageName = `image${mediaId}.${safeExtension}`;
-    mediaId += 1;
-    mediaFiles.push({ name: `word/media/${imageName}`, data: bytes });
-    const imageRelId = `rId${relId}`;
-    relId += 1;
-    rels.push(`<Relationship Id="${imageRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${imageName}"/>`);
-    return imageRelId;
+  const makeRuns = (runs: EditableMarkdownTextRun[], baseFontSize: number, forceBold = false) => runs.map((run) => {
+    const textRun = new TextRun({
+      bold: forceBold || run.bold,
+      color: exportHexColor(run.color),
+      font: exportFontFace(run.fontFamily),
+      italics: run.italic,
+      size: Math.max(18, Math.round(run.fontSize * 24 / Math.max(1, baseFontSize))),
+      strike: run.strike,
+      text: run.text,
+      underline: run.underline ? { type: UnderlineType.SINGLE } : undefined
+    });
+    const validLink = run.link && /^(?:https?:|mailto:)/i.test(run.link) ? run.link : null;
+    return validLink ? new ExternalHyperlink({ children: [textRun], link: validLink }) : textRun;
+  });
+
+  const fitImage = (width: number, height: number): { height: number; width: number } => {
+    const sourceWidth = Math.max(1, width);
+    const sourceHeight = Math.max(1, height);
+    const scale = Math.min(1, contentWidthPx / sourceWidth, contentHeightPx / sourceHeight);
+    return {
+      height: Math.max(1, Math.round(sourceHeight * scale)),
+      width: Math.max(1, Math.round(sourceWidth * scale))
+    };
   };
 
-  const addHyperlink = (url: string): string => {
-    const hyperlinkRelId = `rId${relId}`;
-    relId += 1;
-    rels.push(`<Relationship Id="${hyperlinkRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${xmlEscape(url)}" TargetMode="External"/>`);
-    return hyperlinkRelId;
-  };
+  const sections = [...pages]
+    .sort((a, b) => a.pageIndex - b.pageIndex)
+    .map((page) => {
+      const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
+      const tables = detectEditableMarkdownTables(page.lines);
+      const tableLines = new Set(tables.flatMap((table) => table.lines));
+      const horizontalOrigin = page.lines.length > 0 ? Math.min(...page.lines.map((line) => line.left)) : 0;
+      const flowItems: Array<
+        | { kind: "image"; position: number; value: VisualConversionImage }
+        | { kind: "line"; position: number; value: EditableMarkdownLine }
+        | { kind: "table"; position: number; value: EditableMarkdownTable }
+      > = [
+        ...page.lines.filter((line) => !tableLines.has(line)).map((line) => ({ kind: "line" as const, position: line.top, value: line })),
+        ...tables.map((table) => ({ kind: "table" as const, position: table.top, value: table })),
+        ...page.images.map((image) => ({ kind: "image" as const, position: image.y, value: image }))
+      ].sort((a, b) => (a.position - b.position) || (a.kind === "image" ? -1 : 1));
+      const children: Array<InstanceType<typeof Paragraph> | InstanceType<typeof Table>> = [];
+      let previousBottom = 0;
 
-  for (const [index, page] of sortedPages.entries()) {
-    const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
-    const tables = detectEditableMarkdownTables(page.lines);
-    const tableLines = new Set(tables.flatMap((table) => table.lines));
-    const horizontalOrigin = page.lines.length > 0 ? Math.min(...page.lines.map((line) => line.left)) : 0;
-    const flowItems: Array<
-      | { kind: "image"; position: number; value: VisualConversionImage }
-      | { kind: "line"; position: number; value: EditableMarkdownLine }
-      | { kind: "table"; position: number; value: EditableMarkdownTable }
-    > = [
-      ...page.lines.filter((line) => !tableLines.has(line)).map((line) => ({ kind: "line" as const, position: line.top, value: line })),
-      ...tables.map((table) => ({ kind: "table" as const, position: table.top, value: table })),
-      ...page.images.map((image) => ({ kind: "image" as const, position: image.y, value: image }))
-    ].sort((a, b) => (a.position - b.position) || (a.kind === "image" ? -1 : 1));
-    let previousBottom = 0;
-    if (flowItems.length === 0) {
-      const relId = addImage(page.bytes, "png");
-      const fitted = fitDocxImage(page.width * 15, page.height * 15, contentWidthTwips, contentHeightTwips);
-      body.push(buildDocxInlineImageParagraph(relId, drawingId, fitted.widthTwips, fitted.heightTwips, 0, `${title} page ${page.pageIndex + 1}`));
-      drawingId += 1;
-    } else {
+      if (flowItems.length === 0) {
+        const fitted = fitImage(page.width, page.height);
+        children.push(new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [new ImageRun({
+            data: page.bytes,
+            transformation: fitted,
+            type: "png"
+          })]
+        }));
+      }
+
       for (const item of flowItems) {
-        const itemTop = item.position;
-        const spacingBefore = Math.round(clamp((itemTop - previousBottom) * contentHeightTwips, 0, 280));
+        const spacingBefore = Math.round(clamp(item.position - previousBottom, 0, 0.045) * contentHeightTwips);
         if (item.kind === "line") {
-          body.push(buildDocxEditableTextParagraph(item.value, baseFontSize, contentWidthTwips, spacingBefore, horizontalOrigin, addHyperlink));
+          const text = item.value.runs.map((run) => run.text).join("").trim();
+          const headingLevel = getEditableMarkdownHeadingLevel(item.value, baseFontSize, text);
+          const leftTwips = Math.round(clamp(
+            (item.value.left - horizontalOrigin) * contentWidthTwips,
+            0,
+            contentWidthTwips * 0.42
+          ));
+          children.push(new Paragraph({
+            children: makeRuns(item.value.runs, baseFontSize, headingLevel !== null),
+            indent: leftTwips > 0 ? { left: leftTwips } : undefined,
+            keepLines: true,
+            keepNext: headingLevel !== null,
+            outlineLevel: headingLevel !== null ? Math.min(8, headingLevel - 1) : undefined,
+            spacing: { after: headingLevel !== null ? 120 : 80, before: spacingBefore }
+          }));
           previousBottom = Math.max(previousBottom, item.value.top + item.value.height);
           continue;
         }
         if (item.kind === "table") {
-          body.push(buildDocxEditableTable(item.value, baseFontSize, contentWidthTwips, spacingBefore, horizontalOrigin, addHyperlink));
+          const tableWidth = Math.round(clamp(
+            (item.value.right - item.value.left) * contentWidthTwips,
+            contentWidthTwips * 0.42,
+            contentWidthTwips
+          ));
+          const columnWidths = getEditableTableColumnWidths(item.value, tableWidth).map((width) => Math.max(360, Math.round(width)));
+          if (spacingBefore > 0) {
+            children.push(new Paragraph({ spacing: { before: spacingBefore, after: 0 } }));
+          }
+          children.push(new Table({
+            columnWidths,
+            rows: item.value.rows.map((row, rowIndex) => new TableRow({
+              cantSplit: true,
+              children: row.map((cell, cellIndex) => new TableCell({
+                children: [new Paragraph({
+                  children: makeRuns(cell.runs, baseFontSize, rowIndex === 0),
+                  spacing: { after: 40 }
+                })],
+                shading: rowIndex === 0 ? { fill: "F4F6F8", type: ShadingType.CLEAR } : undefined,
+                verticalAlign: VerticalAlign.CENTER,
+                width: { size: columnWidths[cellIndex] ?? Math.round(tableWidth / Math.max(1, row.length)), type: WidthType.DXA }
+              }))
+            })),
+            width: { size: tableWidth, type: WidthType.DXA }
+          }));
           previousBottom = Math.max(previousBottom, item.value.bottom);
           continue;
         }
         const image = item.value;
-        const fitted = fitDocxImage(
-          Math.max(1, image.width * contentWidthTwips),
-          Math.max(1, image.height * contentHeightTwips),
-          contentWidthTwips,
-          contentHeightTwips
-        );
-        const imageRelId = addImage(dataUrlToBytes(image.dataUrl), "png");
-        body.push(buildDocxInlineImageParagraph(
-          imageRelId,
-          drawingId,
-          fitted.widthTwips,
-          fitted.heightTwips,
-          spacingBefore,
-          `Page ${page.pageIndex + 1} image ${drawingId}`
-        ));
-        drawingId += 1;
+        const fitted = fitImage(image.width * contentWidthPx, image.height * contentHeightPx);
+        children.push(new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [new ImageRun({
+            data: dataUrlToBytes(image.dataUrl),
+            transformation: fitted,
+            type: "png"
+          })],
+          keepLines: true,
+          spacing: { after: 80, before: spacingBefore }
+        }));
         previousBottom = Math.max(previousBottom, image.y + image.height);
       }
-    }
-    if (index < sortedPages.length - 1) {
-      body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
-    }
-  }
 
-  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360"/></w:sectPr></w:body></w:document>`;
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="gif" ContentType="image/gif"/><Default Extension="webp" ContentType="image/webp"/><Default Extension="svg" ContentType="image/svg+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>`;
-  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`;
-  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>`;
-  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
-  const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
-  const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.92</AppVersion></Properties>`;
+      return {
+        children,
+        properties: {
+          page: {
+            margin: { bottom: pageMarginTwips, left: pageMarginTwips, right: pageMarginTwips, top: pageMarginTwips },
+            size: { height: pageHeightTwips, width: pageWidthTwips }
+          }
+        }
+      };
+    });
 
-  return zipStoreFiles([
-    { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
-    { name: "_rels/.rels", data: utf8Bytes(relsXml) },
-    { name: "docProps/core.xml", data: utf8Bytes(coreXml) },
-    { name: "docProps/app.xml", data: utf8Bytes(appXml) },
-    { name: "word/document.xml", data: utf8Bytes(documentXml) },
-    { name: "word/_rels/document.xml.rels", data: utf8Bytes(docRelsXml) },
-    { name: "word/styles.xml", data: utf8Bytes(stylesXml) },
-    { name: "word/settings.xml", data: utf8Bytes(settingsXml) },
-    ...mediaFiles
-  ]);
-}
-
-function buildDocxInlineImageParagraph(
-  relId: string,
-  drawingId: number,
-  widthTwips: number,
-  heightTwips: number,
-  spacingBefore: number,
-  name: string
-): string {
-  const safeName = xmlEscape(name || `Image ${drawingId}`);
-  const pageImageXml = buildDocxInlinePageImage(relId, drawingId, widthTwips, heightTwips, safeName);
-  return `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="${Math.max(0, spacingBefore)}" w:after="80"/><w:keepLines/></w:pPr>${pageImageXml}</w:p>`;
-}
-
-function buildDocxInlinePageImage(
-  relId: string,
-  drawingId: number,
-  widthTwips: number,
-  heightTwips: number,
-  name: string
-): string {
-  const widthEmu = Math.max(635, Math.round(widthTwips * 635));
-  const heightEmu = Math.max(635, Math.round(heightTwips * 635));
-  return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
-}
-
-function buildDocxEditableTextParagraph(
-  line: EditableMarkdownLine,
-  baseFontSize: number,
-  contentWidthTwips: number,
-  spacingBefore: number,
-  horizontalOrigin: number,
-  addHyperlink: (url: string) => string
-): string {
-  const text = line.runs.map((run) => run.text).join("").trim();
-  const headingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text);
-  const runs = buildDocxEditableRuns(line.runs, baseFontSize, headingLevel !== null, addHyperlink);
-  const leftTwips = Math.round(clamp((line.left - horizontalOrigin) * contentWidthTwips, 0, contentWidthTwips * 0.7));
-  const largestHalfPoints = Math.max(...line.runs.map((run) => getDocxHalfPointSize(run.fontSize, baseFontSize)), 18);
-  const lineTwips = Math.max(280, Math.round(largestHalfPoints * 12.5));
-  const outline = headingLevel !== null ? `<w:outlineLvl w:val="${Math.min(8, headingLevel - 1)}"/><w:keepNext/>` : "";
-  return `<w:p><w:pPr><w:ind w:left="${leftTwips}"/><w:spacing w:before="${Math.max(0, spacingBefore)}" w:after="80" w:line="${lineTwips}" w:lineRule="atLeast"/><w:keepLines/>${outline}</w:pPr>${runs}</w:p>`;
-}
-
-function buildDocxEditableRuns(
-  runs: EditableMarkdownTextRun[],
-  baseFontSize: number,
-  forceBold: boolean,
-  addHyperlink: (url: string) => string
-): string {
-  return runs.map((run) => {
-    const font = xmlEscape(exportFontFace(run.fontFamily));
-    const size = getDocxHalfPointSize(run.fontSize, baseFontSize);
-    const rPr = [
-      run.bold || forceBold ? "<w:b/>" : "",
-      run.italic ? "<w:i/>" : "",
-      run.strike ? "<w:strike/>" : "",
-      run.underline ? "<w:u w:val=\"single\"/>" : "",
-      `<w:color w:val="${exportHexColor(run.color)}"/>`,
-      `<w:sz w:val="${size}"/><w:szCs w:val="${size}"/>`,
-      `<w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:eastAsia="${font}"/>`
-    ].filter(Boolean).join("");
-    const runXml = `<w:r><w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${xmlEscape(run.text)}</w:t></w:r>`;
-    const validLink = run.link && /^(?:https?:|mailto:)/i.test(run.link) ? run.link : null;
-    return validLink ? `<w:hyperlink r:id="${addHyperlink(validLink)}">${runXml}</w:hyperlink>` : runXml;
-  }).join("");
-}
-
-function buildDocxEditableTable(
-  table: EditableMarkdownTable,
-  baseFontSize: number,
-  contentWidthTwips: number,
-  spacingBefore: number,
-  horizontalOrigin: number,
-  addHyperlink: (url: string) => string
-): string {
-  const leftTwips = Math.round(clamp((table.left - horizontalOrigin) * contentWidthTwips, 0, contentWidthTwips * 0.55));
-  const availableWidth = Math.max(1440, contentWidthTwips - leftTwips);
-  const tableWidth = Math.round(clamp((table.right - table.left) * contentWidthTwips, contentWidthTwips * 0.42, availableWidth));
-  const columnWidths = getEditableTableColumnWidths(table, tableWidth).map((width) => Math.max(360, Math.round(width)));
-  const grid = columnWidths.map((width) => `<w:gridCol w:w="${width}"/>`).join("");
-  const rows = table.rows.map((row, rowIndex) => {
-    const cells = row.map((cell, cellIndex) => {
-      const cellWidth = columnWidths[cellIndex] ?? Math.round(tableWidth / Math.max(1, row.length));
-      const runs = buildDocxEditableRuns(cell.runs, baseFontSize, rowIndex === 0, addHyperlink);
-      const largestHalfPoints = Math.max(...cell.runs.map((run) => getDocxHalfPointSize(run.fontSize, baseFontSize)), 18);
-      const lineTwips = Math.max(280, Math.round(largestHalfPoints * 12.5));
-      const shading = rowIndex === 0 ? `<w:shd w:val="clear" w:color="auto" w:fill="F4F6F8"/>` : "";
-      return `<w:tc><w:tcPr><w:tcW w:w="${cellWidth}" w:type="dxa"/>${shading}<w:vAlign w:val="center"/></w:tcPr><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="${lineTwips}" w:lineRule="atLeast"/><w:keepLines/></w:pPr>${runs}</w:p></w:tc>`;
-    }).join("");
-    return `<w:tr><w:trPr><w:cantSplit/></w:trPr>${cells}</w:tr>`;
-  }).join("");
-  const spacer = spacingBefore > 0
-    ? `<w:p><w:pPr><w:spacing w:before="${spacingBefore}" w:after="0" w:line="1" w:lineRule="exact"/></w:pPr></w:p>`
-    : "";
-  return `${spacer}<w:tbl><w:tblPr><w:tblW w:w="${tableWidth}" w:type="dxa"/><w:tblInd w:w="${leftTwips}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="D7DCE3"/><w:left w:val="single" w:sz="4" w:color="D7DCE3"/><w:bottom w:val="single" w:sz="4" w:color="D7DCE3"/><w:right w:val="single" w:sz="4" w:color="D7DCE3"/><w:insideH w:val="single" w:sz="4" w:color="D7DCE3"/><w:insideV w:val="single" w:sz="4" w:color="D7DCE3"/></w:tblBorders><w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:left w:w="90" w:type="dxa"/><w:bottom w:w="60" w:type="dxa"/><w:right w:w="90" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>${grid}</w:tblGrid>${rows}</w:tbl>`;
-}
-
-function getDocxHalfPointSize(fontSize: number, baseFontSize: number): number {
-  return Math.max(15, Math.round(fontSize * 19 / Math.max(1, baseFontSize)));
-}
-
-function fitDocxImage(width: number, height: number, maxWidthTwips: number, maxHeightTwips: number): { heightTwips: number; widthTwips: number } {
-  const sourceWidth = Math.max(1, width);
-  const sourceHeight = Math.max(1, height);
-  const scale = Math.min(1, maxWidthTwips / sourceWidth, maxHeightTwips / sourceHeight);
-  return {
-    heightTwips: Math.max(1, Math.round(sourceHeight * scale)),
-    widthTwips: Math.max(1, Math.round(sourceWidth * scale))
-  };
+  const document = new Document({
+    creator: "Murat",
+    description: "Pdftion editable conversion with embedded source images.",
+    sections,
+    title
+  });
+  const blob = await Packer.toBlob(document);
+  return new Uint8Array(await blob.arrayBuffer());
 }
 
 function exportHexColor(value: string): string {
@@ -12482,68 +12496,6 @@ function htmlEscape(value: string): string {
 
 function htmlAttributeEscape(value: string): string {
   return htmlEscape(value);
-}
-
-function utf8Bytes(value: string): Uint8Array {
-  return new TextEncoder().encode(value);
-}
-
-function zipStoreFiles(files: Array<{ data: Uint8Array; name: string }>): Uint8Array {
-  const parts: Uint8Array[] = [];
-  const central: Uint8Array[] = [];
-  let offset = 0;
-  for (const file of files) {
-    const name = utf8Bytes(file.name);
-    const crc = crc32(file.data);
-    const local = concatBytes([
-      le32(0x04034b50), le16(20), le16(0), le16(0), le16(0), le16(0),
-      le32(crc), le32(file.data.length), le32(file.data.length), le16(name.length), le16(0), name, file.data
-    ]);
-    parts.push(local);
-    central.push(concatBytes([
-      le32(0x02014b50), le16(20), le16(20), le16(0), le16(0), le16(0), le16(0),
-      le32(crc), le32(file.data.length), le32(file.data.length), le16(name.length), le16(0), le16(0),
-      le16(0), le16(0), le32(0), le32(offset), name
-    ]));
-    offset += local.length;
-  }
-  const centralStart = offset;
-  const centralBytes = concatBytes(central);
-  const end = concatBytes([
-    le32(0x06054b50), le16(0), le16(0), le16(files.length), le16(files.length),
-    le32(centralBytes.length), le32(centralStart), le16(0)
-  ]);
-  return concatBytes([...parts, centralBytes, end]);
-}
-
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const output = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return output;
-}
-
-function le16(value: number): Uint8Array {
-  return new Uint8Array([value & 255, (value >>> 8) & 255]);
-}
-
-function le32(value: number): Uint8Array {
-  return new Uint8Array([value & 255, (value >>> 8) & 255, (value >>> 16) & 255, (value >>> 24) & 255]);
-}
-
-function crc32(bytes: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let i = 0; i < 8; i += 1) {
-      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-    }
-  }
-  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function dataUrlToBytes(dataUrl: string): Uint8Array {

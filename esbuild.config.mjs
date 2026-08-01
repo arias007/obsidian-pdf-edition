@@ -72,6 +72,10 @@ const safeZipScheduler = {
       contents: sanitizeLegacyZipScheduler(await readFile(args.path, "utf8")),
       loader: "js"
     }));
+    build.onLoad({ filter: /[\\/]node_modules[\\/]docx[\\/]dist[\\/]index\.mjs$/ }, async (args) => ({
+      contents: sanitizeLegacyZipScheduler(await readFile(args.path, "utf8")),
+      loader: "js"
+    }));
   }
 };
 
