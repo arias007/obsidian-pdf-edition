@@ -104,7 +104,11 @@ test("visual exports reuse the HTML-quality snapshot and keep editable text", as
   assert.match(source, /const lines = collectEditableMarkdownLines\(overlay\)/);
   assert.match(source, /lines,\s*pageIndex: overlay\.pageIndex/);
   assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\)/);
-  assert.match(source, /mergeVisualConversionPageImages\([\s\S]{0,180}?collectNoteDrawExportImages\(capturedPages, this\.getEditableElements\(\)\)/);
+  assert.equal((source.match(/buildMarkdownInlineVisualExportPages\(capturedPages, this\.getEditableElements\(\)\)/g) ?? []).length, 2);
+  assert.match(source, /collectNoteDrawExportImages\(pages, elements\)\.filter\(isUsefulMarkdownExportImage\)/);
+  assert.match(source, /partitionMarkdownExportImages\(editablePages, extractedImages\)\.inline/);
+  assert.match(source, /flattenImageDataUrlOnWhite\(image\.dataUrl, image\.opacity\)/);
+  assert.match(source, /pages\.map\(\(page\) => \(\{ \.\.\.page, images: \[\] \}\)\)/);
   assert.match(source, /slide\.addText\(textRuns/);
   assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
   assert.match(source, /await this\.drawImageElementForExport/);
@@ -116,6 +120,8 @@ test("visual exports reuse the HTML-quality snapshot and keep editable text", as
   assert.match(source, /addImage\(dataUrlToBytes\(image\.dataUrl\), "png"\)/);
   assert.match(source, /<w:hyperlink r:id=/);
   assert.match(source, /<wp:inline distT="0" distB="0" distL="0" distR="0">/);
+  assert.match(source, /<w:jc w:val="center"\/>/);
+  assert.match(source, /ctx\.fillStyle = "#ffffff";\s*ctx\.fillRect/);
   assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
   assert.doesNotMatch(source, /w:right="\$\{rightTwips\}"/);
   assert.doesNotMatch(source, /<w:vanish\/>/);

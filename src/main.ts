@@ -8152,10 +8152,7 @@ class InkSession {
     try {
       await this.prepareExportSnapshot();
       const capturedPages = await this.captureVisualConversionPages();
-      const pages = mergeVisualConversionPageImages(
-        capturedPages,
-        collectNoteDrawExportImages(capturedPages, this.getEditableElements())
-      );
+      const pages = await buildMarkdownInlineVisualExportPages(capturedPages, this.getEditableElements());
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "docx");
       const docx = buildDocxFromPageImages(pages, this.file.basename);
       const buffer = toArrayBufferCopy(docx);
@@ -8227,10 +8224,7 @@ class InkSession {
     try {
       await this.prepareExportSnapshot();
       const capturedPages = await this.captureVisualConversionPages();
-      const pages = mergeVisualConversionPageImages(
-        capturedPages,
-        collectNoteDrawExportImages(capturedPages, this.getEditableElements())
-      );
+      const pages = await buildMarkdownInlineVisualExportPages(capturedPages, this.getEditableElements());
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "pptx");
       const pptx = await buildPptxFromPageImages(pages, this.file.basename);
       const targetFile = await this.plugin.app.vault.createBinary(targetPath, toArrayBufferCopy(pptx));
@@ -11809,6 +11803,47 @@ function mergeVisualConversionPageImages(
   });
 }
 
+async function buildMarkdownInlineVisualExportPages(
+  pages: VisualConversionPage[],
+  elements: InkElement[]
+): Promise<VisualConversionPage[]> {
+  const editablePages: EditableMarkdownPage[] = pages.map((page) => ({
+    height: page.height,
+    lines: page.lines,
+    pageIndex: page.pageIndex,
+    width: page.width
+  }));
+  const extractedImages = collectNoteDrawExportImages(pages, elements).filter(isUsefulMarkdownExportImage);
+  const inlineImages = partitionMarkdownExportImages(editablePages, extractedImages).inline;
+  const visibleImages = await Promise.all(inlineImages.map(async (image) => ({
+    ...image,
+    dataUrl: await flattenImageDataUrlOnWhite(image.dataUrl, image.opacity),
+    opacity: 1
+  })));
+
+  return mergeVisualConversionPageImages(
+    pages.map((page) => ({ ...page, images: [] })),
+    visibleImages
+  );
+}
+
+async function flattenImageDataUrlOnWhite(dataUrl: string, opacity = 1): Promise<string> {
+  const image = await loadDataUrlImage(dataUrl);
+  const canvas = activeDocument.createElement("canvas");
+  canvas.width = Math.max(1, image.naturalWidth || image.width);
+  canvas.height = Math.max(1, image.naturalHeight || image.height);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return convertImageDataUrlToPng(dataUrl);
+  }
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = clamp(opacity, 0, 1);
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 1;
+  return canvas.toDataURL("image/png");
+}
+
 async function extractHtmlDerivedVisualLayers(
   pageCanvas: HTMLCanvasElement,
   lines: EditableMarkdownLine[],
@@ -12254,7 +12289,7 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
     if (flowItems.length === 0) {
       const relId = addImage(page.bytes, "png");
       const fitted = fitDocxImage(page.width * 15, page.height * 15, contentWidthTwips, contentHeightTwips);
-      body.push(buildDocxInlineImageParagraph(relId, drawingId, fitted.widthTwips, fitted.heightTwips, 0, 0, `${title} page ${page.pageIndex + 1}`));
+      body.push(buildDocxInlineImageParagraph(relId, drawingId, fitted.widthTwips, fitted.heightTwips, 0, `${title} page ${page.pageIndex + 1}`));
       drawingId += 1;
     } else {
       for (const item of flowItems) {
@@ -12277,14 +12312,12 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
           contentWidthTwips,
           contentHeightTwips
         );
-        const leftTwips = Math.round(clamp((image.x - horizontalOrigin) * contentWidthTwips, 0, Math.max(0, contentWidthTwips - fitted.widthTwips)));
         const imageRelId = addImage(dataUrlToBytes(image.dataUrl), "png");
         body.push(buildDocxInlineImageParagraph(
           imageRelId,
           drawingId,
           fitted.widthTwips,
           fitted.heightTwips,
-          leftTwips,
           spacingBefore,
           `Page ${page.pageIndex + 1} image ${drawingId}`
         ));
@@ -12304,7 +12337,7 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
   const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
   const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.91</AppVersion></Properties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.92</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
@@ -12324,13 +12357,12 @@ function buildDocxInlineImageParagraph(
   drawingId: number,
   widthTwips: number,
   heightTwips: number,
-  leftTwips: number,
   spacingBefore: number,
   name: string
 ): string {
   const safeName = xmlEscape(name || `Image ${drawingId}`);
   const pageImageXml = buildDocxInlinePageImage(relId, drawingId, widthTwips, heightTwips, safeName);
-  return `<w:p><w:pPr><w:ind w:left="${Math.max(0, leftTwips)}"/><w:spacing w:before="${Math.max(0, spacingBefore)}" w:after="40"/><w:keepLines/></w:pPr>${pageImageXml}</w:p>`;
+  return `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="${Math.max(0, spacingBefore)}" w:after="80"/><w:keepLines/></w:pPr>${pageImageXml}</w:p>`;
 }
 
 function buildDocxInlinePageImage(
