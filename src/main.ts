@@ -573,6 +573,7 @@ interface PdftionSettings {
   highlightOpacity: number;
   highlightWidth: number;
   nativeTextHighlightColor: string;
+  nativeTextSelectionAction: "copy" | "highlight";
   penColor: string;
   penOpacity: number;
   penWidth: number;
@@ -603,6 +604,7 @@ const DEFAULT_SETTINGS: PdftionSettings = {
   highlightOpacity: 0.36,
   highlightWidth: 9,
   nativeTextHighlightColor: "#ffd43b",
+  nativeTextSelectionAction: "highlight",
   penColor: "#d9480f",
   penOpacity: 1,
   penWidth: 3,
@@ -1024,6 +1026,43 @@ interface PdfViewLike {
   contentEl?: HTMLElement;
   file?: TFile;
   getViewType?: () => string;
+  viewer?: {
+    child?: {
+      pdfViewer?: NativePdfViewerAppLike;
+    };
+  };
+}
+
+interface NativePdfPageViewLike {
+  cancelRendering?: () => void;
+  canvas?: HTMLCanvasElement | null;
+  div?: HTMLElement;
+  draw?: () => Promise<unknown>;
+  renderingState?: number;
+  reset?: () => void;
+  resume?: (() => void) | null;
+}
+
+interface NativePdfRenderingQueueLike {
+  highestPriorityPage?: NativePdfPageViewLike | null;
+  renderHighestPriority?: () => void;
+  renderView?: (page: NativePdfPageViewLike) => void;
+}
+
+interface NativePdfViewerLike {
+  _pages?: NativePdfPageViewLike[];
+  currentPageNumber?: number;
+  forceRendering?: () => void;
+  getPageView?: (pageIndex: number) => NativePdfPageViewLike | null;
+  renderingQueue?: NativePdfRenderingQueueLike;
+  scrollPageIntoView?: (options: { pageNumber: number }) => void;
+  update?: () => void;
+}
+
+interface NativePdfViewerAppLike {
+  forceRendering?: () => void;
+  pdfRenderingQueue?: NativePdfRenderingQueueLike;
+  pdfViewer?: NativePdfViewerLike;
 }
 
 interface InkPoint {
@@ -1254,6 +1293,7 @@ interface VisualConversionImage {
   width: number;
   x: number;
   y: number;
+  zIndex?: number;
 }
 
 interface EditableMarkdownTextRun {
@@ -1508,6 +1548,32 @@ export default class PdftionPlugin extends Plugin {
           return;
         }
         void session.exportAnnotationsMarkdown();
+      }
+    });
+
+    this.addCommand({
+      id: "export-annotations-docx",
+      name: uiText("导出批注 DOCX", "Export annotations to DOCX"),
+      callback: () => {
+        const session = this.getActivePdfSession();
+        if (!session) {
+          new Notice(uiText("请先打开 PDF。", "Open a PDF first."));
+          return;
+        }
+        void session.exportConvertedDocx();
+      }
+    });
+
+    this.addCommand({
+      id: "export-annotations-pptx",
+      name: uiText("导出批注 PPTX", "Export annotations to PPTX"),
+      callback: () => {
+        const session = this.getActivePdfSession();
+        if (!session) {
+          new Notice(uiText("请先打开 PDF。", "Open a PDF first."));
+          return;
+        }
+        void session.exportConvertedPptx();
       }
     });
 
@@ -1850,24 +1916,35 @@ export default class PdftionPlugin extends Plugin {
   private findLeafForFile(file: TFile): WorkspaceLeaf | null {
     const recentLeaf = this.app.workspace.getMostRecentLeaf();
     const recentView = recentLeaf?.view as unknown as PdfViewLike | undefined;
-    if (recentLeaf && recentView?.file?.path === file.path) {
+    if (recentLeaf && recentView?.file?.path === file.path && recentView.getViewType?.() === "pdf") {
       return recentLeaf;
     }
 
-    let matched: WorkspaceLeaf | null = null;
-    let visibleMatched: WorkspaceLeaf | null = null;
+    let matchedPdf: WorkspaceLeaf | null = null;
+    let visiblePdf: WorkspaceLeaf | null = null;
+    let matchedOther: WorkspaceLeaf | null = null;
+    let visibleOther: WorkspaceLeaf | null = null;
     this.app.workspace.iterateAllLeaves((leaf) => {
       const view = leaf.view as unknown as PdfViewLike;
       if (view.file?.path === file.path) {
-        matched = leaf;
+        const isPdfView = view.getViewType?.() === "pdf";
+        if (isPdfView) {
+          matchedPdf = leaf;
+        } else {
+          matchedOther = leaf;
+        }
         const rootEl = view.containerEl ?? view.contentEl;
         const rect = rootEl?.getBoundingClientRect();
         if (rect && rect.width > 0 && rect.height > 0) {
-          visibleMatched = leaf;
+          if (isPdfView) {
+            visiblePdf = leaf;
+          } else {
+            visibleOther = leaf;
+          }
         }
       }
     });
-    return visibleMatched ?? matched;
+    return visiblePdf ?? visibleOther ?? matchedPdf ?? matchedOther;
   }
 
   private flushAllSessionsSoon(): void {
@@ -2194,7 +2271,10 @@ class PdftionSettingTab extends PluginSettingTab {
   private addTextSetting(
     name: string,
     placeholder: string,
-    key: { [K in keyof PdftionSettings]: PdftionSettings[K] extends string ? K : never }[keyof PdftionSettings]
+    key: Exclude<
+      { [K in keyof PdftionSettings]: PdftionSettings[K] extends string ? K : never }[keyof PdftionSettings],
+      "nativeTextSelectionAction"
+    >
   ): void {
     new Setting(this.containerEl)
       .setName(name)
@@ -2293,6 +2373,7 @@ function normalizeSettings(data: unknown): PdftionSettings {
     highlightOpacity: normalizeNumberSetting(record.highlightOpacity, DEFAULT_SETTINGS.highlightOpacity, 0.05, 1, 0.05),
     highlightWidth: normalizeNumberSetting(record.highlightWidth, DEFAULT_SETTINGS.highlightWidth, 2, 96, 0.5),
     nativeTextHighlightColor: normalizeColorSetting(record.nativeTextHighlightColor, DEFAULT_SETTINGS.nativeTextHighlightColor),
+    nativeTextSelectionAction: record.nativeTextSelectionAction === "copy" ? "copy" : "highlight",
     penColor: normalizeColorSetting(record.penColor, DEFAULT_SETTINGS.penColor),
     penOpacity: normalizeNumberSetting(record.penOpacity, DEFAULT_SETTINGS.penOpacity, 0.05, 1, 0.05),
     penWidth: normalizeNumberSetting(record.penWidth, DEFAULT_SETTINGS.penWidth, 0.5, 72, 0.5),
@@ -2343,6 +2424,10 @@ class InkSession {
   private enabled = false;
   private imageCache = new Map<string, HTMLImageElement>();
   private imageMenu: HTMLElement | null = null;
+  private layerMenu: HTMLElement | null = null;
+  private layerLongPressTimer: number | null = null;
+  private layerLongPressStart: { clientX: number; clientY: number; elementId: string; pageIndex: number } | null = null;
+  private layerLongPressTriggered = false;
   private textMenu: HTMLElement | null = null;
   private shareMenu: HTMLElement | null = null;
   private mutationObserver: MutationObserver;
@@ -2398,6 +2483,7 @@ class InkSession {
   private deletedPdftionInkIds = new Set<string>();
   private nativeTextSelectionMenu: HTMLElement | null = null;
   private nativeTextSelectionInfo: NativeTextSelectionInfo | null = null;
+  private nativeTextAutoHighlight: { ids: string[]; key: string; pageIndex: number } | null = null;
   private nativeTextSelectionTimer: number | null = null;
   private nativeTextSelectionAbort = new AbortController();
   private saving = false;
@@ -2416,6 +2502,7 @@ class InkSession {
   private highlightOpacity = DEFAULT_SETTINGS.highlightOpacity;
   private highlightWidth = DEFAULT_SETTINGS.highlightWidth;
   private nativeTextHighlightColor = DEFAULT_SETTINGS.nativeTextHighlightColor;
+  private nativeTextSelectionAction: "copy" | "highlight" = DEFAULT_SETTINGS.nativeTextSelectionAction;
 
   constructor(
     private plugin: PdftionPlugin,
@@ -2507,6 +2594,8 @@ class InkSession {
     this.commentManager?.remove();
     this.commentPopover?.remove();
     this.imageMenu?.remove();
+    this.clearLayerLongPress();
+    this.layerMenu?.remove();
     this.textMenu?.remove();
     this.shareMenu?.remove();
     this.toolbar?.remove();
@@ -2565,6 +2654,9 @@ class InkSession {
     this.textHistory = [];
     this.coverHistory = [];
     this.imageHistory = [];
+    this.clearLayerLongPress();
+    this.layerMenu?.remove();
+    this.layerMenu = null;
     this.textMenu?.remove();
     this.textMenu = null;
     this.commentManager?.remove();
@@ -2912,13 +3004,27 @@ class InkSession {
     );
 
     const unique = new Set<HTMLElement>();
-    return candidates.filter((candidate) => {
+    const visibleCandidates = candidates.filter((candidate) => {
       if (unique.has(candidate)) {
         return false;
       }
       unique.add(candidate);
-      return candidate.querySelector("canvas") !== null && candidate.clientWidth > 0 && candidate.clientHeight > 0;
+      return candidate.clientWidth > 0 && candidate.clientHeight > 0;
     });
+
+    if (visibleCandidates.length === 0) {
+      // Cancip's document workbench renders the visible PDF page into NoteDraw's
+      // static canvas instead of exposing PDF.js .page elements.
+      const canvas = this.rootEl.querySelector<HTMLCanvasElement>(
+        ".notedraw-static-canvas:not(.pdftion-canvas), canvas:not(.pdftion-canvas)"
+      );
+      const stage = canvas?.parentElement;
+      if (canvas && stage && canvas.width > 1 && canvas.height > 1 && stage.clientWidth > 0 && stage.clientHeight > 0) {
+        return [stage];
+      }
+    }
+
+    return visibleCandidates;
   }
 
   private ensureOverlay(pageEl: HTMLElement, fallbackIndex: number): void {
@@ -3328,6 +3434,9 @@ class InkSession {
       this.clearEditableSelection();
       this.palette?.remove();
       this.palette = null;
+      this.clearLayerLongPress();
+      this.layerMenu?.remove();
+      this.layerMenu = null;
       this.imageMenu?.remove();
       this.imageMenu = null;
       this.textMenu?.remove();
@@ -4026,9 +4135,11 @@ class InkSession {
     this.resizeOverlay(overlay);
     const point = this.getOverlayInputPoint(overlay, event.clientX, event.clientY);
     if (event.detail >= 2 && this.openEditorAtPoint(point, overlay)) {
+      this.clearLayerLongPress();
       return;
     }
     overlay.canvas.setPointerCapture(event.pointerId);
+    this.startLayerLongPress(overlay, point, event.clientX, event.clientY);
     this.beginInkInteraction(point, overlay);
   }
 
@@ -4686,6 +4797,9 @@ class InkSession {
     appendToActiveBody(panel);
     this.nativeTextSelectionMenu = panel;
     this.positionNativeTextSelectionMenu(info, panel);
+    if (this.nativeTextSelectionAction === "highlight") {
+      this.ensureNativeTextAutoHighlight(info);
+    }
   }
 
   private createNativeTextAdvancedColorButton(): HTMLElement {
@@ -4769,6 +4883,7 @@ class InkSession {
     this.nativeTextSelectionMenu?.remove();
     this.nativeTextSelectionMenu = null;
     this.nativeTextSelectionInfo = null;
+    this.nativeTextAutoHighlight = null;
   }
 
   private applyNativeTextHighlight(color: string): void {
@@ -4777,14 +4892,55 @@ class InkSession {
       return;
     }
 
-    this.nativeTextHighlightColor = normalizeHexColor(color);
+    const normalizedColor = normalizeHexColor(color);
+    this.nativeTextHighlightColor = normalizedColor;
+    this.nativeTextSelectionAction = "highlight";
     this.scheduleToolSettingsSave();
+    const selectionKey = this.getNativeTextSelectionKey(info);
+    const pending = this.nativeTextAutoHighlight?.key === selectionKey
+      ? this.nativeTextAutoHighlight
+      : null;
+    const pendingCovers = pending
+      ? pending.ids
+          .map((id) => this.coverHistory.find((cover) => cover.id === id))
+          .filter((cover): cover is InkCover => cover !== undefined)
+      : [];
+
+    if (pendingCovers.length === 0) {
+      this.ensureNativeTextAutoHighlight(info, normalizedColor);
+    } else if (pendingCovers.some((cover) => normalizeHexColor(cover.color) !== normalizedColor)) {
+      this.rememberHistory();
+      for (const cover of pendingCovers) {
+        cover.color = normalizedColor;
+        cover.saved = false;
+      }
+      this.redoStack = [];
+      this.markDirty();
+      this.redrawOverlay(info.overlay);
+      this.scheduleAutoSave();
+    }
+
+    activeDocument.getSelection()?.removeAllRanges();
+    this.hideNativeTextSelectionMenu();
+  }
+
+  private ensureNativeTextAutoHighlight(info: NativeTextSelectionInfo, color = this.nativeTextHighlightColor): void {
+    const selectionKey = this.getNativeTextSelectionKey(info);
+    if (
+      this.nativeTextAutoHighlight?.key === selectionKey &&
+      this.nativeTextAutoHighlight.ids.some((id) => this.coverHistory.some((cover) => cover.id === id))
+    ) {
+      return;
+    }
+
     this.rememberHistory();
-    for (const object of info.objects) {
+    const normalizedColor = normalizeHexColor(color);
+    const ids = info.objects.map((object) => {
+      const id = makeStrokeId();
       this.coverHistory.push({
-        color: normalizeHexColor(color),
+        color: normalizedColor,
         height: object.height,
-        id: makeStrokeId(),
+        id,
         kind: "cover",
         opacity: 0.36,
         pageCssHeight: info.overlay.cssHeight,
@@ -4796,14 +4952,40 @@ class InkSession {
         x: object.x,
         y: object.y
       });
-    }
-
+      return id;
+    });
+    this.nativeTextAutoHighlight = { ids, key: selectionKey, pageIndex: info.overlay.pageIndex };
     this.redoStack = [];
     this.markDirty();
     this.redrawOverlay(info.overlay);
     this.scheduleAutoSave();
-    activeDocument.getSelection()?.removeAllRanges();
-    this.hideNativeTextSelectionMenu();
+  }
+
+  private getNativeTextSelectionKey(info: NativeTextSelectionInfo): string {
+    const geometry = info.objects
+      .map((object) => [object.x, object.y, object.width, object.height].map((value) => value.toFixed(5)).join(","))
+      .join(";");
+    return `${info.overlay.pageIndex}:${geometry}:${info.text}`;
+  }
+
+  private prepareNativeTextCopy(info: NativeTextSelectionInfo): void {
+    this.nativeTextSelectionAction = "copy";
+    this.scheduleToolSettingsSave();
+    const pending = this.nativeTextAutoHighlight;
+    if (!pending || pending.key !== this.getNativeTextSelectionKey(info)) {
+      return;
+    }
+
+    const ids = new Set(pending.ids);
+    if (this.coverHistory.some((cover) => ids.has(cover.id))) {
+      this.rememberHistory();
+      this.coverHistory = this.coverHistory.filter((cover) => !ids.has(cover.id));
+      this.redoStack = [];
+      this.markDirty();
+      this.redrawOverlay(info.overlay);
+      this.scheduleAutoSave();
+    }
+    this.nativeTextAutoHighlight = null;
   }
 
   private async copyNativeTextSelectionLink(): Promise<void> {
@@ -4812,6 +4994,7 @@ class InkSession {
       return;
     }
 
+    this.prepareNativeTextCopy(info);
     const link = buildPdfSelectionWikilink(this.file, info.overlay.pageIndex, info.text);
     if (await this.copyTextToClipboard(link, uiText("Copied PDF text link.", "Copied PDF text link."))) {
       this.hideNativeTextSelectionMenu();
@@ -4827,6 +5010,7 @@ class InkSession {
       return;
     }
 
+    this.prepareNativeTextCopy(info);
     if (await this.copyTextToClipboard(info.text, uiText("Copied PDF text.", "Copied PDF text."))) {
       this.hideNativeTextSelectionMenu();
       activeDocument.getSelection()?.removeAllRanges();
@@ -4977,11 +5161,14 @@ class InkSession {
   }
 
   private getPdfCanvas(overlay: PageOverlay): HTMLCanvasElement | null {
-    return (
-      overlay.pageEl.querySelector<HTMLCanvasElement>(".canvasWrapper canvas") ??
-      Array.from(overlay.pageEl.querySelectorAll<HTMLCanvasElement>("canvas")).find((canvas) => !canvas.classList.contains("pdftion-canvas")) ??
-      null
-    );
+    const candidates = Array.from(new Set([
+      overlay.observedCanvas ?? null,
+      overlay.pageEl.querySelector<HTMLCanvasElement>(".canvasWrapper canvas"),
+      ...Array.from(overlay.pageEl.querySelectorAll<HTMLCanvasElement>("canvas"))
+    ].filter((canvas): canvas is HTMLCanvasElement => canvas !== null && !canvas.classList.contains("pdftion-canvas"))));
+    return candidates
+      .filter((canvas) => canvas.width > 1 && canvas.height > 1)
+      .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] ?? candidates[0] ?? null;
   }
 
   private blockNativePdfAnnotationEvent(event: Event): void {
@@ -5134,7 +5321,16 @@ class InkSession {
     if (selected) {
       if (!this.selectedStrokeIds.has(selected.id)) {
         this.setSelectedElementForEditing(selected, overlay);
-        this.selectionDrag = null;
+        this.selectionDrag = this.canDragSelectedElements(overlay.pageIndex)
+          ? {
+              current: point,
+              mode: "move",
+              moved: false,
+              pageIndex: overlay.pageIndex,
+              startedFromFreshSelection: true,
+              start: point
+            }
+          : null;
         this.redrawAll();
         return;
       }
@@ -5218,6 +5414,108 @@ class InkSession {
     }
 
     this.redrawAll();
+  }
+
+  private startLayerLongPress(overlay: PageOverlay, point: InkPoint, clientX: number, clientY: number): void {
+    this.clearLayerLongPress();
+    this.layerMenu?.remove();
+    this.layerMenu = null;
+    const element = this.findElementAt(overlay, point);
+    if (!element) {
+      return;
+    }
+
+    this.layerLongPressStart = { clientX, clientY, elementId: element.id, pageIndex: overlay.pageIndex };
+    this.layerLongPressTimer = window.setTimeout(() => {
+      this.layerLongPressTimer = null;
+      const start = this.layerLongPressStart;
+      const live = start ? this.findElementById(start.elementId) : null;
+      const liveOverlay = start ? this.findOverlayByPageIndex(start.pageIndex) : null;
+      if (!start || !live || !liveOverlay || !this.enabled) {
+        this.layerLongPressStart = null;
+        return;
+      }
+
+      this.layerLongPressTriggered = true;
+      this.clearCurrentStroke();
+      this.currentCover = null;
+      this.selectionDrag = null;
+      this.setSingleSelectedElement(live.id);
+      this.showLayerMenuForElement(live, liveOverlay);
+      this.redrawAll();
+      this.updateToolbarState();
+    }, 520);
+  }
+
+  private cancelLayerLongPressOnMove(clientX: number, clientY: number): void {
+    const start = this.layerLongPressStart;
+    if (!start || this.layerLongPressTriggered) {
+      return;
+    }
+    if (Math.hypot(clientX - start.clientX, clientY - start.clientY) > 9) {
+      this.clearLayerLongPress();
+    }
+  }
+
+  private clearLayerLongPress(): void {
+    if (this.layerLongPressTimer !== null) {
+      window.clearTimeout(this.layerLongPressTimer);
+      this.layerLongPressTimer = null;
+    }
+    this.layerLongPressStart = null;
+  }
+
+  private consumeLayerLongPress(): boolean {
+    this.clearLayerLongPress();
+    if (!this.layerLongPressTriggered) {
+      return false;
+    }
+    this.layerLongPressTriggered = false;
+    return true;
+  }
+
+  private showLayerMenuForElement(element: InkElement, overlay: PageOverlay): void {
+    this.layerMenu?.remove();
+    const panel = activeDocument.createElement("div");
+    panel.className = "pdftion-layer-menu";
+    panel.setAttribute("role", "toolbar");
+    panel.setAttribute("aria-label", uiText("元素层级", "Element layer"));
+    panel.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    panel.addEventListener("click", (event) => event.stopPropagation());
+
+    const actions: Array<{ icon: string; mode: "up" | "down" | "top" | "bottom"; title: string }> = [
+      { icon: "arrow-up", mode: "up", title: uiText("上移一层", "Move one layer up") },
+      { icon: "arrow-down", mode: "down", title: uiText("下移一层", "Move one layer down") },
+      { icon: "chevrons-up", mode: "top", title: uiText("置于顶层", "Bring to front") },
+      { icon: "chevrons-down", mode: "bottom", title: uiText("置于底层", "Send to back") }
+    ];
+    for (const action of actions) {
+      const button = createIconButton(action.icon, action.title);
+      button.addEventListener("click", () => {
+        this.reorderSelectedLayers(action.mode);
+        panel.remove();
+        this.layerMenu = null;
+      });
+      panel.appendChild(button);
+    }
+
+    appendToActiveBody(panel);
+    const bounds = normalizedElementBounds(element);
+    const rect = this.getOverlayClientRect(overlay);
+    const menuWidth = 4 * 30 + 3 * 5 + 12;
+    const menuHeight = 42;
+    const centerX = bounds ? rect.left + ((bounds.minX + bounds.maxX) / 2) * rect.width : rect.left + rect.width / 2;
+    const elementTop = bounds ? rect.top + bounds.minY * rect.height : rect.top;
+    const elementBottom = bounds ? rect.top + bounds.maxY * rect.height : rect.bottom;
+    const top = elementTop - menuHeight - 7 >= 8 ? elementTop - menuHeight - 7 : elementBottom + 7;
+    panel.setCssStyles({
+      left: `${clamp(centerX - menuWidth / 2, 8, Math.max(8, activeWindow.innerWidth - menuWidth - 8))}px`,
+      top: `${clamp(top, 8, Math.max(8, activeWindow.innerHeight - menuHeight - 8))}px`
+    });
+    this.layerMenu = panel;
   }
 
   private togglePalette(): void {
@@ -5409,26 +5707,6 @@ class InkSession {
     }
     colorRow.appendChild(this.createAdvancedColorInput("selection", this.getSelectedPaletteColor(), (color) => this.setSelectedPaletteColor(color)));
     group.appendChild(colorRow);
-
-    const layerHeading = activeDocument.createElement("div");
-    layerHeading.className = "pdftion-palette-heading";
-    layerHeading.textContent = uiText("元素层级", "Element layer");
-    group.appendChild(layerHeading);
-
-    const layerRow = activeDocument.createElement("div");
-    layerRow.className = "pdftion-layer-actions";
-    const layerActions: Array<{ icon: string; mode: "up" | "down" | "top" | "bottom"; title: string }> = [
-      { icon: "arrow-up", mode: "up", title: uiText("上移一层", "Move one layer up") },
-      { icon: "arrow-down", mode: "down", title: uiText("下移一层", "Move one layer down") },
-      { icon: "chevrons-up", mode: "top", title: uiText("置于顶层", "Bring to front") },
-      { icon: "chevrons-down", mode: "bottom", title: uiText("置于底层", "Send to back") }
-    ];
-    for (const action of layerActions) {
-      const button = createIconButton(action.icon, action.title);
-      button.addEventListener("click", () => this.reorderSelectedLayers(action.mode));
-      layerRow.appendChild(button);
-    }
-    group.appendChild(layerRow);
 
     return group;
   }
@@ -5690,7 +5968,7 @@ class InkSession {
       locate.appendChild(page);
       const preview = activeDocument.createElement("span");
       preview.className = "pdftion-comment-preview";
-      preview.textContent = comment.text.replace(/\s+/g, " ").trim();
+      preview.textContent = comment.text.trim();
       locate.appendChild(preview);
       locate.addEventListener("click", () => {
         this.setSingleSelectedElement(comment.id);
@@ -6192,6 +6470,7 @@ class InkSession {
     this.textFontSize = this.plugin.settings.textFontSize;
     this.textOpacity = this.plugin.settings.textOpacity;
     this.nativeTextHighlightColor = this.plugin.settings.nativeTextHighlightColor;
+    this.nativeTextSelectionAction = this.plugin.settings.nativeTextSelectionAction;
   }
 
   private setToolColor(tool: "pen" | "highlight", color: string): void {
@@ -6271,6 +6550,10 @@ class InkSession {
 
     event.preventDefault();
     event.stopPropagation();
+    this.cancelLayerLongPressOnMove(event.clientX, event.clientY);
+    if (this.layerLongPressTriggered) {
+      return;
+    }
     const events = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [event];
     const stroke = this.currentStroke;
     if (stroke?.pageIndex === overlay.pageIndex) {
@@ -6489,7 +6772,8 @@ class InkSession {
       this.redoStack = [];
       drag.moved = true;
       drag.current = point;
-      this.requestOverlayRedraw(overlay);
+      this.updateExternalInkLayerState();
+      this.redrawOverlay(overlay);
       return;
     }
 
@@ -6507,7 +6791,8 @@ class InkSession {
       this.redoStack = [];
       drag.moved = true;
       drag.current = point;
-      this.requestOverlayRedraw(overlay);
+      this.updateExternalInkLayerState();
+      this.redrawOverlay(overlay);
       return;
     }
 
@@ -6529,6 +6814,10 @@ class InkSession {
 
     if (overlay.canvas.hasPointerCapture(event.pointerId)) {
       overlay.canvas.releasePointerCapture(event.pointerId);
+    }
+
+    if (this.consumeLayerLongPress()) {
+      return;
     }
 
     this.endInkInteraction(overlay);
@@ -6617,7 +6906,8 @@ class InkSession {
 
     if (drag.mode === "move") {
       if (drag.moved) {
-        this.redrawAll();
+        this.updateExternalInkLayerState();
+        this.redrawOverlay(overlay);
         this.scheduleAutoSave(250);
       } else if (drag.clearSelectionOnTap) {
         this.clearEditableSelection();
@@ -6629,7 +6919,8 @@ class InkSession {
 
     if (drag.mode === "resize") {
       if (drag.moved) {
-        this.redrawAll();
+        this.updateExternalInkLayerState();
+        this.redrawOverlay(overlay);
         this.scheduleAutoSave(250);
       }
       this.updateToolbarState();
@@ -6665,6 +6956,7 @@ class InkSession {
     if (event.touches.length >= 2) {
       event.preventDefault();
       event.stopPropagation();
+      this.clearLayerLongPress();
       this.touchGestureCooldownUntil = Date.now() + 450;
       this.clearCurrentStroke();
       this.activeTouchId = null;
@@ -6714,9 +7006,11 @@ class InkSession {
       normalizedDistance(previousTap.point, point, overlay.cssWidth, overlay.cssHeight) < 18;
     this.lastTap = { pageIndex: overlay.pageIndex, point, time: now };
     if (isDoubleTap && this.openEditorAtPoint(point, overlay)) {
+      this.clearLayerLongPress();
       this.activeTouchId = null;
       return;
     }
+    this.startLayerLongPress(overlay, point, touch.clientX, touch.clientY);
     this.beginInkInteraction(point, overlay);
   }
 
@@ -6788,6 +7082,10 @@ class InkSession {
 
     event.preventDefault();
     event.stopPropagation();
+    this.cancelLayerLongPressOnMove(touch.clientX, touch.clientY);
+    if (this.layerLongPressTriggered) {
+      return;
+    }
     this.currentStrokeHadTouchMove = true;
     this.moveInkInteraction(this.getOverlayInputPoint(overlay, touch.clientX, touch.clientY), overlay);
   }
@@ -6825,6 +7123,9 @@ class InkSession {
     event.preventDefault();
     event.stopPropagation();
     this.activeTouchId = null;
+    if (this.consumeLayerLongPress()) {
+      return;
+    }
     this.endInkInteraction(overlay);
   }
 
@@ -7269,20 +7570,20 @@ class InkSession {
         width: page.width
       }));
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "md");
-      const markdown = buildEditableMarkdown(this.file, pages);
+      const images = await this.persistNoteDrawExportImages(
+        targetPath,
+        collectNoteDrawExportImages([], this.getEditableElements())
+      );
+      const markdown = buildEditableMarkdown(this.file, pages, images);
       const targetFile = await this.plugin.app.vault.create(targetPath, markdown);
       if (noteDraw) {
-        const images = await this.persistNoteDrawExportImages(
-          targetPath,
-          collectNoteDrawExportImages(visualPages, this.getEditableElements())
-        );
-        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements(), images));
+        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements()));
       }
       const opened = await this.openConvertedMarkdownFile(targetFile);
       if (options.notice !== false) {
         new Notice(noteDraw
-          ? uiText(`已转换${opened ? "并打开" : ""} MD，文字可编辑，涂鸦和悬浮图片已转为 NoteDraw：${targetPath}`, `Converted${opened ? " and opened" : ""} editable MD with NoteDraw ink and floating images: ${targetPath}`)
-          : uiText(`已转换${opened ? "并打开" : ""} MD：${targetPath}`, `Converted${opened ? " and opened" : ""} MD: ${targetPath}`));
+          ? uiText(`已转换${opened ? "并打开" : ""} MD，文字与插图可直接编辑，涂鸦已转为 NoteDraw：${targetPath}`, `Converted${opened ? " and opened" : ""} editable MD with native images and NoteDraw ink: ${targetPath}`)
+          : uiText(`已转换${opened ? "并打开" : ""} MD，插图已使用原生 Markdown 引用：${targetPath}`, `Converted${opened ? " and opened" : ""} MD with native image references: ${targetPath}`));
       }
       return targetPath;
     } catch (error) {
@@ -7377,7 +7678,8 @@ class InkSession {
       return targetPath;
     } catch (error) {
       console.error(error);
-      new Notice(uiText("转换 PPTX 失败，请查看控制台。", "PPTX conversion failed. Check the console."));
+      const message = error instanceof Error ? error.message : String(error);
+      new Notice(uiText(`转换 PPTX 失败：${message}`, `PPTX conversion failed: ${message}`), 12_000);
       return null;
     }
   }
@@ -7401,7 +7703,11 @@ class InkSession {
   }
 
   private async captureVisualConversionPages(options: VisualCaptureOptions = {}): Promise<VisualConversionPage[]> {
-    const pageCount = await this.getCurrentPdfPageCount();
+    const pageElements = this.findPageElements();
+    const screenOnlySurface = pageElements.length === 1 && !pageElements[0].matches(
+      ".pdfViewer .page, .pdf-viewer .page, .pdf-container .page, .page[data-page-number]"
+    );
+    const pageCount = screenOnlySurface ? 1 : await this.getCurrentPdfPageCount();
     const pages: VisualConversionPage[] = [];
     const firstPage = this.findPdfPageElementForExport(0) ?? this.rootEl;
     const scrollEl = findScrollableAncestor(firstPage);
@@ -7410,20 +7716,28 @@ class InkSession {
 
     try {
       for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
-        let overlay = this.findOverlayByPageIndex(pageIndex);
-        let captured = overlay ? await this.captureVisualPageImage(overlay, options) : null;
-        if (!captured) {
-          const pageEl = this.findPdfPageElementForExport(pageIndex);
-          pageEl?.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
-          for (let attempt = 0; attempt < 16 && !captured; attempt += 1) {
-            await sleepMs(attempt === 0 ? 90 : 120);
-            this.scanPages();
-            overlay = this.findOverlayByPageIndex(pageIndex);
-            if (overlay) {
-              this.resizeOverlay(overlay);
-              captured = await this.captureVisualPageImage(overlay, options);
-            }
+        const pageEl = this.findPdfPageElementForExport(pageIndex);
+        pageEl?.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+        await this.ensurePdfPageRenderedForExport(pageIndex, pageEl);
+        let captured: VisualConversionPage | null = null;
+        for (let attempt = 0; attempt < 16 && !captured; attempt += 1) {
+          await sleepMs(attempt === 0 ? 140 : 120);
+          this.scanPages();
+          const overlay = this.findOverlayByPageIndex(pageIndex);
+          if (!overlay) {
+            continue;
           }
+          this.resizeOverlay(overlay);
+          await waitForNextFrame();
+          const candidate = await this.captureVisualPageImage(overlay, options);
+          if (!candidate) {
+            continue;
+          }
+          const canvasStillBlank = candidate.sourceVisualRatio < 0.00035 && candidate.lines.length > 0;
+          if (canvasStillBlank && attempt < 15) {
+            continue;
+          }
+          captured = candidate;
         }
         if (captured) {
           pages.push(captured);
@@ -7442,11 +7756,80 @@ class InkSession {
     return pages;
   }
 
+  private getNativePdfViewerApp(): NativePdfViewerAppLike | null {
+    const view = this.leaf.view as unknown as PdfViewLike;
+    return view.viewer?.child?.pdfViewer ?? null;
+  }
+
+  private requestNativePdfPageRender(pageIndex: number): void {
+    const app = this.getNativePdfViewerApp();
+    const viewer = app?.pdfViewer;
+    if (!viewer) {
+      return;
+    }
+    const pageNumber = pageIndex + 1;
+    const pageView = viewer.getPageView?.(pageIndex) ?? viewer._pages?.[pageIndex] ?? null;
+    try {
+      viewer.scrollPageIntoView?.({ pageNumber });
+      viewer.currentPageNumber = pageNumber;
+      viewer.update?.();
+      if (pageView?.renderingState === 2 && typeof pageView.resume === "function") {
+        pageView.resume();
+      } else if (pageView && pageView.renderingState !== 3) {
+        (app?.pdfRenderingQueue ?? viewer.renderingQueue)?.renderView?.(pageView);
+      }
+      app?.forceRendering?.();
+      viewer.forceRendering?.();
+      (app?.pdfRenderingQueue ?? viewer.renderingQueue)?.renderHighestPriority?.();
+    } catch (error) {
+      console.debug("pdftion could not explicitly request PDF page rendering.", error);
+    }
+  }
+
+  private async ensurePdfPageRenderedForExport(pageIndex: number, pageEl: HTMLElement | null): Promise<void> {
+    const app = this.getNativePdfViewerApp();
+    const viewer = app?.pdfViewer;
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      this.scanPages();
+      const overlay = this.findOverlayByPageIndex(pageIndex);
+      const pageView = viewer?.getPageView?.(pageIndex) ?? viewer?._pages?.[pageIndex] ?? null;
+      const canvas = (overlay ? this.getPdfCanvas(overlay) : null) ??
+        pageView?.canvas ??
+        pageEl?.querySelector<HTMLCanvasElement>(".canvasWrapper canvas, canvas");
+      const canvasReady = Boolean(
+        canvas &&
+        canvas.width > 1 &&
+        canvas.height > 1 &&
+        measureCanvasVisualRatio(canvas) > 0.00035
+      );
+      if (canvasReady) {
+        return;
+      }
+      if (attempt === 0 && pageView?.draw) {
+        try {
+          pageView.cancelRendering?.();
+          pageView.reset?.();
+          await Promise.race([pageView.draw(), sleepMs(8_000)]);
+          continue;
+        } catch (error) {
+          console.debug("pdftion could not directly render a PDF page for export.", error);
+        }
+      }
+      if (attempt === 0 || attempt % 4 === 0 || pageView?.renderingState === 2) {
+        this.requestNativePdfPageRender(pageIndex);
+      }
+      await sleepMs(250);
+    }
+  }
+
   private findPdfPageElementForExport(pageIndex: number): HTMLElement | null {
     const candidates = Array.from(this.rootEl.querySelectorAll<HTMLElement>(
       ".pdfViewer .page, .pdf-viewer .page, .pdf-container .page, .page[data-page-number]"
     ));
-    return candidates.find((page, index) => getPageIndex(page, index) === pageIndex) ?? candidates[pageIndex] ?? null;
+    return candidates.find((page, index) => getPageIndex(page, index) === pageIndex) ??
+      candidates[pageIndex] ??
+      this.findPageElements()[pageIndex] ??
+      null;
   }
 
   private async captureVisualPageImage(overlay: PageOverlay, options: VisualCaptureOptions = {}): Promise<VisualConversionPage | null> {
@@ -7473,17 +7856,19 @@ class InkSession {
     ctx.save();
     ctx.scale(outputWidth / Math.max(1, overlay.cssWidth), outputHeight / Math.max(1, overlay.cssHeight));
     const elements = this.getEditableElements();
-    const images = elements
-      .filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)
-      .map((image) => ({
-        dataUrl: image.dataUrl,
+    const images: VisualConversionImage[] = [];
+    for (const image of elements.filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
+      images.push({
+        dataUrl: await convertImageDataUrlToPng(image.dataUrl),
         height: image.height,
         id: image.id,
         opacity: image.opacity,
         width: image.width,
         x: image.x,
-        y: image.y
-      }));
+        y: image.y,
+        zIndex: image.zIndex
+      });
+    }
     for (const element of elements.filter((candidate) => candidate.pageIndex === overlay.pageIndex)) {
       if (element.kind === "cover" && options.includeCovers !== false) {
         drawCoverElement(ctx, element, overlay.cssWidth, overlay.cssHeight, false);
@@ -7521,7 +7906,7 @@ class InkSession {
     if (images.length === 0) {
       return [];
     }
-    const assetDir = `${this.plugin.app.vault.configDir}/plugins/notedraw/assets`;
+    const assetDir = `${targetPath.replace(/\.md$/i, "")}-assets`;
     if (!await this.plugin.app.vault.adapter.exists(assetDir)) {
       await this.plugin.app.vault.adapter.mkdir(assetDir);
     }
@@ -8719,6 +9104,7 @@ class InkSession {
 
       next.forEach((element, index) => {
         if (element.zIndex !== index + 1) {
+          this.markElementChanged(element);
           element.zIndex = index + 1;
           element.saved = false;
         }
@@ -8726,7 +9112,13 @@ class InkSession {
     }
 
     this.markDirty();
-    this.redrawAll();
+    this.updateExternalInkLayerState();
+    for (const pageIndex of pages) {
+      const overlay = this.findOverlayByPageIndex(pageIndex);
+      if (overlay) {
+        this.redrawOverlay(overlay);
+      }
+    }
     this.refreshCommentManager();
     this.scheduleAutoSave();
   }
@@ -9386,6 +9778,7 @@ class InkSession {
     this.plugin.settings.textFontSize = clamp(this.textFontSize, 6, 120);
     this.plugin.settings.textOpacity = clamp(this.textOpacity, 0.05, 1);
     this.plugin.settings.nativeTextHighlightColor = normalizeHexColor(this.nativeTextHighlightColor);
+    this.plugin.settings.nativeTextSelectionAction = this.nativeTextSelectionAction;
 
     this.clearToolSettingsSaveTimer();
     this.settingsSaveTimer = window.setTimeout(() => {
@@ -10129,7 +10522,7 @@ function fitImageToOverlay(
   };
 }
 
-function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[]): string {
+function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[], images: NoteDrawExportImage[] = []): string {
   const output = [
     `# ${escapeMarkdownInline(file.basename)}`,
     "",
@@ -10145,6 +10538,12 @@ function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[]): stri
       if (rendered) {
         output.push(rendered, "");
       }
+    }
+    const pageImages = images
+      .filter((image) => image.pageIndex === page.pageIndex && image.assetPath)
+      .sort((a, b) => ((a.zIndex ?? 0) - (b.zIndex ?? 0)) || a.id.localeCompare(b.id));
+    for (const image of pageImages) {
+      output.push(`![[${escapeObsidianWikilink(image.assetPath ?? image.assetName)}]]`, "");
     }
     if (pagePosition < pages.length - 1) {
       output.push("---", "");
@@ -10567,6 +10966,16 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
     });
     const imageX = (slideWidth - width) / 2;
     const imageY = (slideHeight - height) / 2;
+    for (const image of page.images) {
+      slide.addImage({
+        data: image.dataUrl,
+        h: Math.max(0.01, image.height * height),
+        transparency: Math.round((1 - clamp(image.opacity, 0, 1)) * 100),
+        w: Math.max(0.01, image.width * width),
+        x: imageX + image.x * width,
+        y: imageY + image.y * height
+      });
+    }
     for (const line of page.lines) {
       const textRuns = line.runs.map((run) => ({
         text: run.text,
@@ -10689,7 +11098,7 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
   const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
   const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.84</AppVersion></Properties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.85</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
@@ -11185,6 +11594,22 @@ function drawTextElement(ctx: CanvasRenderingContext2D, text: InkText, cssWidth:
   ctx.restore();
 }
 
+async function convertImageDataUrlToPng(dataUrl: string): Promise<string> {
+  if (/^data:image\/png;base64,/i.test(dataUrl)) {
+    return dataUrl;
+  }
+  const image = await loadDataUrlImage(dataUrl);
+  const canvas = activeDocument.createElement("canvas");
+  canvas.width = Math.max(1, image.naturalWidth || image.width);
+  canvas.height = Math.max(1, image.naturalHeight || image.height);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return dataUrl;
+  }
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
+}
+
 function drawCoverElement(ctx: CanvasRenderingContext2D, cover: InkCover, cssWidth: number, cssHeight: number, selected = false): void {
   ctx.save();
   ctx.globalAlpha = selected ? Math.max(0.18, cover.opacity * 0.5) : cover.opacity;
@@ -11422,19 +11847,17 @@ function textBounds(text: InkText, cssWidth: number, cssHeight: number): { maxX:
 }
 
 function strokeBoxContainsPoint(stroke: InkStroke, point: InkPoint, cssWidth: number, cssHeight: number): boolean {
-  const box = strokeBounds(stroke, cssWidth, cssHeight);
-  if (!box) {
+  if (stroke.points.length === 0) {
     return false;
   }
-
   const displayWidth = strokeDisplayWidth(stroke, cssWidth);
-  const pad = stroke.source === "external-ink"
-    ? Math.max(22, displayWidth * 4)
-    : Math.max(8, displayWidth * 1.8);
-  const px = point.x * cssWidth;
-  const py = point.y * cssHeight;
-
-  return px >= box.minX - pad && px <= box.maxX + pad && py >= box.minY - pad && py <= box.maxY + pad;
+  const hitRadius = stroke.source === "external-ink"
+    ? Math.max(16, displayWidth * 3)
+    : Math.max(9, displayWidth * 2);
+  if (stroke.points.length === 1) {
+    return normalizedDistance(stroke.points[0], point, cssWidth, cssHeight) <= hitRadius;
+  }
+  return strokeContainsPoint(stroke, point, cssWidth, cssHeight, hitRadius);
 }
 
 function textBoxContainsPoint(text: InkText, point: InkPoint, cssWidth: number, cssHeight: number): boolean {

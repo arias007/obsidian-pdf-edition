@@ -43,28 +43,26 @@ test("all requested visual formats share the page capture pipeline", async () =>
   assert.match(source, /for \(let pageIndex = 0; pageIndex < pageCount; pageIndex \+= 1\)/);
   assert.match(source, /Only \$\{pages\.length}\s*\/\s*\$\{pageCount} PDF pages rendered/);
   assert.match(source, /const recentLeaf = this\.app\.workspace\.getMostRecentLeaf\(\)/);
-  assert.match(source, /return visibleMatched \?\? matched/);
+  assert.match(source, /return visiblePdf \?\? visibleOther \?\? matchedPdf \?\? matchedOther/);
   assert.equal((source.match(/await this\.openConvertedFile\((?:targetFile|exportedFile)\)/g) ?? []).length, 5);
   assert.match(source, /await this\.openConvertedMarkdownFile\(targetFile\)/);
   assert.match(source, /const timeout = window\.setTimeout\(finish, 120\)/);
 });
 
-test("Markdown conversion delegates ink and floating images to NoteDraw", async () => {
+test("Markdown conversion keeps native image references and delegates ink to NoteDraw", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /const noteDraw = getNoteDrawWriteApi\(\)/);
   assert.match(source, /const visualPages = await this\.captureVisualConversionPages\(\{/);
-  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages\)/);
+  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages, images\)/);
   assert.doesNotMatch(source, /writeVisualConversionImages\(pages\)/);
   assert.match(source, /persistNoteDrawExportImages/);
+  assert.ok(source.includes('const assetDir = `${targetPath.replace(/\\.md$/i, "")}-assets`;'));
   assert.match(source, /assetPath: image\.assetPath/);
-  assert.match(source, /page\.lines\.length > 0 \|\| page\.sourceVisualRatio < 0\.045/);
+  assert.ok(source.includes('output.push(`![[${escapeObsidianWikilink(image.assetPath ?? image.assetName)}]]`'));
   assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData/);
   assert.match(source, /const opened = await this\.openConvertedMarkdownFile\(targetFile\)/);
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
-  assert.match(source, /kind: "embed"/);
-  assert.match(source, /embedType: "image"/);
-  assert.match(source, /exportImageDataUrl: image\.dataUrl/);
 });
 
 test("Markdown conversion keeps native Markdown and uses minimal HTML for non-native styles", async () => {
@@ -74,7 +72,7 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
     source.indexOf("function getNoteDrawWriteApi")
   );
 
-  assert.match(source, /function buildEditableMarkdown\(file: TFile, pages: EditableMarkdownPage\[\]\)/);
+  assert.match(source, /function buildEditableMarkdown\(file: TFile, pages: EditableMarkdownPage\[\], images: NoteDrawExportImage\[\] = \[\]\)/);
   assert.match(source, /function collectEditableMarkdownLines\(overlay: PageOverlay\)/);
   assert.match(markdownSource, /function escapeMarkdownInline/);
   assert.ok(markdownSource.includes('return `- [${checked ? "x" : " "}]'));
@@ -112,11 +110,51 @@ test("comments and element layers are interactive, persistent, and shared by ren
   assert.match(source, /addStandardTextCommentAnnotation\(pdf, page, element/);
   assert.match(source, /zIndex\?: number/);
   assert.match(source, /private reorderSelectedLayers\(mode: "up" \| "down" \| "top" \| "bottom"\)/);
+  assert.match(source, /private startLayerLongPress\(overlay: PageOverlay/);
+  assert.match(source, /private showLayerMenuForElement\(element: InkElement, overlay: PageOverlay\)/);
+  assert.match(source, /this\.startLayerLongPress\(overlay, point, event\.clientX, event\.clientY\)/);
+  assert.match(source, /this\.startLayerLongPress\(overlay, point, touch\.clientX, touch\.clientY\)/);
+  assert.doesNotMatch(source.slice(source.indexOf("private createPaletteSelectionGroup"), source.indexOf("private createPaletteColorButton")), /pdftion-layer-actions/);
+  assert.match(source, /preview\.textContent = comment\.text\.trim\(\)/);
   assert.match(source, /normalizeInkElementLayers\(elements\)/);
   assert.match(source, /return elements\.sort\(compareInkElements\)/);
   assert.match(source, /const orderedElements = this\.getEditableElements\(\)\.filter/);
   assert.match(source, /const ordered = this\.getEditableElements\(\).*\.reverse\(\)/);
   assert.match(source, /elements\.sort\(compareInkElements\)/);
+});
+
+test("visual export waits for rendered pages and keeps inserted images compatible", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /pageEl\?\.scrollIntoView\(\{ behavior: "auto", block: "center", inline: "nearest" \}\)/);
+  assert.match(source, /ensurePdfPageRenderedForExport\(pageIndex, pageEl\)/);
+  assert.match(source, /canvasStillBlank = candidate\.sourceVisualRatio < 0\.00035 && candidate\.lines\.length > 0/);
+  assert.match(source, /page\.images[\s\S]{0,500}?slide\.addImage/);
+  assert.match(source, /dataUrl: await convertImageDataUrlToPng\(image\.dataUrl\)/);
+  assert.match(source, /await this\.drawImageElementForExport\(ctx, element/);
+  assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
+});
+
+test("placeholder pages, precise stroke hits, and immediate drag redraw stay interactive", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /return candidate\.clientWidth > 0 && candidate\.clientHeight > 0/);
+  assert.match(source, /return strokeContainsPoint\(stroke, point, cssWidth, cssHeight, hitRadius\)/);
+  assert.match(source, /startedFromFreshSelection: true/);
+  assert.match(source, /this\.updateExternalInkLayerState\(\);\s*this\.redrawOverlay\(overlay\)/);
+});
+
+test("native PDF text selection follows the last highlight or copy action", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /nativeTextSelectionAction: "copy" \| "highlight"/);
+  assert.match(source, /if \(this\.nativeTextSelectionAction === "highlight"\) \{\s*this\.ensureNativeTextAutoHighlight\(info\)/);
+  assert.match(source, /private ensureNativeTextAutoHighlight\(info: NativeTextSelectionInfo/);
+  assert.match(source, /this\.nativeTextAutoHighlight\?\.key === selectionKey/);
+  assert.match(source, /private prepareNativeTextCopy\(info: NativeTextSelectionInfo\)/);
+  assert.match(source, /this\.nativeTextSelectionAction = "copy"/);
+  assert.match(source, /this\.coverHistory = this\.coverHistory\.filter\(\(cover\) => !ids\.has\(cover\.id\)\)/);
+  assert.match(source, /this\.nativeTextSelectionAction = "highlight"/);
 });
 
 test("PPTX dependencies are browser-safe and the release bundle has no dynamic execution", async () => {

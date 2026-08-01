@@ -624,9 +624,8 @@ body.pdftion-editing-active .pdfAnnotationPopup {
   font-size: 12px;
   line-height: 1.35;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .pdftion-comment-empty {
@@ -818,6 +817,38 @@ body.pdftion-editing-active .pdfAnnotationPopup {
 }
 
 .pdftion-layer-actions button:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pdftion-layer-menu {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  box-shadow: var(--shadow-s);
+  display: grid;
+  gap: 5px;
+  grid-template-columns: repeat(4, 30px);
+  padding: 6px;
+  position: fixed;
+  z-index: 2147483607;
+}
+
+.pdftion-layer-menu button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  color: var(--text-normal);
+  cursor: pointer;
+  display: inline-flex;
+  height: 30px;
+  justify-content: center;
+  padding: 0;
+  width: 30px;
+}
+
+.pdftion-layer-menu button:hover {
   background: var(--background-modifier-hover);
 }
 
