@@ -11403,6 +11403,11 @@ function renderEditableMarkdownLine(line: EditableMarkdownLine, baseFontSize: nu
       })
       .filter((run) => run.text.length > 0);
   };
+  const headingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text);
+  if (headingLevel !== null && !task && !bullet && !ordered) {
+    const heading = line.runs.map((run) => renderEditableMarkdownRun(run, baseFontSize, true)).join("").trim();
+    return `${"#".repeat(headingLevel)} ${heading || escapeMarkdownInline(text)}`;
+  }
   if (task) {
     const checked = /已完成|☑|☒|✅/.test(task[0]);
     return `- [${checked ? "x" : " "}] ${removePrefix(task[0]).map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
@@ -11416,11 +11421,33 @@ function renderEditableMarkdownLine(line: EditableMarkdownLine, baseFontSize: nu
   return line.runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("") || escapeMarkdownInline(text);
 }
 
-function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16): string {
+function getEditableMarkdownHeadingLevel(
+  line: EditableMarkdownLine,
+  baseFontSize: number,
+  text: string
+): number | null {
+  if (!text || text.length > 120 || baseFontSize <= 0) {
+    return null;
+  }
+  const largestFontSize = Math.max(...line.runs.map((run) => run.fontSize), baseFontSize);
+  const ratio = largestFontSize / baseFontSize;
+  if (ratio >= 1.23) {
+    return 3;
+  }
+  if (ratio >= 1.16) {
+    return 4;
+  }
+  if (ratio >= 1.09) {
+    return 5;
+  }
+  return null;
+}
+
+function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16, suppressFontSize = false): string {
   const validLink = run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link) ? run.link : undefined;
-  const customFont = Boolean(run.fontFamily && !/^(?:inherit|initial|unset|system-ui|sans-serif)$/i.test(run.fontFamily));
-  const customSize = Math.abs(run.fontSize - baseFontSize) > Math.max(2, baseFontSize * 0.18);
-  const customColor = run.color.toLowerCase() !== "#000000";
+  const customFont = Boolean(run.fontFamily && !/(?:inherit|initial|unset|system-ui|sans-serif|serif|arial|helvetica|aptos|calibri|times|simsun|simhei|microsoft yahei|noto sans|source han|pingfang|heiti|songti)/i.test(run.fontFamily));
+  const customSize = !suppressFontSize && Math.abs(run.fontSize - baseFontSize) > Math.max(4, baseFontSize * 0.30);
+  const customColor = !isNearDefaultTextColor(run.color);
   if (run.underline || customFont || customSize || customColor) {
     const styles = [
       customColor ? `color:${run.color}` : "",
@@ -11450,6 +11477,14 @@ function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 
     content = `[${content}](${escapeMarkdownLinkDestination(validLink)})`;
   }
   return content;
+}
+
+function isNearDefaultTextColor(value: string): boolean {
+  const match = value.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (!match) {
+    return value.toLowerCase() === "black";
+  }
+  return Math.max(Number.parseInt(match[1], 16), Number.parseInt(match[2], 16), Number.parseInt(match[3], 16)) <= 72;
 }
 
 function escapeMarkdownInline(value: string): string {
@@ -11788,7 +11823,7 @@ async function extractHtmlDerivedVisualLayers(
     const normalizedArea = normalizedWidth * normalizedHeight;
     const density = visible / Math.max(1, width * height);
     const likelyRasterImage = normalizedWidth >= 0.08 && normalizedHeight >= 0.04 && normalizedArea >= 0.004 &&
-      colors.size >= 8 && (density >= 0.025 || colors.size >= 20);
+      colors.size >= 8 && density >= 0.055;
     if (!likelyRasterImage) {
       continue;
     }
@@ -11902,43 +11937,15 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
     const slideRatio = slideWidth / slideHeight;
     const width = pageRatio >= slideRatio ? slideWidth : slideHeight * pageRatio;
     const height = pageRatio >= slideRatio ? slideWidth / pageRatio : slideHeight;
-    slide.addImage({
-      data: uint8ArrayToDataUrl(page.bytes, "image/png"),
-      h: height,
-      w: width,
-      x: (slideWidth - width) / 2,
-      y: (slideHeight - height) / 2
-    });
     const imageX = (slideWidth - width) / 2;
     const imageY = (slideHeight - height) / 2;
-    for (const line of page.lines) {
-      const textRuns = line.runs.map((run) => ({
-        text: run.text,
-        options: {
-          bold: run.bold,
-          breakLine: false,
-          color: exportHexColor(run.color),
-          fontFace: exportFontFace(run.fontFamily),
-          fontSize: Math.max(4, run.fontSize * 0.75),
-          italic: run.italic,
-          strike: run.strike ? ("sngStrike" as const) : undefined,
-          transparency: 100,
-          underline: run.underline ? { style: "sng" as const } : undefined
-        }
-      }));
-      if (textRuns.length === 0) {
-        continue;
-      }
-      slide.addText(textRuns, {
-        fit: "shrink",
-        h: Math.max(0.05, line.height * height),
-        margin: 0,
-        paraSpaceAfter: 0,
-        transparency: 100,
-        valign: "middle",
-        w: Math.max(0.05, line.width * width),
-        x: imageX + line.left * width,
-        y: imageY + line.top * height
+    if (page.lines.length === 0) {
+      slide.addImage({
+        data: uint8ArrayToDataUrl(page.bytes, "image/png"),
+        h: height,
+        w: width,
+        x: imageX,
+        y: imageY
       });
     }
     for (const image of [...page.images].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))) {
@@ -11950,6 +11957,35 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
         w: Math.max(0.01, image.width * width),
         x: imageX + image.x * width,
         y: imageY + image.y * height
+      });
+    }
+    for (const line of page.lines) {
+      const textRuns = line.runs.map((run) => ({
+        text: run.text,
+        options: {
+          bold: run.bold,
+          breakLine: false,
+          color: exportHexColor(run.color),
+          fontFace: exportFontFace(run.fontFamily),
+          fontSize: Math.max(4, run.fontSize * 0.75),
+          hyperlink: run.link && /^(?:https?:|mailto:)/i.test(run.link) ? { url: run.link } : undefined,
+          italic: run.italic,
+          strike: run.strike ? ("sngStrike" as const) : undefined,
+          underline: run.underline ? { style: "sng" as const } : undefined
+        }
+      }));
+      if (textRuns.length === 0) {
+        continue;
+      }
+      slide.addText(textRuns, {
+        fit: "shrink",
+        h: Math.max(0.05, line.height * height),
+        margin: 0,
+        paraSpaceAfter: 0,
+        valign: "middle",
+        w: Math.max(0.05, line.width * width),
+        x: imageX + line.left * width,
+        y: imageY + line.top * height
       });
     }
   }
@@ -12019,34 +12055,62 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
     return imageRelId;
   };
 
+  const addHyperlink = (url: string): string => {
+    const hyperlinkRelId = `rId${relId}`;
+    relId += 1;
+    rels.push(`<Relationship Id="${hyperlinkRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${xmlEscape(url)}" TargetMode="External"/>`);
+    return hyperlinkRelId;
+  };
+
   for (const [index, page] of sortedPages.entries()) {
-    const imageRelId = addImage(page.bytes, "png");
-    const fitted = fitDocxImage(page.width * 15, page.height * 15, contentWidthTwips, contentHeightTwips);
-    const leftTwips = pageMarginTwips + Math.max(0, Math.round((contentWidthTwips - fitted.widthTwips) / 2));
-    const topTwips = pageMarginTwips + Math.max(0, Math.round((contentHeightTwips - fitted.heightTwips) / 2));
-    const pageDrawingId = drawingId;
-    drawingId += 1;
-    const visualLayers = page.images.map((image) => {
-      const layer = {
-        drawingId,
-        image,
-        relId: addImage(dataUrlToBytes(image.dataUrl), "png")
-      };
+    const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
+    const flowItems: Array<
+      | { kind: "image"; position: number; value: VisualConversionImage }
+      | { kind: "line"; position: number; value: EditableMarkdownLine }
+    > = [
+      ...page.lines.map((line) => ({ kind: "line" as const, position: line.top, value: line })),
+      ...page.images.map((image) => ({ kind: "image" as const, position: image.y, value: image }))
+    ].sort((a, b) => (a.position - b.position) || (a.kind === "image" ? -1 : 1));
+    let previousBottom = 0;
+    if (flowItems.length === 0) {
+      const relId = addImage(page.bytes, "png");
+      const fitted = fitDocxImage(page.width * 15, page.height * 15, contentWidthTwips, contentHeightTwips);
+      body.push(buildDocxInlineImageParagraph(relId, drawingId, fitted.widthTwips, fitted.heightTwips, 0, 0, `${title} page ${page.pageIndex + 1}`));
       drawingId += 1;
-      return layer;
-    });
-    body.push(buildDocxVisualPageParagraph(
-      page,
-      imageRelId,
-      fitted.widthTwips,
-      fitted.heightTwips,
-      pageDrawingId,
-      `${title} page ${page.pageIndex + 1}`,
-      leftTwips,
-      topTwips,
-      visualLayers,
-      index < sortedPages.length - 1
-    ));
+    } else {
+      for (const item of flowItems) {
+        const itemTop = item.position;
+        const spacingBefore = Math.round(clamp((itemTop - previousBottom) * contentHeightTwips, 0, 280));
+        if (item.kind === "line") {
+          body.push(buildDocxEditableTextParagraph(item.value, baseFontSize, contentWidthTwips, spacingBefore, addHyperlink));
+          previousBottom = Math.max(previousBottom, item.value.top + item.value.height);
+          continue;
+        }
+        const image = item.value;
+        const fitted = fitDocxImage(
+          Math.max(1, image.width * contentWidthTwips),
+          Math.max(1, image.height * contentHeightTwips),
+          contentWidthTwips,
+          contentHeightTwips
+        );
+        const leftTwips = Math.round(clamp(image.x * contentWidthTwips, 0, Math.max(0, contentWidthTwips - fitted.widthTwips)));
+        const imageRelId = addImage(dataUrlToBytes(image.dataUrl), "png");
+        body.push(buildDocxInlineImageParagraph(
+          imageRelId,
+          drawingId,
+          fitted.widthTwips,
+          fitted.heightTwips,
+          leftTwips,
+          spacingBefore,
+          `Page ${page.pageIndex + 1} image ${drawingId}`
+        ));
+        drawingId += 1;
+        previousBottom = Math.max(previousBottom, image.y + image.height);
+      }
+    }
+    if (index < sortedPages.length - 1) {
+      body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
+    }
   }
 
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
@@ -12056,7 +12120,7 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
   const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
   const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.89</AppVersion></Properties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.90</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
@@ -12071,33 +12135,18 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   ]);
 }
 
-function buildDocxVisualPageParagraph(
-  page: VisualConversionPage,
+function buildDocxInlineImageParagraph(
   relId: string,
+  drawingId: number,
   widthTwips: number,
   heightTwips: number,
-  drawingId: number,
-  name: string,
   leftTwips: number,
-  topTwips: number,
-  visualLayers: Array<{ drawingId: number; image: VisualConversionImage; relId: string }>,
-  pageBreakAfter: boolean
+  spacingBefore: number,
+  name: string
 ): string {
   const safeName = xmlEscape(name || `Image ${drawingId}`);
   const pageImageXml = buildDocxInlinePageImage(relId, drawingId, widthTwips, heightTwips, safeName);
-  const textLayer = buildDocxAbsoluteTextLayer(page, widthTwips, heightTwips, leftTwips, topTwips);
-  const visualLayerXml = visualLayers.map((layer) => buildDocxFloatingImageAnchor(
-    layer.image,
-    layer.relId,
-    layer.drawingId,
-    leftTwips,
-    topTwips,
-    widthTwips,
-    heightTwips
-  )).join("");
-  const pageBreak = pageBreakAfter ? `<w:r><w:br w:type="page"/></w:r>` : "";
-  const spacingBefore = Math.max(0, topTwips - 720);
-  return `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="${spacingBefore}" w:after="0"/><w:cantSplit/></w:pPr>${pageImageXml}${visualLayerXml}${textLayer}${pageBreak}</w:p>`;
+  return `<w:p><w:pPr><w:ind w:left="${Math.max(0, leftTwips)}"/><w:spacing w:before="${Math.max(0, spacingBefore)}" w:after="40"/><w:keepLines/></w:pPr>${pageImageXml}</w:p>`;
 }
 
 function buildDocxInlinePageImage(
@@ -12112,52 +12161,37 @@ function buildDocxInlinePageImage(
   return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
-function buildDocxFloatingImageAnchor(
-  image: VisualConversionImage,
-  relId: string,
-  drawingId: number,
-  leftTwips: number,
-  topTwips: number,
-  pageWidthTwips: number,
-  pageHeightTwips: number
+function buildDocxEditableTextParagraph(
+  line: EditableMarkdownLine,
+  baseFontSize: number,
+  contentWidthTwips: number,
+  spacingBefore: number,
+  addHyperlink: (url: string) => string
 ): string {
-  const xEmu = Math.max(0, Math.round((leftTwips + image.x * pageWidthTwips) * 635));
-  const yEmu = Math.max(0, Math.round((topTwips + image.y * pageHeightTwips) * 635));
-  const widthEmu = Math.max(635, Math.round(image.width * pageWidthTwips * 635));
-  const heightEmu = Math.max(635, Math.round(image.height * pageHeightTwips * 635));
-  const name = xmlEscape(`Page visual ${drawingId}`);
-  return `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${251659264 + drawingId}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>${xEmu}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>${yEmu}</wp:posOffset></wp:positionV><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
-}
-
-function buildDocxAbsoluteTextLayer(
-  page: VisualConversionPage,
-  widthTwips: number,
-  heightTwips: number,
-  leftTwips: number,
-  topTwips: number
-): string {
-  return page.lines.map((line, lineIndex) => {
-    const runs = line.runs.map((run) => {
-      const font = xmlEscape(exportFontFace(run.fontFamily));
-      const size = Math.max(2, Math.round(run.fontSize * 1.5));
-      const rPr = [
-        run.bold ? "<w:b/>" : "",
-        run.italic ? "<w:i/>" : "",
-        run.strike ? "<w:strike/>" : "",
-        run.underline ? "<w:u w:val=\"single\"/>" : "",
-        `<w:color w:val="${exportHexColor(run.color)}"/>`,
-        `<w:sz w:val="${size}"/><w:szCs w:val="${size}"/>`,
-        `<w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:eastAsia="${font}"/>`
-      ].filter(Boolean).join("");
-      return `<w:r><w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${xmlEscape(run.text)}</w:t></w:r>`;
-    }).join("");
-    const leftPt = (leftTwips + line.left * widthTwips) / 20;
-    const topPt = (topTwips + line.top * heightTwips) / 20;
-    const widthPt = Math.max(1, line.width * widthTwips / 20);
-    const heightPt = Math.max(1, line.height * heightTwips / 20);
-    const shapeId = `_x0000_s${page.pageIndex + 1}${String(lineIndex + 1).padStart(4, "0")}`;
-    return `<w:r><w:pict><v:shape id="${shapeId}" o:spt="202" filled="f" stroked="f" style="position:absolute;margin-left:${leftPt.toFixed(2)}pt;margin-top:${topPt.toFixed(2)}pt;width:${widthPt.toFixed(2)}pt;height:${heightPt.toFixed(2)}pt;z-index:251659264;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-distance-left:0;mso-wrap-distance-top:0;mso-wrap-distance-right:0;mso-wrap-distance-bottom:0"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1"/></w:pPr>${runs}</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+  const text = line.runs.map((run) => run.text).join("").trim();
+  const headingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text);
+  const runs = line.runs.map((run) => {
+    const font = xmlEscape(exportFontFace(run.fontFamily));
+    const size = Math.max(12, Math.round(run.fontSize * 1.5));
+    const rPr = [
+      run.bold || headingLevel !== null ? "<w:b/>" : "",
+      run.italic ? "<w:i/>" : "",
+      run.strike ? "<w:strike/>" : "",
+      run.underline ? "<w:u w:val=\"single\"/>" : "",
+      `<w:color w:val="${exportHexColor(run.color)}"/>`,
+      `<w:sz w:val="${size}"/><w:szCs w:val="${size}"/>`,
+      `<w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:eastAsia="${font}"/>`
+    ].filter(Boolean).join("");
+    const runXml = `<w:r><w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${xmlEscape(run.text)}</w:t></w:r>`;
+    const validLink = run.link && /^(?:https?:|mailto:)/i.test(run.link) ? run.link : null;
+    return validLink ? `<w:hyperlink r:id="${addHyperlink(validLink)}">${runXml}</w:hyperlink>` : runXml;
   }).join("");
+  const leftTwips = Math.round(clamp(line.left * contentWidthTwips, 0, contentWidthTwips * 0.82));
+  const rightTwips = Math.round(clamp((1 - line.left - line.width) * contentWidthTwips, 0, contentWidthTwips * 0.82));
+  const largestFontSize = Math.max(...line.runs.map((run) => run.fontSize), baseFontSize);
+  const lineTwips = Math.max(240, Math.round(largestFontSize * 18));
+  const outline = headingLevel !== null ? `<w:outlineLvl w:val="${Math.min(8, headingLevel - 1)}"/><w:keepNext/>` : "";
+  return `<w:p><w:pPr><w:ind w:left="${leftTwips}" w:right="${rightTwips}"/><w:spacing w:before="${Math.max(0, spacingBefore)}" w:after="40" w:line="${lineTwips}" w:lineRule="atLeast"/><w:keepLines/>${outline}</w:pPr>${runs}</w:p>`;
 }
 
 function fitDocxImage(width: number, height: number, maxWidthTwips: number, maxHeightTwips: number): { heightTwips: number; widthTwips: number } {

@@ -87,6 +87,10 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
   assert.ok(markdownSource.includes('content = `**${content}**`;'));
   assert.match(markdownSource, /escapeMarkdownLinkDestination\(validLink\)/);
   assert.match(markdownSource, /<span style=/);
+  assert.match(markdownSource, /getEditableMarkdownHeadingLevel\(line, baseFontSize, text\)/);
+  assert.match(markdownSource, /renderEditableMarkdownRun\(run, baseFontSize, true\)/);
+  assert.match(markdownSource, /Math\.max\(4, baseFontSize \* 0\.30\)/);
+  assert.match(markdownSource, /isNearDefaultTextColor\(run\.color\)/);
   assert.doesNotMatch(markdownSource, /<section\b|<div\b|<input\b|<label\b/i);
 });
 
@@ -102,16 +106,13 @@ test("visual exports reuse the HTML-quality snapshot and keep editable text", as
   assert.match(source, /await this\.drawImageElementForExport/);
   assert.match(source, /<div class="text-layer"/);
   assert.ok(source.includes('<w:t xml:space="preserve">'));
-  assert.match(source, /const imageRelId = addImage\(page\.bytes, "png"\)/);
-  assert.match(source, /buildDocxVisualPageParagraph\(/);
-  assert.match(source, /buildDocxAbsoluteTextLayer\(/);
-  assert.match(source, /buildDocxInlinePageImage\(relId, drawingId, widthTwips, heightTwips, safeName\)/);
+  assert.match(source, /buildDocxEditableTextParagraph\(item\.value, baseFontSize, contentWidthTwips, spacingBefore, addHyperlink\)/);
+  assert.match(source, /buildDocxInlineImageParagraph\(/);
+  assert.match(source, /addImage\(dataUrlToBytes\(image\.dataUrl\), "png"\)/);
+  assert.match(source, /<w:hyperlink r:id=/);
   assert.match(source, /<wp:inline distT="0" distB="0" distL="0" distR="0">/);
-  assert.match(source, /wp:positionH relativeFrom="page"/);
-  assert.match(source, /const pageBreak = pageBreakAfter \?/);
-  assert.doesNotMatch(source, /body\.push\(`<w:p><w:r><w:br w:type="page"\/\><\/w:r><\/w:p>`\)/);
+  assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
   assert.doesNotMatch(source, /<w:vanish\/>/);
-  assert.match(source, /mso-position-horizontal-relative:page/);
 });
 
 test("comments and element layers are interactive, persistent, and shared by rendering and export", async () => {
@@ -151,6 +152,11 @@ test("visual export waits for rendered pages and keeps inserted images compatibl
   assert.match(source, /extractHtmlDerivedVisualLayers\(canvas, lines, overlay\.pageIndex\)/);
   assert.match(source, /id: `pdf-raster-page-\$\{pageIndex \+ 1\}-\$\{visuals\.length \+ 1\}`/);
   assert.match(source, /colors\.size >= 8/);
+  assert.match(source, /density >= 0\.055/);
+  const pptSource = source.slice(source.indexOf("async function buildPptxFromPageImages"), source.indexOf("function buildSelfContainedVisualHtml"));
+  assert.ok(pptSource.indexOf("for (const image of [...page.images]") < pptSource.indexOf("for (const line of page.lines)"));
+  assert.match(pptSource, /if \(page\.lines\.length === 0\) \{[\s\S]*?uint8ArrayToDataUrl\(page\.bytes/);
+  assert.doesNotMatch(pptSource, /transparency: 100/);
   assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
 });
 
