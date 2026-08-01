@@ -1,6 +1,6 @@
 {
   "name": "pdftion",
-  "version": "0.3.93",
+  "version": "0.3.94",
   "description": "AI-open PDF annotation, editing, export, and note integration tools.",
   "main": "main.js",
   "scripts": {
@@ -16,6 +16,7 @@
   "dependencies": {
     "@pdf-lib/fontkit": "^1.1.1",
     "docx": "^9.7.1",
+    "jszip": "^3.10.1",
     "pdf-lib": "^1.17.1",
     "pptxgenjs": "^4.0.1"
   },

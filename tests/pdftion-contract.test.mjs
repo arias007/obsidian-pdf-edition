@@ -87,7 +87,8 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
   assert.ok(markdownSource.includes('content = `**${content}**`;'));
   assert.match(markdownSource, /escapeMarkdownLinkDestination\(validLink\)/);
   assert.match(markdownSource, /<span style=/);
-  assert.match(markdownSource, /getEditableMarkdownHeadingLevel\(line, baseFontSize, text\)/);
+  assert.match(markdownSource, /const headingProfile = buildEditableMarkdownHeadingProfile\(pages\)/);
+  assert.match(markdownSource, /getEditableMarkdownHeadingLevel\(line, baseFontSize, text, headingProfile\)/);
   assert.match(markdownSource, /renderEditableMarkdownRun\(run, baseFontSize, true\)/);
   assert.match(markdownSource, /detectEditableMarkdownTables\(page\.lines\)/);
   assert.match(markdownSource, /function splitEditableMarkdownTableRow/);
@@ -101,7 +102,10 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
   assert.match(markdownSource, /semanticSection\?\.kind === "unordered"/);
   assert.match(markdownSource, /semanticSection\?\.kind === "ordered"/);
   assert.match(markdownSource, /applyEditableMarkdownSemanticStyles/);
-  assert.match(markdownSource, /if \(ratio >= 1\.55\)[\s\S]*?if \(ratio >= 1\.35\)[\s\S]*?if \(ratio >= 1\.16\)/);
+  assert.match(markdownSource, /function buildEditableMarkdownHeadingProfile/);
+  assert.match(markdownSource, /\.sort\(\(a, b\) => b\.ratio - a\.ratio\)[\s\S]*?\.slice\(0, 6\)/);
+  assert.match(markdownSource, /if \(ratio >= 1\.46\)[\s\S]*?if \(ratio >= 1\.39\)[\s\S]*?if \(ratio >= 1\.26\)/);
+  assert.doesNotMatch(markdownSource, /output\.push\(`## \$\{uiText\(`第 \$\{page\.pageIndex \+ 1\} 页`/);
   assert.doesNotMatch(markdownSource, /<section\b|<div\b|<input\b|<label\b/i);
 });
 
@@ -124,6 +128,12 @@ test("visual exports reuse the HTML-quality snapshot and keep editable text", as
   assert.match(source, /await import\("docx"\)/);
   assert.match(source, /new ImageRun\(\{/);
   assert.match(source, /data: dataUrlToBytes\(image\.dataUrl\)/);
+  assert.equal((source.match(/return injectOfficePreviewPages\(/g) ?? []).length, 2);
+  assert.match(source, /zip\.file\("mpe\/preview\/manifest\.json"/);
+  assert.match(source, /generator: "Obsidian Mobile PDF Exporter"/);
+  assert.match(source, /producer: "Pdftion"/);
+  assert.match(source, /mpe\/preview\/page-\$\{String\(pageIndex \+ 1\)\.padStart\(4, "0"\)\}\.png/);
+  assert.match(source, /pageCount: sortedPages\.length/);
   assert.match(source, /new ExternalHyperlink\(\{ children: \[textRun\], link: validLink \}\)/);
   assert.match(source, /new Table\(\{/);
   assert.doesNotMatch(source.slice(source.indexOf("async function buildDocxFromPageImages"), source.indexOf("function exportHexColor")), /lineRule|<w:drawing>|<wp:inline/);
@@ -257,6 +267,7 @@ test("PPTX dependencies are browser-safe and the release bundle has no dynamic e
   assert.doesNotMatch(bundle, /new\s+Function\s*\(/);
   assert.doesNotMatch(bundle, /createElement\s*\(\s*["']script["']/);
   assert.equal(packageJson.dependencies.pptxgenjs, "^4.0.1");
+  assert.equal(packageJson.dependencies.jszip, "^3.10.1");
   assert.equal(manifest.author, "Murat");
   assert.equal(packageJson.author, "Murat");
 });

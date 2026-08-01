@@ -1341,6 +1341,11 @@ interface EditableMarkdownPage {
   width: number;
 }
 
+interface EditableMarkdownHeadingProfile {
+  baseFontSize: number;
+  ratios: number[];
+}
+
 interface EditableMarkdownSemanticSection {
   baseLeft?: number;
   kind: "emphasis" | "ordered" | "task" | "unordered";
@@ -11146,9 +11151,9 @@ function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[], image
     `> ${uiText("来源 PDF", "Source PDF")}：[[${escapeObsidianWikilink(file.path)}]]`,
     ""
   ];
+  const headingProfile = buildEditableMarkdownHeadingProfile(pages);
 
   for (const [pagePosition, page] of pages.entries()) {
-    output.push(`## ${uiText(`第 ${page.pageIndex + 1} 页`, `Page ${page.pageIndex + 1}`)}`, "");
     const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
     let semanticSection: EditableMarkdownSemanticSection | null = null;
     const tables = detectEditableMarkdownTables(page.lines);
@@ -11175,12 +11180,12 @@ function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[], image
         continue;
       }
       const lineText = item.value.runs.map((run) => run.text).join("").trim();
-      if (getEditableMarkdownHeadingLevel(item.value, baseFontSize, lineText) !== null) {
+      if (getEditableMarkdownHeadingLevel(item.value, baseFontSize, lineText, headingProfile) !== null) {
         semanticSection = getEditableMarkdownSemanticSection(lineText);
       } else if (semanticSection && typeof semanticSection.baseLeft !== "number") {
         semanticSection.baseLeft = item.value.left;
       }
-      const rendered = renderEditableMarkdownLine(item.value, baseFontSize, semanticSection);
+      const rendered = renderEditableMarkdownLine(item.value, baseFontSize, headingProfile, semanticSection);
       if (rendered) {
         output.push(rendered, "");
       }
@@ -11530,6 +11535,7 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
 function renderEditableMarkdownLine(
   line: EditableMarkdownLine,
   baseFontSize: number,
+  headingProfile: EditableMarkdownHeadingProfile,
   semanticSection: EditableMarkdownSemanticSection | null = null
 ): string {
   const text = line.runs.map((run) => run.text).join("").trim();
@@ -11550,7 +11556,7 @@ function renderEditableMarkdownLine(
       })
       .filter((run) => run.text.length > 0);
   };
-  const headingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text);
+  const headingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text, headingProfile);
   if (headingLevel !== null && !taskMarker && !bullet && !ordered) {
     const heading = line.runs.map((run) => renderEditableMarkdownRun(run, baseFontSize, true)).join("").trim();
     return `${"#".repeat(headingLevel)} ${heading || escapeMarkdownInline(text)}`;
@@ -11629,23 +11635,93 @@ function applyEditableMarkdownSemanticStyles(
 function getEditableMarkdownHeadingLevel(
   line: EditableMarkdownLine,
   baseFontSize: number,
-  text: string
+  text: string,
+  headingProfile?: EditableMarkdownHeadingProfile
 ): number | null {
   if (!text || text.length > 120 || baseFontSize <= 0) {
     return null;
   }
-  const largestFontSize = Math.max(...line.runs.map((run) => run.fontSize), baseFontSize);
-  const ratio = largestFontSize / baseFontSize;
-  if (ratio >= 1.55) {
+  const effectiveBaseFontSize = headingProfile?.baseFontSize ?? baseFontSize;
+  const largestFontSize = Math.max(...line.runs.map((run) => run.fontSize), effectiveBaseFontSize);
+  const ratio = largestFontSize / effectiveBaseFontSize;
+  if (ratio < 1.16) {
+    return null;
+  }
+  if (headingProfile && headingProfile.ratios.length > 0) {
+    const nearest = headingProfile.ratios
+      .map((profileRatio, index) => ({ distance: Math.abs(profileRatio - ratio), index, profileRatio }))
+      .sort((a, b) => a.distance - b.distance)[0];
+    if (nearest && nearest.distance <= Math.max(0.03, nearest.profileRatio * 0.025)) {
+      return Math.min(6, nearest.index + 1);
+    }
+  }
+  if (ratio >= 1.46) {
+    return 1;
+  }
+  if (ratio >= 1.39) {
+    return 2;
+  }
+  if (ratio >= 1.26) {
     return 3;
   }
-  if (ratio >= 1.35) {
-    return 4;
+  return 4;
+}
+
+function buildEditableMarkdownHeadingProfile(
+  pages: Array<Pick<EditableMarkdownPage, "lines">>
+): EditableMarkdownHeadingProfile {
+  const baseFontSize = getEditableMarkdownDocumentBaseFontSize(pages);
+  const ratios = pages.flatMap((page) => {
+    return page.lines.flatMap((line) => {
+      const text = line.runs.map((run) => run.text).join("").trim();
+      if (!text || text.length > 120) {
+        return [];
+      }
+      const ratio = Math.max(...line.runs.map((run) => run.fontSize), baseFontSize) / baseFontSize;
+      return ratio >= 1.16 ? [ratio] : [];
+    });
+  }).sort((a, b) => b - a);
+  const clusters: Array<{ count: number; ratio: number }> = [];
+  for (const ratio of ratios) {
+    const cluster = clusters.find((candidate) => (
+      Math.abs(candidate.ratio - ratio) <= Math.max(0.025, candidate.ratio * 0.018)
+    ));
+    if (cluster) {
+      cluster.ratio = (cluster.ratio * cluster.count + ratio) / (cluster.count + 1);
+      cluster.count += 1;
+    } else {
+      clusters.push({ count: 1, ratio });
+    }
   }
-  if (ratio >= 1.16) {
-    return 5;
+  return {
+    baseFontSize,
+    ratios: clusters
+      .sort((a, b) => b.ratio - a.ratio)
+      .slice(0, 6)
+      .map((cluster) => cluster.ratio)
+  };
+}
+
+function getEditableMarkdownDocumentBaseFontSize(
+  pages: Array<Pick<EditableMarkdownPage, "lines">>
+): number {
+  const clusters: Array<{ size: number; weight: number }> = [];
+  for (const run of pages.flatMap((page) => page.lines.flatMap((line) => line.runs))) {
+    if (!Number.isFinite(run.fontSize) || run.fontSize <= 0) {
+      continue;
+    }
+    const weight = Math.max(1, run.text.replace(/\s+/gu, "").length);
+    const cluster = clusters.find((candidate) => (
+      Math.abs(candidate.size - run.fontSize) <= Math.max(0.18, candidate.size * 0.015)
+    ));
+    if (cluster) {
+      cluster.size = (cluster.size * cluster.weight + run.fontSize * weight) / (cluster.weight + weight);
+      cluster.weight += weight;
+    } else {
+      clusters.push({ size: run.fontSize, weight });
+    }
   }
-  return null;
+  return clusters.sort((a, b) => (b.weight - a.weight) || (a.size - b.size))[0]?.size ?? 16;
 }
 
 function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16, suppressFontSize = false): string {
@@ -12269,16 +12345,17 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
   }
 
   const output = await pptx.write({ outputType: "arraybuffer" });
+  let bytes: Uint8Array;
   if (output instanceof ArrayBuffer) {
-    return new Uint8Array(output);
+    bytes = new Uint8Array(output);
+  } else if (output instanceof Uint8Array) {
+    bytes = output;
+  } else if (output instanceof Blob) {
+    bytes = new Uint8Array(await output.arrayBuffer());
+  } else {
+    throw new Error("PPTX generation returned an unsupported output type.");
   }
-  if (output instanceof Uint8Array) {
-    return output;
-  }
-  if (output instanceof Blob) {
-    return new Uint8Array(await output.arrayBuffer());
-  }
-  throw new Error("PPTX generation returned an unsupported output type.");
+  return injectOfficePreviewPages(bytes, pages, slideWidth * 72, slideHeight * 72);
 }
 
 function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]): string {
@@ -12334,6 +12411,7 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
   const contentHeightTwips = pageHeightTwips - pageMarginTwips * 2;
   const contentWidthPx = contentWidthTwips / 15;
   const contentHeightPx = contentHeightTwips / 15;
+  const headingProfile = buildEditableMarkdownHeadingProfile(pages);
 
   const makeRuns = (runs: EditableMarkdownTextRun[], baseFontSize: number, forceBold = false) => runs.map((run) => {
     const textRun = new TextRun({
@@ -12395,7 +12473,7 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
         const spacingBefore = Math.round(clamp(item.position - previousBottom, 0, 0.045) * contentHeightTwips);
         if (item.kind === "line") {
           const text = item.value.runs.map((run) => run.text).join("").trim();
-          const headingLevel = getEditableMarkdownHeadingLevel(item.value, baseFontSize, text);
+          const headingLevel = getEditableMarkdownHeadingLevel(item.value, baseFontSize, text, headingProfile);
           const leftTwips = Math.round(clamp(
             (item.value.left - horizontalOrigin) * contentWidthTwips,
             0,
@@ -12474,7 +12552,35 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
     title
   });
   const blob = await Packer.toBlob(document);
-  return new Uint8Array(await blob.arrayBuffer());
+  return injectOfficePreviewPages(
+    new Uint8Array(await blob.arrayBuffer()),
+    pages,
+    pageWidthTwips / 20,
+    pageHeightTwips / 20
+  );
+}
+
+async function injectOfficePreviewPages(
+  officeBytes: Uint8Array,
+  pages: VisualConversionPage[],
+  pageWidthPt: number,
+  pageHeightPt: number
+): Promise<Uint8Array> {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(officeBytes);
+  const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
+  zip.file("mpe/preview/manifest.json", JSON.stringify({
+    generator: "Obsidian Mobile PDF Exporter",
+    pageCount: sortedPages.length,
+    pageHeightPt,
+    pageWidthPt,
+    producer: "Pdftion",
+    schemaVersion: 1
+  }));
+  sortedPages.forEach((page, pageIndex) => {
+    zip.file(`mpe/preview/page-${String(pageIndex + 1).padStart(4, "0")}.png`, page.bytes);
+  });
+  return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 }
 
 function exportHexColor(value: string): string {
