@@ -55,13 +55,18 @@ test("Markdown conversion keeps native image references and delegates ink to Not
   assert.match(source, /const noteDraw = getNoteDrawWriteApi\(\)/);
   assert.match(source, /const visualPages = await this\.captureVisualConversionPages\(\{/);
   assert.match(source, /collectNoteDrawExportImages\(visualPages, this\.getEditableElements\(\)\)/);
-  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages, noteDraw \? \[\] : images\)/);
+  assert.match(source, /partitionMarkdownExportImages\(pages, images\)/);
+  assert.match(source, /const inlineImages = noteDraw \? partitionedImages\.inline : images/);
+  assert.match(source, /const noteDrawImages = noteDraw \? partitionedImages\.floating : \[\]/);
+  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages, inlineImages\)/);
   assert.doesNotMatch(source, /writeVisualConversionImages\(pages\)/);
   assert.match(source, /persistNoteDrawExportImages/);
   assert.ok(source.includes('const assetDir = `${targetPath.replace(/\\.md$/i, "")}-assets`;'));
   assert.match(source, /assetPath: image\.assetPath/);
-  assert.ok(source.includes('output.push(`![[${escapeObsidianWikilink(image.assetPath ?? image.assetName)}]]`'));
-  assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData\(targetPath, pages, this\.getEditableElements\(\), images\)\)/);
+  assert.ok(source.includes('output.push(`![[${escapeObsidianWikilink(item.value.assetPath ?? item.value.assetName)}]]`'));
+  assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData\(targetPath, pages, this\.getEditableElements\(\), noteDrawImages\)\)/);
+  assert.match(source, /findSafeMarkdownFloatingImagePosition\(page, image\)/);
+  assert.match(source, /if \(!safePosition\) \{\s*inline\.push\(image\)/);
   assert.match(source, /const opened = await this\.openConvertedMarkdownFile\(targetFile\)/);
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
 });
@@ -89,6 +94,7 @@ test("visual exports reuse the HTML-quality snapshot and keep editable text", as
   assert.match(source, /const lines = collectEditableMarkdownLines\(overlay\)/);
   assert.match(source, /lines,\s*pageIndex: overlay\.pageIndex/);
   assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\)/);
+  assert.match(source, /mergeVisualConversionPageImages\([\s\S]{0,180}?collectNoteDrawExportImages\(capturedPages, this\.getEditableElements\(\)\)/);
   assert.match(source, /slide\.addText\(textRuns/);
   assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
   assert.match(source, /await this\.drawImageElementForExport/);
@@ -97,6 +103,10 @@ test("visual exports reuse the HTML-quality snapshot and keep editable text", as
   assert.match(source, /const imageRelId = addImage\(page\.bytes, "png"\)/);
   assert.match(source, /buildDocxVisualPageParagraph\(/);
   assert.match(source, /buildDocxAbsoluteTextLayer\(/);
+  assert.match(source, /behindDoc="\$\{behindDocument \? 1 : 0\}"/);
+  assert.match(source, /wp:positionH relativeFrom="page"/);
+  assert.match(source, /const pageBreak = pageBreakAfter \?/);
+  assert.doesNotMatch(source, /body\.push\(`<w:p><w:r><w:br w:type="page"\/\><\/w:r><\/w:p>`\)/);
   assert.doesNotMatch(source, /<w:vanish\/>/);
   assert.match(source, /mso-position-horizontal-relative:page/);
 });
@@ -151,16 +161,30 @@ test("placeholder pages, precise stroke hits, and immediate drag redraw stay int
 
 test("PDF ink editing is transactional and restores interrupted work", async () => {
   const source = await readFile(sourceUrl, "utf8");
+  const prepareSource = source.slice(
+    source.indexOf("private async preparePdfInkOverlayForEditing"),
+    source.indexOf("private async commitDetachedInkPages")
+  );
+  const autoSaveSource = source.slice(
+    source.indexOf("private scheduleAutoSave"),
+    source.indexOf("private clearAutoSaveTimer")
+  );
 
   assert.match(source, /data\/ink-edit-transactions/);
   assert.match(source, /beginInkEditTransaction\(file: TFile, pageIndexes: Set<number>\)/);
-  assert.match(source, /removeAllInkAnnotationsOnPages\(pdf, new Set\(normalizedPages\)\)/);
+  assert.match(source, /Array\.from\(\{ length: pdf\.getPageCount\(\) \}, \(_, pageIndex\) => pageIndex\)/);
+  assert.match(source, /removeAllInkAnnotationsOnPages\(pdf, new Set\(transactionPages\)\)/);
   assert.match(source, /backupAnnotationStatePath/);
   assert.match(source, /completeInkEditTransaction\(file: TFile, elements: InkElement\[\], pageIndexes: Set<number>\)/);
   assert.match(source, /Ink verification failed/);
   assert.match(source, /recoverPendingInkEditTransactions\(\)/);
   assert.match(source, /await this\.plugin\.rollbackInkEditTransaction\(this\.file\)/);
   assert.match(source, /await this\.reloadNativePdfView\(\)/);
+  assert.doesNotMatch(prepareSource, /commitDetachedInkPages/);
+  assert.match(autoSaveSource, /if \(this\.enabled\) \{\s*return;/);
+  assert.match(source, /activeWindow, "blur", \(\) => this\.flushAllSessionsSoon\(\)/);
+  assert.match(source, /flushSessionsOutsideLeaf\(leaf\)/);
+  assert.match(source, /void this\.finishPdfInkEditing\(\)/);
 });
 
 test("native PDF text selection follows the last highlight or copy action", async () => {

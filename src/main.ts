@@ -1616,11 +1616,19 @@ export default class PdftionPlugin extends Plugin {
       }
     });
 
-    this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.queuePdfSurfaceScans()));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", (leaf) => {
+      this.flushSessionsOutsideLeaf(leaf);
+      this.queuePdfSurfaceScans();
+    }));
     this.registerEvent(this.app.workspace.on("layout-change", () => this.queuePdfSurfaceScans()));
     this.registerEvent(this.app.workspace.on("file-open", () => this.queuePdfSurfaceScans()));
-    this.registerDomEvent(activeDocument, "visibilitychange", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(activeDocument, "visibilitychange", () => {
+      if (activeDocument.hidden) {
+        this.flushAllSessionsSoon();
+      }
+    });
     this.registerDomEvent(activeDocument, "pointerdown", (event) => this.commitEditorsOnOutsidePointer(event), { capture: true });
+    this.registerDomEvent(activeWindow, "blur", () => this.flushAllSessionsSoon());
     this.registerDomEvent(activeWindow, "pagehide", () => this.flushAllSessionsSoon());
     this.registerDomEvent(activeWindow, "beforeunload", () => this.flushAllSessionsSoon());
     this.register(() => this.clearSurfaceScanTimers());
@@ -1971,8 +1979,7 @@ export default class PdftionPlugin extends Plugin {
     if (existing) {
       if (
         existing.filePath === file.path &&
-        existing.pageIndexes.length === normalizedPages.length &&
-        existing.pageIndexes.every((pageIndex, index) => pageIndex === normalizedPages[index])
+        normalizedPages.every((pageIndex) => existing.pageIndexes.includes(pageIndex))
       ) {
         return;
       }
@@ -1984,6 +1991,8 @@ export default class PdftionPlugin extends Plugin {
     const backupPdfPath = `${dir}/${safeKey}.pdf`;
     const transactionPath = `${dir}/${safeKey}.json`;
     const currentBytes = await this.app.vault.readBinary(file);
+    const pdf = await PDFDocument.load(currentBytes, { ignoreEncryption: true, updateMetadata: false });
+    const transactionPages = Array.from({ length: pdf.getPageCount() }, (_, pageIndex) => pageIndex);
     await this.ensureAdapterFolder(dir);
     await this.app.vault.adapter.writeBinary(backupPdfPath, currentBytes);
     const annotationStatePath = this.getAnnotationStatePath(file);
@@ -2000,7 +2009,7 @@ export default class PdftionPlugin extends Plugin {
       backupAnnotationStatePath,
       backupPdfPath,
       filePath: file.path,
-      pageIndexes: normalizedPages,
+      pageIndexes: transactionPages,
       phase: "editing",
       startedAt: new Date().toISOString(),
       version: 1
@@ -2008,8 +2017,7 @@ export default class PdftionPlugin extends Plugin {
     await this.app.vault.adapter.write(transactionPath, JSON.stringify(record, null, 2));
 
     try {
-      const pdf = await PDFDocument.load(currentBytes, { ignoreEncryption: true, updateMetadata: false });
-      removeAllInkAnnotationsOnPages(pdf, new Set(normalizedPages));
+      removeAllInkAnnotationsOnPages(pdf, new Set(transactionPages));
       const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
       const detachedBytes = new ArrayBuffer(saved.byteLength);
       new Uint8Array(detachedBytes).set(saved);
@@ -2207,6 +2215,14 @@ export default class PdftionPlugin extends Plugin {
   private flushAllSessionsSoon(): void {
     for (const session of this.sessions.values()) {
       session.flushSoon();
+    }
+  }
+
+  private flushSessionsOutsideLeaf(activeLeaf: WorkspaceLeaf | null): void {
+    for (const session of this.sessions.values()) {
+      if (!session.isForLeaf(activeLeaf)) {
+        session.flushSoon();
+      }
     }
   }
 
@@ -2888,6 +2904,10 @@ class InkSession {
 
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  isForLeaf(leaf: WorkspaceLeaf | null): boolean {
+    return leaf === this.leaf;
   }
 
   updateFile(file: TFile): void {
@@ -3814,23 +3834,19 @@ class InkSession {
         if (alreadyPrepared) {
           return;
         }
-        const committed = await this.commitDetachedInkPages(new Set(this.detachedInkEditPages));
-        if (!committed || !this.enabled) {
-          return;
-        }
       }
       for (const pageIndex of pageIndexes) {
         this.pendingNativeInkHidePages.add(pageIndex);
       }
       this.updateExternalInkLayerState();
-      await this.importPdfInkForPages(pageIndexes);
+      await this.importPdfInkForPages();
       await this.plugin.beginInkEditTransaction(this.file, pageIndexes);
       transactionActive = true;
       const detachedBytes = await this.plugin.app.vault.readBinary(this.file);
       await this.plugin.saveEditableAnnotationState(this.file, this.getEditableElements().map(cloneElement), detachedBytes);
       await this.reloadNativePdfView();
-      for (const pageIndex of pageIndexes) {
-        this.detachedInkEditPages.add(pageIndex);
+      this.detachedInkEditPages = await this.plugin.getInkEditTransactionPages(this.file);
+      for (const pageIndex of this.detachedInkEditPages) {
         this.pendingNativeInkHidePages.delete(pageIndex);
       }
       this.updateExternalInkLayerState();
@@ -3952,8 +3968,8 @@ class InkSession {
     }
   }
 
-  private async importPdfInkForPages(pageIndexes: Set<number>): Promise<boolean> {
-    if (pageIndexes.size === 0) {
+  private async importPdfInkForPages(pageIndexes?: Set<number>): Promise<boolean> {
+    if (pageIndexes?.size === 0) {
       return false;
     }
     const targetPath = this.file.path;
@@ -8035,10 +8051,13 @@ class InkSession {
         targetPath,
         collectNoteDrawExportImages(visualPages, this.getEditableElements())
       );
-      const markdown = buildEditableMarkdown(this.file, pages, noteDraw ? [] : images);
+      const partitionedImages = partitionMarkdownExportImages(pages, images);
+      const inlineImages = noteDraw ? partitionedImages.inline : images;
+      const noteDrawImages = noteDraw ? partitionedImages.floating : [];
+      const markdown = buildEditableMarkdown(this.file, pages, inlineImages);
       const targetFile = await this.plugin.app.vault.create(targetPath, markdown);
       if (noteDraw) {
-        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements(), images));
+        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements(), noteDrawImages));
       }
       const opened = await this.openConvertedMarkdownFile(targetFile);
       if (options.notice !== false) {
@@ -8128,7 +8147,11 @@ class InkSession {
   async exportConvertedPptx(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
       await this.prepareExportSnapshot();
-      const pages = await this.captureVisualConversionPages();
+      const capturedPages = await this.captureVisualConversionPages();
+      const pages = mergeVisualConversionPageImages(
+        capturedPages,
+        collectNoteDrawExportImages(capturedPages, this.getEditableElements())
+      );
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "pptx");
       const pptx = await buildPptxFromPageImages(pages, this.file.basename);
       const targetFile = await this.plugin.app.vault.createBinary(targetPath, toArrayBufferCopy(pptx));
@@ -10198,27 +10221,21 @@ class InkSession {
       return;
     }
     this.clearAutoSaveTimer();
-    const effectiveDelay = this.enabled ? Math.min(delay, 900) : delay;
+    if (this.enabled) {
+      return;
+    }
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
-      if (this.enabled) {
-        void this.saveEditableState();
-      } else {
-        void this.saveIntoPdf(true);
-      }
-    }, effectiveDelay);
+      void this.saveIntoPdf(true);
+    }, delay);
   }
 
   flushSoon(): void {
-    if (this.destroyed || !this.hasPendingPdfWrite()) {
+    if (this.destroyed || (this.detachedInkEditPages.size === 0 && !this.hasPendingPdfWrite())) {
       return;
     }
     this.clearAutoSaveTimer();
-    if (this.enabled) {
-      void this.saveEditableState();
-    } else {
-      void this.saveIntoPdf(true);
-    }
+    void this.finishPdfInkEditing();
   }
 
   private clearAutoSaveTimer(): void {
@@ -11016,23 +11033,147 @@ function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[], image
   for (const [pagePosition, page] of pages.entries()) {
     output.push(`## ${uiText(`第 ${page.pageIndex + 1} 页`, `Page ${page.pageIndex + 1}`)}`, "");
     const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
-    for (const line of page.lines) {
-      const rendered = renderEditableMarkdownLine(line, baseFontSize);
+    const pageImages = images
+      .filter((image) => image.pageIndex === page.pageIndex && image.assetPath)
+      .sort((a, b) => (a.y - b.y) || ((a.zIndex ?? 0) - (b.zIndex ?? 0)) || a.id.localeCompare(b.id));
+    const flowItems: Array<
+      | { kind: "image"; position: number; value: NoteDrawExportImage }
+      | { kind: "line"; position: number; value: EditableMarkdownLine }
+    > = [
+      ...page.lines.map((line) => ({ kind: "line" as const, position: line.top, value: line })),
+      ...pageImages.map((image) => ({ kind: "image" as const, position: image.y + image.height / 2, value: image }))
+    ].sort((a, b) => (a.position - b.position) || (a.kind === "image" ? -1 : 1));
+    for (const item of flowItems) {
+      if (item.kind === "image") {
+        output.push(`![[${escapeObsidianWikilink(item.value.assetPath ?? item.value.assetName)}]]`, "");
+        continue;
+      }
+      const rendered = renderEditableMarkdownLine(item.value, baseFontSize);
       if (rendered) {
         output.push(rendered, "");
       }
-    }
-    const pageImages = images
-      .filter((image) => image.pageIndex === page.pageIndex && image.assetPath)
-      .sort((a, b) => ((a.zIndex ?? 0) - (b.zIndex ?? 0)) || a.id.localeCompare(b.id));
-    for (const image of pageImages) {
-      output.push(`![[${escapeObsidianWikilink(image.assetPath ?? image.assetName)}]]`, "");
     }
     if (pagePosition < pages.length - 1) {
       output.push("---", "");
     }
   }
   return `${output.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
+}
+
+function partitionMarkdownExportImages(
+  pages: EditableMarkdownPage[],
+  images: NoteDrawExportImage[]
+): { floating: NoteDrawExportImage[]; inline: NoteDrawExportImage[] } {
+  const pageByIndex = new Map(pages.map((page) => [page.pageIndex, page]));
+  const floating: NoteDrawExportImage[] = [];
+  const inline: NoteDrawExportImage[] = [];
+
+  for (const image of images) {
+    const page = pageByIndex.get(image.pageIndex);
+    if (!page || page.lines.length === 0 || image.id.startsWith("native-page-")) {
+      inline.push(image);
+      continue;
+    }
+    const sharesTextBand = page.lines.some((line) => normalizedRangesOverlap(
+      image.y,
+      image.y + image.height,
+      line.top,
+      line.top + line.height,
+      0.008
+    ));
+    if (!sharesTextBand) {
+      inline.push(image);
+      continue;
+    }
+    const safePosition = findSafeMarkdownFloatingImagePosition(page, image);
+    if (!safePosition) {
+      inline.push(image);
+      continue;
+    }
+    floating.push({ ...image, x: safePosition.x, y: safePosition.y });
+  }
+
+  return { floating, inline };
+}
+
+function findSafeMarkdownFloatingImagePosition(
+  page: EditableMarkdownPage,
+  image: NoteDrawExportImage
+): { x: number; y: number } | null {
+  const padding = 0.012;
+  const maxX = Math.max(0, 1 - image.width);
+  const maxY = Math.max(0, 1 - image.height);
+  const candidateXs = uniqueNormalizedPositions([
+    image.x,
+    padding,
+    maxX - padding,
+    maxX / 2,
+    ...page.lines.flatMap((line) => [line.left - image.width - padding, line.left + line.width + padding])
+  ], maxX);
+  const candidateYs = uniqueNormalizedPositions([
+    image.y,
+    padding,
+    maxY - padding,
+    maxY / 2,
+    ...page.lines.flatMap((line) => [line.top - image.height - padding, line.top + line.height + padding])
+  ], maxY);
+  const candidates = candidateYs.flatMap((y) => candidateXs.map((x) => ({
+    distance: Math.abs(x - image.x) + Math.abs(y - image.y),
+    x,
+    y
+  }))).sort((a, b) => a.distance - b.distance);
+
+  for (const candidate of candidates) {
+    const overlapsText = page.lines.some((line) => normalizedRectsOverlap(
+      candidate.x,
+      candidate.y,
+      image.width,
+      image.height,
+      line.left,
+      line.top,
+      line.width,
+      line.height,
+      padding
+    ));
+    if (!overlapsText) {
+      return { x: candidate.x, y: candidate.y };
+    }
+  }
+  return null;
+}
+
+function uniqueNormalizedPositions(values: number[], maximum: number): number[] {
+  const positions = new Map<string, number>();
+  for (const value of values) {
+    const normalized = clamp(value, 0, maximum);
+    positions.set(normalized.toFixed(4), normalized);
+  }
+  return Array.from(positions.values());
+}
+
+function normalizedRangesOverlap(
+  startA: number,
+  endA: number,
+  startB: number,
+  endB: number,
+  padding = 0
+): boolean {
+  return startA < endB + padding && endA > startB - padding;
+}
+
+function normalizedRectsOverlap(
+  xA: number,
+  yA: number,
+  widthA: number,
+  heightA: number,
+  xB: number,
+  yB: number,
+  widthB: number,
+  heightB: number,
+  padding = 0
+): boolean {
+  return normalizedRangesOverlap(xA, xA + widthA, xB, xB + widthB, padding) &&
+    normalizedRangesOverlap(yA, yA + heightA, yB, yB + heightB, padding);
 }
 
 function getEditableMarkdownBaseFontSize(lines: EditableMarkdownLine[]): number {
@@ -11373,6 +11514,28 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
   return images;
 }
 
+function mergeVisualConversionPageImages(
+  pages: VisualConversionPage[],
+  collectedImages: NoteDrawExportImage[]
+): VisualConversionPage[] {
+  const collectedByPage = new Map<number, NoteDrawExportImage[]>();
+  for (const image of collectedImages) {
+    if (image.id.startsWith("native-page-")) {
+      continue;
+    }
+    const pageImages = collectedByPage.get(image.pageIndex) ?? [];
+    pageImages.push(image);
+    collectedByPage.set(image.pageIndex, pageImages);
+  }
+  return pages.map((page) => {
+    const imagesById = new Map(page.images.map((image) => [image.id, image]));
+    for (const image of collectedByPage.get(page.pageIndex) ?? []) {
+      imagesById.set(image.id, image);
+    }
+    return { ...page, images: Array.from(imagesById.values()) };
+  });
+}
+
 async function extractHtmlDerivedVisualLayer(
   pageCanvas: HTMLCanvasElement,
   lines: EditableMarkdownLine[],
@@ -11653,8 +11816,9 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   let mediaId = 1;
   const body: string[] = [];
   const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
-  const contentWidthTwips = 11906 - 1440;
-  const contentHeightTwips = 16838 - 1440;
+  const pageMarginTwips = 720;
+  const contentWidthTwips = 11906 - pageMarginTwips * 2;
+  const contentHeightTwips = 16838 - pageMarginTwips * 2;
 
   const addImage = (bytes: Uint8Array, extension: string): string => {
     const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
@@ -11670,7 +11834,8 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   for (const [index, page] of sortedPages.entries()) {
     const imageRelId = addImage(page.bytes, "png");
     const fitted = fitDocxImage(page.width * 15, page.height * 15, contentWidthTwips, contentHeightTwips);
-    const leftTwips = Math.max(0, Math.round((contentWidthTwips - fitted.widthTwips) / 2));
+    const leftTwips = pageMarginTwips + Math.max(0, Math.round((contentWidthTwips - fitted.widthTwips) / 2));
+    const topTwips = pageMarginTwips + Math.max(0, Math.round((contentHeightTwips - fitted.heightTwips) / 2));
     const pageDrawingId = drawingId;
     drawingId += 1;
     const visualLayers = page.images.map((image) => {
@@ -11690,11 +11855,10 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
       pageDrawingId,
       `${title} page ${page.pageIndex + 1}`,
       leftTwips,
-      visualLayers
+      topTwips,
+      visualLayers,
+      index < sortedPages.length - 1
     ));
-    if (index < sortedPages.length - 1) {
-      body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
-    }
   }
 
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body>${body.join("")}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:body></w:document>`;
@@ -11704,7 +11868,7 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
   const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
   const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.87</AppVersion></Properties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.88</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
@@ -11727,21 +11891,44 @@ function buildDocxVisualPageParagraph(
   drawingId: number,
   name: string,
   leftTwips: number,
-  visualLayers: Array<{ drawingId: number; image: VisualConversionImage; relId: string }>
+  topTwips: number,
+  visualLayers: Array<{ drawingId: number; image: VisualConversionImage; relId: string }>,
+  pageBreakAfter: boolean
 ): string {
-  const widthEmu = Math.max(635, Math.round(widthTwips * 635));
-  const heightEmu = Math.max(635, Math.round(heightTwips * 635));
   const safeName = xmlEscape(name || `Image ${drawingId}`);
-  const textLayer = buildDocxAbsoluteTextLayer(page, widthTwips, heightTwips, leftTwips, 0);
+  const pageImage: VisualConversionImage = {
+    dataUrl: "",
+    height: 1,
+    id: `docx-page-${page.pageIndex + 1}`,
+    opacity: 1,
+    width: 1,
+    x: 0,
+    y: 0,
+    zIndex: -1
+  };
+  const pageImageXml = buildDocxFloatingImageAnchor(
+    pageImage,
+    relId,
+    drawingId,
+    leftTwips,
+    topTwips,
+    widthTwips,
+    heightTwips,
+    true,
+    safeName
+  );
+  const textLayer = buildDocxAbsoluteTextLayer(page, widthTwips, heightTwips, leftTwips, topTwips);
   const visualLayerXml = visualLayers.map((layer) => buildDocxFloatingImageAnchor(
     layer.image,
     layer.relId,
     layer.drawingId,
     leftTwips,
+    topTwips,
     widthTwips,
     heightTwips
   )).join("");
-  return `<w:p><w:pPr><w:ind w:left="${Math.max(0, leftTwips)}"/><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${drawingId}" name="${safeName}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${safeName}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>${textLayer}${visualLayerXml}</w:p>`;
+  const pageBreak = pageBreakAfter ? `<w:r><w:br w:type="page"/></w:r>` : "";
+  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/><w:cantSplit/></w:pPr>${pageImageXml}${visualLayerXml}${textLayer}${pageBreak}</w:p>`;
 }
 
 function buildDocxFloatingImageAnchor(
@@ -11749,15 +11936,19 @@ function buildDocxFloatingImageAnchor(
   relId: string,
   drawingId: number,
   leftTwips: number,
+  topTwips: number,
   pageWidthTwips: number,
-  pageHeightTwips: number
+  pageHeightTwips: number,
+  behindDocument = false,
+  customName?: string
 ): string {
   const xEmu = Math.max(0, Math.round((leftTwips + image.x * pageWidthTwips) * 635));
-  const yEmu = Math.max(0, Math.round(image.y * pageHeightTwips * 635));
+  const yEmu = Math.max(0, Math.round((topTwips + image.y * pageHeightTwips) * 635));
   const widthEmu = Math.max(635, Math.round(image.width * pageWidthTwips * 635));
   const heightEmu = Math.max(635, Math.round(image.height * pageHeightTwips * 635));
-  const name = xmlEscape(`Page visual ${drawingId}`);
-  return `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${251659264 + drawingId}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>${xEmu}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>${yEmu}</wp:posOffset></wp:positionV><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+  const name = customName ?? xmlEscape(`Page visual ${drawingId}`);
+  const relativeHeight = behindDocument ? 0 : 251659264 + drawingId;
+  return `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${relativeHeight}" behindDoc="${behindDocument ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>${xEmu}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>${yEmu}</wp:posOffset></wp:positionV><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
 }
 
 function buildDocxAbsoluteTextLayer(
