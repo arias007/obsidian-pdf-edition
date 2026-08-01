@@ -1515,6 +1515,7 @@ interface PdfInkEditTransactionRecord {
 
 export default class PdftionPlugin extends Plugin {
   private annotationFontBytes: Uint8Array | null = null;
+  private inkCommitPromises = new Map<string, Promise<boolean>>();
   private sessions = new Map<HTMLElement, InkSession>();
   private surfaceScanTimers: number[] = [];
   settings: PdftionSettings = { ...DEFAULT_SETTINGS };
@@ -1621,16 +1622,13 @@ export default class PdftionPlugin extends Plugin {
       this.queuePdfSurfaceScans();
     }));
     this.registerEvent(this.app.workspace.on("layout-change", () => this.queuePdfSurfaceScans()));
-    this.registerEvent(this.app.workspace.on("file-open", () => this.queuePdfSurfaceScans()));
-    this.registerDomEvent(activeDocument, "visibilitychange", () => {
-      if (activeDocument.hidden) {
-        this.flushAllSessionsSoon();
-      }
-    });
+    this.registerEvent(this.app.workspace.on("file-open", (file) => {
+      this.flushSessionsOutsideFile(file);
+      this.queuePdfSurfaceScans();
+    }));
     this.registerDomEvent(activeDocument, "pointerdown", (event) => this.commitEditorsOnOutsidePointer(event), { capture: true });
-    this.registerDomEvent(activeWindow, "blur", () => this.flushAllSessionsSoon());
-    this.registerDomEvent(activeWindow, "pagehide", () => this.flushAllSessionsSoon());
-    this.registerDomEvent(activeWindow, "beforeunload", () => this.flushAllSessionsSoon());
+    this.registerDomEvent(activeWindow, "pagehide", () => this.checkpointAllSessionsSoon());
+    this.registerDomEvent(activeWindow, "beforeunload", () => this.checkpointAllSessionsSoon());
     this.register(() => this.clearSurfaceScanTimers());
 
     this.queuePdfSurfaceScans();
@@ -2029,6 +2027,22 @@ export default class PdftionPlugin extends Plugin {
   }
 
   async completeInkEditTransaction(file: TFile, elements: InkElement[], pageIndexes: Set<number>): Promise<boolean> {
+    const existing = this.inkCommitPromises.get(file.path);
+    if (existing) {
+      return existing;
+    }
+    const commit = this.completeInkEditTransactionNow(file, elements, pageIndexes);
+    this.inkCommitPromises.set(file.path, commit);
+    try {
+      return await commit;
+    } finally {
+      if (this.inkCommitPromises.get(file.path) === commit) {
+        this.inkCommitPromises.delete(file.path);
+      }
+    }
+  }
+
+  private async completeInkEditTransactionNow(file: TFile, elements: InkElement[], pageIndexes: Set<number>): Promise<boolean> {
     const record = await this.readInkEditTransaction(file);
     if (!record) {
       return true;
@@ -2204,11 +2218,30 @@ export default class PdftionPlugin extends Plugin {
           await this.deleteInkEditTransaction(record);
           continue;
         }
-        await this.restoreInkEditTransaction(file, record, true);
-        console.info(`pdftion recovered interrupted PDF ink editing for ${file.path}.`);
+        const elements = await this.readPendingInkEditElements(file);
+        if (elements) {
+          const committed = await this.completeInkEditTransaction(file, elements, new Set(record.pageIndexes));
+          if (committed) {
+            console.info(`pdftion completed interrupted PDF ink editing for ${file.path}.`);
+            continue;
+          }
+        } else {
+          await this.restoreInkEditTransaction(file, record, true);
+        }
+        console.info(`pdftion restored interrupted PDF ink editing for ${file.path}.`);
       } catch (error) {
         console.warn("pdftion could not recover an interrupted PDF ink transaction.", path, error);
       }
+    }
+  }
+
+  private async readPendingInkEditElements(file: TFile): Promise<InkElement[] | null> {
+    try {
+      const raw = await this.app.vault.adapter.read(this.getAnnotationStatePath(file));
+      const parsed = JSON.parse(raw) as { elements?: unknown };
+      return Array.isArray(parsed.elements) ? parsed.elements.filter(isInkElement) : null;
+    } catch {
+      return null;
     }
   }
 
@@ -2223,6 +2256,20 @@ export default class PdftionPlugin extends Plugin {
       if (!session.isForLeaf(activeLeaf)) {
         session.flushSoon();
       }
+    }
+  }
+
+  private flushSessionsOutsideFile(activeFile: TFile | null): void {
+    for (const session of this.sessions.values()) {
+      if (!activeFile || session.getFilePath() !== activeFile.path) {
+        session.flushSoon();
+      }
+    }
+  }
+
+  private checkpointAllSessionsSoon(): void {
+    for (const session of this.sessions.values()) {
+      session.checkpointSoon();
     }
   }
 
@@ -2711,6 +2758,8 @@ class InkSession {
   private activeTouchId: number | null = null;
   private annotationLoadToken = 0;
   private annotationLoadPromise: Promise<void> | null = null;
+  private checkpointPending = false;
+  private checkpointing = false;
   private preparingPdfInkForEditing = false;
   private pendingEditableInkPrepareAfterSave = false;
   private pendingSaveAfterCurrentSave = false;
@@ -2845,7 +2894,9 @@ class InkSession {
   }
 
   destroy(commitInk = true): void {
-    if (commitInk && this.detachedInkEditPages.size > 0) {
+    if (!commitInk) {
+      this.checkpointSoon();
+    } else if (this.detachedInkEditPages.size > 0) {
       const file = this.file;
       const elements = this.getEditableElements().map(cloneElement);
       const pages = new Set(this.detachedInkEditPages);
@@ -3840,6 +3891,16 @@ class InkSession {
       }
       this.updateExternalInkLayerState();
       await this.importPdfInkForPages();
+      const hasNativeInk = this.strokeHistory.some((stroke) => stroke.pdfSaved === true);
+      if (!hasNativeInk) {
+        for (const pageIndex of pageIndexes) {
+          this.pendingNativeInkHidePages.delete(pageIndex);
+        }
+        this.updateExternalInkLayerState();
+        return;
+      }
+      const sourceBytes = await this.plugin.app.vault.readBinary(this.file);
+      await this.plugin.saveEditableAnnotationState(this.file, this.getEditableElements().map(cloneElement), sourceBytes);
       await this.plugin.beginInkEditTransaction(this.file, pageIndexes);
       transactionActive = true;
       const detachedBytes = await this.plugin.app.vault.readBinary(this.file);
@@ -8001,9 +8062,7 @@ class InkSession {
       return;
     }
     this.pendingEditableInkPrepareAfterSave = false;
-    this.detachedInkEditPages.clear();
-    this.scheduleEditableInkPrepare(0, true);
-    window.setTimeout(() => this.scheduleEditableInkPrepare(0, true), 500);
+    this.scheduleEditableInkPrepare(0);
   }
 
   async exportAnnotationsMarkdown(): Promise<string | null> {
@@ -8024,6 +8083,7 @@ class InkSession {
   }
 
   private async prepareExportSnapshot(): Promise<void> {
+    await this.loadEditableAnnotations();
     this.commitNativeTextEditor();
     await sleepMs(0);
     this.redrawAll();
@@ -8049,7 +8109,7 @@ class InkSession {
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "md");
       const images = await this.persistNoteDrawExportImages(
         targetPath,
-        collectNoteDrawExportImages(visualPages, this.getEditableElements())
+        collectNoteDrawExportImages(visualPages, this.getEditableElements()).filter(isUsefulMarkdownExportImage)
       );
       const partitionedImages = partitionMarkdownExportImages(pages, images);
       const inlineImages = noteDraw ? partitionedImages.inline : images;
@@ -8338,11 +8398,11 @@ class InkSession {
 
     ctx.drawImage(pdfCanvas, 0, 0, sourceWidth, sourceHeight, 0, 0, outputWidth, outputHeight);
     const lines = collectEditableMarkdownLines(overlay);
-    const nativeVisual = await extractHtmlDerivedVisualLayer(canvas, lines, overlay.pageIndex);
+    const nativeVisuals = await extractHtmlDerivedVisualLayers(canvas, lines, overlay.pageIndex);
     ctx.save();
     ctx.scale(outputWidth / Math.max(1, overlay.cssWidth), outputHeight / Math.max(1, overlay.cssHeight));
     const elements = this.getEditableElements();
-    const images: VisualConversionImage[] = nativeVisual ? [nativeVisual] : [];
+    const images: VisualConversionImage[] = [...nativeVisuals];
     for (const image of elements.filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
       images.push({
         dataUrl: await convertImageDataUrlToPng(image.dataUrl),
@@ -10222,6 +10282,11 @@ class InkSession {
     }
     this.clearAutoSaveTimer();
     if (this.enabled) {
+      const checkpointDelay = clamp(delay, 250, 700);
+      this.saveTimer = window.setTimeout(() => {
+        this.saveTimer = null;
+        void this.checkpointEditableState();
+      }, checkpointDelay);
       return;
     }
     this.saveTimer = window.setTimeout(() => {
@@ -10236,6 +10301,39 @@ class InkSession {
     }
     this.clearAutoSaveTimer();
     void this.finishPdfInkEditing();
+  }
+
+  checkpointSoon(): void {
+    if (this.destroyed || !this.hasPendingPdfWrite()) {
+      return;
+    }
+    this.clearAutoSaveTimer();
+    void this.checkpointEditableState();
+  }
+
+  private async checkpointEditableState(): Promise<void> {
+    if (this.checkpointing) {
+      this.checkpointPending = true;
+      return;
+    }
+    const targetFile = this.file;
+    const targetPath = targetFile.path;
+    const elements = this.getEditableElements().map(cloneElement);
+    this.checkpointing = true;
+    try {
+      const binary = await this.plugin.app.vault.readBinary(targetFile);
+      await this.plugin.saveEditableAnnotationState(targetFile, elements, binary);
+    } catch (error) {
+      console.warn("pdftion could not checkpoint editable annotations.", error);
+    } finally {
+      this.checkpointing = false;
+      if (this.checkpointPending) {
+        this.checkpointPending = false;
+        if (!this.destroyed && this.file.path === targetPath) {
+          this.scheduleAutoSave(250);
+        }
+      }
+    }
   }
 
   private clearAutoSaveTimer(): void {
@@ -11514,6 +11612,10 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
   return images;
 }
 
+function isUsefulMarkdownExportImage(image: NoteDrawExportImage): boolean {
+  return !image.id.startsWith("html-visual-page-") && !image.id.startsWith("native-page-");
+}
+
 function mergeVisualConversionPageImages(
   pages: VisualConversionPage[],
   collectedImages: NoteDrawExportImage[]
@@ -11536,20 +11638,20 @@ function mergeVisualConversionPageImages(
   });
 }
 
-async function extractHtmlDerivedVisualLayer(
+async function extractHtmlDerivedVisualLayers(
   pageCanvas: HTMLCanvasElement,
   lines: EditableMarkdownLine[],
   pageIndex: number
-): Promise<VisualConversionImage | null> {
+): Promise<VisualConversionImage[]> {
   if (pageCanvas.width <= 1 || pageCanvas.height <= 1) {
-    return null;
+    return [];
   }
   const layer = activeDocument.createElement("canvas");
   layer.width = pageCanvas.width;
   layer.height = pageCanvas.height;
   const ctx = layer.getContext("2d", { willReadFrequently: true });
   if (!ctx) {
-    return null;
+    return [];
   }
   ctx.drawImage(pageCanvas, 0, 0);
 
@@ -11578,13 +11680,12 @@ async function extractHtmlDerivedVisualLayer(
   try {
     pixels = ctx.getImageData(0, 0, layer.width, layer.height);
   } catch {
-    return null;
+    return [];
   }
-  let minX = layer.width;
-  let minY = layer.height;
-  let maxX = -1;
-  let maxY = -1;
-  let visible = 0;
+  const cellSize = Math.max(4, Math.round(Math.max(layer.width, layer.height) / 180));
+  const columns = Math.ceil(layer.width / cellSize);
+  const rows = Math.ceil(layer.height / cellSize);
+  const cellCounts = new Uint32Array(columns * rows);
   for (let y = 0; y < layer.height; y += 1) {
     for (let x = 0; x < layer.width; x += 1) {
       const offset = (y * layer.width + x) * 4;
@@ -11594,43 +11695,130 @@ async function extractHtmlDerivedVisualLayer(
         pixels.data[offset + 3] = 0;
         continue;
       }
-      visible += 1;
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
+      const cellX = Math.floor(x / cellSize);
+      const cellY = Math.floor(y / cellSize);
+      cellCounts[cellY * columns + cellX] += 1;
     }
   }
-  const minimumVisible = Math.max(80, Math.round(layer.width * layer.height * 0.00008));
-  if (visible < minimumVisible || maxX < minX || maxY < minY) {
-    return null;
-  }
   ctx.putImageData(pixels, 0, 0);
-  const padding = 2;
-  minX = Math.max(0, minX - padding);
-  minY = Math.max(0, minY - padding);
-  maxX = Math.min(layer.width - 1, maxX + padding);
-  maxY = Math.min(layer.height - 1, maxY + padding);
-  const width = maxX - minX + 1;
-  const height = maxY - minY + 1;
-  const cropped = activeDocument.createElement("canvas");
-  cropped.width = width;
-  cropped.height = height;
-  const croppedCtx = cropped.getContext("2d");
-  if (!croppedCtx) {
-    return null;
+  const occupied = new Uint8Array(columns * rows);
+  for (let cellY = 0; cellY < rows; cellY += 1) {
+    for (let cellX = 0; cellX < columns; cellX += 1) {
+      const cellWidth = Math.min(cellSize, layer.width - cellX * cellSize);
+      const cellHeight = Math.min(cellSize, layer.height - cellY * cellSize);
+      const threshold = Math.max(2, Math.round(cellWidth * cellHeight * 0.018));
+      const index = cellY * columns + cellX;
+      occupied[index] = cellCounts[index] >= threshold ? 1 : 0;
+    }
   }
-  croppedCtx.drawImage(layer, minX, minY, width, height, 0, 0, width, height);
-  return {
-    dataUrl: cropped.toDataURL("image/png"),
-    height: height / layer.height,
-    id: `html-visual-page-${pageIndex + 1}`,
-    opacity: 1,
-    width: width / layer.width,
-    x: minX / layer.width,
-    y: minY / layer.height,
-    zIndex: -1
-  };
+
+  const visited = new Uint8Array(columns * rows);
+  const componentBoxes: Array<{ maxCellX: number; maxCellY: number; minCellX: number; minCellY: number }> = [];
+  for (let start = 0; start < occupied.length; start += 1) {
+    if (!occupied[start] || visited[start]) {
+      continue;
+    }
+    const queue = [start];
+    visited[start] = 1;
+    let minCellX = start % columns;
+    let maxCellX = minCellX;
+    let minCellY = Math.floor(start / columns);
+    let maxCellY = minCellY;
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const current = queue[cursor];
+      const currentX = current % columns;
+      const currentY = Math.floor(current / columns);
+      minCellX = Math.min(minCellX, currentX);
+      maxCellX = Math.max(maxCellX, currentX);
+      minCellY = Math.min(minCellY, currentY);
+      maxCellY = Math.max(maxCellY, currentY);
+      for (let dy = -2; dy <= 2; dy += 1) {
+        for (let dx = -2; dx <= 2; dx += 1) {
+          const nextX = currentX + dx;
+          const nextY = currentY + dy;
+          if (nextX < 0 || nextY < 0 || nextX >= columns || nextY >= rows) {
+            continue;
+          }
+          const next = nextY * columns + nextX;
+          if (occupied[next] && !visited[next]) {
+            visited[next] = 1;
+            queue.push(next);
+          }
+        }
+      }
+    }
+    componentBoxes.push({ maxCellX, maxCellY, minCellX, minCellY });
+  }
+
+  const visuals: VisualConversionImage[] = [];
+  for (const box of componentBoxes) {
+    const scanLeft = box.minCellX * cellSize;
+    const scanTop = box.minCellY * cellSize;
+    const scanRight = Math.min(layer.width - 1, (box.maxCellX + 1) * cellSize - 1);
+    const scanBottom = Math.min(layer.height - 1, (box.maxCellY + 1) * cellSize - 1);
+    let minX = scanRight;
+    let minY = scanBottom;
+    let maxX = -1;
+    let maxY = -1;
+    let visible = 0;
+    const colors = new Set<number>();
+    for (let y = scanTop; y <= scanBottom; y += 1) {
+      for (let x = scanLeft; x <= scanRight; x += 1) {
+        const offset = (y * layer.width + x) * 4;
+        if (pixels.data[offset + 3] <= 12) {
+          continue;
+        }
+        visible += 1;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+        if (colors.size < 64) {
+          colors.add((pixels.data[offset] >> 4) << 8 | (pixels.data[offset + 1] >> 4) << 4 | (pixels.data[offset + 2] >> 4));
+        }
+      }
+    }
+    if (maxX < minX || maxY < minY) {
+      continue;
+    }
+    const width = maxX - minX + 1;
+    const height = maxY - minY + 1;
+    const normalizedWidth = width / layer.width;
+    const normalizedHeight = height / layer.height;
+    const normalizedArea = normalizedWidth * normalizedHeight;
+    const density = visible / Math.max(1, width * height);
+    const likelyRasterImage = normalizedWidth >= 0.08 && normalizedHeight >= 0.04 && normalizedArea >= 0.004 &&
+      colors.size >= 8 && (density >= 0.025 || colors.size >= 20);
+    if (!likelyRasterImage) {
+      continue;
+    }
+    const padding = 2;
+    const cropLeft = Math.max(0, minX - padding);
+    const cropTop = Math.max(0, minY - padding);
+    const cropRight = Math.min(layer.width - 1, maxX + padding);
+    const cropBottom = Math.min(layer.height - 1, maxY + padding);
+    const cropWidth = cropRight - cropLeft + 1;
+    const cropHeight = cropBottom - cropTop + 1;
+    const cropped = activeDocument.createElement("canvas");
+    cropped.width = cropWidth;
+    cropped.height = cropHeight;
+    const croppedCtx = cropped.getContext("2d");
+    if (!croppedCtx) {
+      continue;
+    }
+    croppedCtx.drawImage(layer, cropLeft, cropTop, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    visuals.push({
+      dataUrl: cropped.toDataURL("image/png"),
+      height: cropHeight / layer.height,
+      id: `pdf-raster-page-${pageIndex + 1}-${visuals.length + 1}`,
+      opacity: 1,
+      width: cropWidth / layer.width,
+      x: cropLeft / layer.width,
+      y: cropTop / layer.height,
+      zIndex: -1
+    });
+  }
+  return visuals;
 }
 
 function sanitizeNoteDrawAssetName(value: string): string {
@@ -11868,7 +12056,7 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
   const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
   const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.88</AppVersion></Properties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.89</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
@@ -11896,27 +12084,7 @@ function buildDocxVisualPageParagraph(
   pageBreakAfter: boolean
 ): string {
   const safeName = xmlEscape(name || `Image ${drawingId}`);
-  const pageImage: VisualConversionImage = {
-    dataUrl: "",
-    height: 1,
-    id: `docx-page-${page.pageIndex + 1}`,
-    opacity: 1,
-    width: 1,
-    x: 0,
-    y: 0,
-    zIndex: -1
-  };
-  const pageImageXml = buildDocxFloatingImageAnchor(
-    pageImage,
-    relId,
-    drawingId,
-    leftTwips,
-    topTwips,
-    widthTwips,
-    heightTwips,
-    true,
-    safeName
-  );
+  const pageImageXml = buildDocxInlinePageImage(relId, drawingId, widthTwips, heightTwips, safeName);
   const textLayer = buildDocxAbsoluteTextLayer(page, widthTwips, heightTwips, leftTwips, topTwips);
   const visualLayerXml = visualLayers.map((layer) => buildDocxFloatingImageAnchor(
     layer.image,
@@ -11928,7 +12096,20 @@ function buildDocxVisualPageParagraph(
     heightTwips
   )).join("");
   const pageBreak = pageBreakAfter ? `<w:r><w:br w:type="page"/></w:r>` : "";
-  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1" w:lineRule="exact"/><w:cantSplit/></w:pPr>${pageImageXml}${visualLayerXml}${textLayer}${pageBreak}</w:p>`;
+  const spacingBefore = Math.max(0, topTwips - 720);
+  return `<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="${spacingBefore}" w:after="0"/><w:cantSplit/></w:pPr>${pageImageXml}${visualLayerXml}${textLayer}${pageBreak}</w:p>`;
+}
+
+function buildDocxInlinePageImage(
+  relId: string,
+  drawingId: number,
+  widthTwips: number,
+  heightTwips: number,
+  name: string
+): string {
+  const widthEmu = Math.max(635, Math.round(widthTwips * 635));
+  const heightEmu = Math.max(635, Math.round(heightTwips * 635));
+  return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
 function buildDocxFloatingImageAnchor(
@@ -11938,17 +12119,14 @@ function buildDocxFloatingImageAnchor(
   leftTwips: number,
   topTwips: number,
   pageWidthTwips: number,
-  pageHeightTwips: number,
-  behindDocument = false,
-  customName?: string
+  pageHeightTwips: number
 ): string {
   const xEmu = Math.max(0, Math.round((leftTwips + image.x * pageWidthTwips) * 635));
   const yEmu = Math.max(0, Math.round((topTwips + image.y * pageHeightTwips) * 635));
   const widthEmu = Math.max(635, Math.round(image.width * pageWidthTwips * 635));
   const heightEmu = Math.max(635, Math.round(image.height * pageHeightTwips * 635));
-  const name = customName ?? xmlEscape(`Page visual ${drawingId}`);
-  const relativeHeight = behindDocument ? 0 : 251659264 + drawingId;
-  return `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${relativeHeight}" behindDoc="${behindDocument ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>${xEmu}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>${yEmu}</wp:posOffset></wp:positionV><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+  const name = xmlEscape(`Page visual ${drawingId}`);
+  return `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${251659264 + drawingId}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>${xEmu}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>${yEmu}</wp:posOffset></wp:positionV><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
 }
 
 function buildDocxAbsoluteTextLayer(

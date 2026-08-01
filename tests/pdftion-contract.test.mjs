@@ -55,6 +55,8 @@ test("Markdown conversion keeps native image references and delegates ink to Not
   assert.match(source, /const noteDraw = getNoteDrawWriteApi\(\)/);
   assert.match(source, /const visualPages = await this\.captureVisualConversionPages\(\{/);
   assert.match(source, /collectNoteDrawExportImages\(visualPages, this\.getEditableElements\(\)\)/);
+  assert.match(source, /\.filter\(isUsefulMarkdownExportImage\)/);
+  assert.match(source, /!image\.id\.startsWith\("html-visual-page-"\) && !image\.id\.startsWith\("native-page-"\)/);
   assert.match(source, /partitionMarkdownExportImages\(pages, images\)/);
   assert.match(source, /const inlineImages = noteDraw \? partitionedImages\.inline : images/);
   assert.match(source, /const noteDrawImages = noteDraw \? partitionedImages\.floating : \[\]/);
@@ -103,7 +105,8 @@ test("visual exports reuse the HTML-quality snapshot and keep editable text", as
   assert.match(source, /const imageRelId = addImage\(page\.bytes, "png"\)/);
   assert.match(source, /buildDocxVisualPageParagraph\(/);
   assert.match(source, /buildDocxAbsoluteTextLayer\(/);
-  assert.match(source, /behindDoc="\$\{behindDocument \? 1 : 0\}"/);
+  assert.match(source, /buildDocxInlinePageImage\(relId, drawingId, widthTwips, heightTwips, safeName\)/);
+  assert.match(source, /<wp:inline distT="0" distB="0" distL="0" distR="0">/);
   assert.match(source, /wp:positionH relativeFrom="page"/);
   assert.match(source, /const pageBreak = pageBreakAfter \?/);
   assert.doesNotMatch(source, /body\.push\(`<w:p><w:r><w:br w:type="page"\/\><\/w:r><\/w:p>`\)/);
@@ -145,6 +148,9 @@ test("visual export waits for rendered pages and keeps inserted images compatibl
   assert.match(source, /dataUrl: await convertImageDataUrlToPng\(image\.dataUrl\)/);
   assert.match(source, /await this\.drawImageElementForExport\(ctx, element/);
   assert.match(source, /for \(const image of \[\.\.\.page\.images\]\.sort/);
+  assert.match(source, /extractHtmlDerivedVisualLayers\(canvas, lines, overlay\.pageIndex\)/);
+  assert.match(source, /id: `pdf-raster-page-\$\{pageIndex \+ 1\}-\$\{visuals\.length \+ 1\}`/);
+  assert.match(source, /colors\.size >= 8/);
   assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
 });
 
@@ -181,8 +187,15 @@ test("PDF ink editing is transactional and restores interrupted work", async () 
   assert.match(source, /await this\.plugin\.rollbackInkEditTransaction\(this\.file\)/);
   assert.match(source, /await this\.reloadNativePdfView\(\)/);
   assert.doesNotMatch(prepareSource, /commitDetachedInkPages/);
-  assert.match(autoSaveSource, /if \(this\.enabled\) \{\s*return;/);
-  assert.match(source, /activeWindow, "blur", \(\) => this\.flushAllSessionsSoon\(\)/);
+  assert.match(autoSaveSource, /if \(this\.enabled\) \{[\s\S]*?checkpointEditableState\(\)/);
+  assert.doesNotMatch(source, /activeWindow, "blur", \(\) => this\.flushAllSessionsSoon\(\)/);
+  assert.match(source, /this\.flushSessionsOutsideFile\(file\)/);
+  assert.match(source, /checkpointAllSessionsSoon\(\)/);
+  assert.match(source, /readPendingInkEditElements\(file\)/);
+  assert.match(source, /completeInkEditTransaction\(file, elements, new Set\(record\.pageIndexes\)\)/);
+  assert.match(source, /private inkCommitPromises = new Map<string, Promise<boolean>>\(\)/);
+  assert.match(prepareSource, /const hasNativeInk = this\.strokeHistory\.some\(\(stroke\) => stroke\.pdfSaved === true\)/);
+  assert.doesNotMatch(source, /this\.detachedInkEditPages\.clear\(\);\s*this\.scheduleEditableInkPrepare\(0, true\)/);
   assert.match(source, /flushSessionsOutsideLeaf\(leaf\)/);
   assert.match(source, /void this\.finishPdfInkEditing\(\)/);
 });
