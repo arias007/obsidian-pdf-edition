@@ -86,7 +86,8 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
 test("visual exports reuse the HTML-quality snapshot and keep editable text", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
-  assert.match(source, /lines: collectEditableMarkdownLines\(overlay\)/);
+  assert.match(source, /const lines = collectEditableMarkdownLines\(overlay\)/);
+  assert.match(source, /lines,\s*pageIndex: overlay\.pageIndex/);
   assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\)/);
   assert.match(source, /slide\.addText\(textRuns/);
   assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
@@ -143,9 +144,23 @@ test("placeholder pages, precise stroke hits, and immediate drag redraw stay int
   assert.match(source, /return candidate\.clientWidth > 0 && candidate\.clientHeight > 0/);
   assert.match(source, /return strokeContainsPoint\(stroke, point, cssWidth, cssHeight, hitRadius\)/);
   assert.match(source, /startedFromFreshSelection: true/);
-  assert.match(source, /this\.updateExternalInkLayerState\(\);\s*this\.redrawOverlay\(overlay\)/);
+  assert.match(source, /this\.updateExternalInkLayerState\(\);\s*this\.redrawPageOverlays\(overlay\.pageIndex\)/);
   assert.match(source, /selectionContainsPdfInk\(overlay\.pageIndex\)/);
   assert.match(source, /await this\.saveIntoPdf\(true\);\s*this\.requestNativePdfPageRender\(pageIndex\)/);
+});
+
+test("PDF ink editing is transactional and restores interrupted work", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /data\/ink-edit-transactions/);
+  assert.match(source, /beginInkEditTransaction\(file: TFile, pageIndexes: Set<number>\)/);
+  assert.match(source, /removeAllInkAnnotationsOnPages\(pdf, new Set\(normalizedPages\)\)/);
+  assert.match(source, /backupAnnotationStatePath/);
+  assert.match(source, /completeInkEditTransaction\(file: TFile, elements: InkElement\[\], pageIndexes: Set<number>\)/);
+  assert.match(source, /Ink verification failed/);
+  assert.match(source, /recoverPendingInkEditTransactions\(\)/);
+  assert.match(source, /await this\.plugin\.rollbackInkEditTransaction\(this\.file\)/);
+  assert.match(source, /await this\.reloadNativePdfView\(\)/);
 });
 
 test("native PDF text selection follows the last highlight or copy action", async () => {

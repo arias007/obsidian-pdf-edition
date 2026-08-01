@@ -1026,6 +1026,7 @@ interface PdfViewLike {
   contentEl?: HTMLElement;
   file?: TFile;
   getViewType?: () => string;
+  onLoadFile?: (file: TFile) => Promise<void>;
   viewer?: {
     child?: {
       pdfViewer?: NativePdfViewerAppLike;
@@ -1501,6 +1502,17 @@ declare global {
   }
 }
 
+interface PdfInkEditTransactionRecord {
+  annotationStateExisted: boolean;
+  backupAnnotationStatePath?: string;
+  backupPdfPath: string;
+  filePath: string;
+  pageIndexes: number[];
+  phase: "committed" | "editing";
+  startedAt: string;
+  version: 1;
+}
+
 export default class PdftionPlugin extends Plugin {
   private annotationFontBytes: Uint8Array | null = null;
   private sessions = new Map<HTMLElement, InkSession>();
@@ -1509,6 +1521,7 @@ export default class PdftionPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    await this.recoverPendingInkEditTransactions();
     this.applyRuntimeSettings();
     this.addSettingTab(new PdftionSettingTab(this));
 
@@ -1638,7 +1651,7 @@ export default class PdftionPlugin extends Plugin {
       "--pdftion-toolbar-top-offset": ""
     });
     for (const session of this.sessions.values()) {
-      session.destroy();
+      session.destroy(false);
     }
     this.sessions.clear();
     this.clearSurfaceScanTimers();
@@ -1945,6 +1958,250 @@ export default class PdftionPlugin extends Plugin {
       }
     });
     return visiblePdf ?? visibleOther ?? matchedPdf ?? matchedOther;
+  }
+
+  async beginInkEditTransaction(file: TFile, pageIndexes: Set<number>): Promise<void> {
+    const normalizedPages = Array.from(pageIndexes)
+      .filter((pageIndex) => Number.isInteger(pageIndex) && pageIndex >= 0)
+      .sort((a, b) => a - b);
+    if (normalizedPages.length === 0) {
+      return;
+    }
+    const existing = await this.readInkEditTransaction(file);
+    if (existing) {
+      if (
+        existing.filePath === file.path &&
+        existing.pageIndexes.length === normalizedPages.length &&
+        existing.pageIndexes.every((pageIndex, index) => pageIndex === normalizedPages[index])
+      ) {
+        return;
+      }
+      throw new Error(`An ink edit transaction is already active for ${existing.filePath} page ${existing.pageIndexes.join(", ")}.`);
+    }
+
+    const dir = `${this.manifest.dir}/data/ink-edit-transactions`;
+    const safeKey = safeAnnotationKey(file.path);
+    const backupPdfPath = `${dir}/${safeKey}.pdf`;
+    const transactionPath = `${dir}/${safeKey}.json`;
+    const currentBytes = await this.app.vault.readBinary(file);
+    await this.ensureAdapterFolder(dir);
+    await this.app.vault.adapter.writeBinary(backupPdfPath, currentBytes);
+    const annotationStatePath = this.getAnnotationStatePath(file);
+    const annotationStateExisted = await this.app.vault.adapter.exists(annotationStatePath);
+    const backupAnnotationStatePath = annotationStateExisted ? `${dir}/${safeKey}.state.json` : undefined;
+    if (backupAnnotationStatePath) {
+      await this.app.vault.adapter.write(
+        backupAnnotationStatePath,
+        await this.app.vault.adapter.read(annotationStatePath)
+      );
+    }
+    const record: PdfInkEditTransactionRecord = {
+      annotationStateExisted,
+      backupAnnotationStatePath,
+      backupPdfPath,
+      filePath: file.path,
+      pageIndexes: normalizedPages,
+      phase: "editing",
+      startedAt: new Date().toISOString(),
+      version: 1
+    };
+    await this.app.vault.adapter.write(transactionPath, JSON.stringify(record, null, 2));
+
+    try {
+      const pdf = await PDFDocument.load(currentBytes, { ignoreEncryption: true, updateMetadata: false });
+      removeAllInkAnnotationsOnPages(pdf, new Set(normalizedPages));
+      const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
+      const detachedBytes = new ArrayBuffer(saved.byteLength);
+      new Uint8Array(detachedBytes).set(saved);
+      await this.app.vault.modifyBinary(file, detachedBytes);
+    } catch (error) {
+      await this.restoreInkEditTransaction(file, record, true);
+      throw error;
+    }
+  }
+
+  async completeInkEditTransaction(file: TFile, elements: InkElement[], pageIndexes: Set<number>): Promise<boolean> {
+    const record = await this.readInkEditTransaction(file);
+    if (!record) {
+      return true;
+    }
+    const pagesToCommit = new Set(record.pageIndexes.filter((pageIndex) => pageIndexes.has(pageIndex)));
+    if (pagesToCommit.size === 0) {
+      return true;
+    }
+    const currentBytes = await this.app.vault.readBinary(file);
+    try {
+      const pdf = await PDFDocument.load(currentBytes, { ignoreEncryption: true, updateMetadata: false });
+      removeAllInkAnnotationsOnPages(pdf, pagesToCommit);
+      const pages = pdf.getPages();
+      const strokes = elements.filter((element): element is InkStroke => (
+        element.kind === "stroke" && pagesToCommit.has(element.pageIndex) && element.points.length >= 2
+      ));
+      for (const stroke of strokes) {
+        const page = pages[stroke.pageIndex];
+        if (!page || !addStandardInkAnnotation(pdf, page, stroke)) {
+          throw new Error(`Could not write ink annotation for ${stroke.id}.`);
+        }
+      }
+      const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
+      const committedBytes = new ArrayBuffer(saved.byteLength);
+      new Uint8Array(committedBytes).set(saved);
+      await this.app.vault.modifyBinary(file, committedBytes);
+      const verifyPdf = await PDFDocument.load(committedBytes, { ignoreEncryption: true, updateMetadata: false });
+      const actual = extractPdfInkAnnotations(verifyPdf, pagesToCommit);
+      for (const expected of strokes) {
+        const match = actual.find((candidate) => (
+          candidate.id === expected.id || isSamePdfInkStrokeCandidate(candidate, expected)
+        ));
+        if (!match || !inkPointsApproximatelyEqual(
+          match.points,
+          simplifyInkPoints(smoothInkPointsForPdf(expected.points, 1600), 900)
+        )) {
+          throw new Error(`Ink verification failed for ${expected.id}.`);
+        }
+      }
+      if (actual.length !== strokes.length) {
+        throw new Error(`Ink verification count mismatch: ${actual.length}/${strokes.length}.`);
+      }
+      const marked = elements.map((element) => {
+        if (element.kind !== "stroke" || !pagesToCommit.has(element.pageIndex)) {
+          return cloneElement(element);
+        }
+        return {
+          ...element,
+          externalDirty: false,
+          pdfPoints: element.points.map((point) => ({ ...point })),
+          pdfSaved: true,
+          saved: true,
+          source: "pdftion" as const
+        };
+      });
+      await this.saveEditableAnnotationState(file, marked, committedBytes);
+      const remainingPages = record.pageIndexes.filter((pageIndex) => !pagesToCommit.has(pageIndex));
+      if (remainingPages.length === 0) {
+        const committedRecord: PdfInkEditTransactionRecord = { ...record, phase: "committed" };
+        await this.writeInkEditTransaction(file, committedRecord);
+        try {
+          await this.deleteInkEditTransaction(committedRecord);
+        } catch (error) {
+          console.warn("pdftion committed ink edits but could not remove all transaction backup files.", error);
+        }
+      } else {
+        await this.writeInkEditTransaction(file, { ...record, pageIndexes: remainingPages });
+      }
+      return true;
+    } catch (error) {
+      console.error("pdftion could not commit the PDF ink edit transaction; restoring the backup.", error);
+      await this.restoreInkEditTransaction(file, record, true);
+      return false;
+    }
+  }
+
+  async rollbackInkEditTransaction(file: TFile): Promise<boolean> {
+    const record = await this.readInkEditTransaction(file);
+    if (!record) {
+      return true;
+    }
+    await this.restoreInkEditTransaction(file, record, true);
+    return true;
+  }
+
+  async getInkEditTransactionPages(file: TFile): Promise<Set<number>> {
+    const record = await this.readInkEditTransaction(file);
+    return new Set(record?.phase === "editing" ? record.pageIndexes : []);
+  }
+
+  private getInkEditTransactionPath(filePath: string): string {
+    return `${this.manifest.dir}/data/ink-edit-transactions/${safeAnnotationKey(filePath)}.json`;
+  }
+
+  private async readInkEditTransaction(file: TFile): Promise<PdfInkEditTransactionRecord | null> {
+    try {
+      const raw = await this.app.vault.adapter.read(this.getInkEditTransactionPath(file.path));
+      const record = JSON.parse(raw) as Partial<PdfInkEditTransactionRecord>;
+      if (
+        record.version !== 1 || record.filePath !== file.path || typeof record.backupPdfPath !== "string" ||
+        !Array.isArray(record.pageIndexes) || !record.pageIndexes.every((value) => Number.isInteger(value) && value >= 0)
+      ) {
+        return null;
+      }
+      return {
+        annotationStateExisted: record.annotationStateExisted === true,
+        backupAnnotationStatePath: typeof record.backupAnnotationStatePath === "string" ? record.backupAnnotationStatePath : undefined,
+        backupPdfPath: record.backupPdfPath,
+        filePath: record.filePath,
+        pageIndexes: record.pageIndexes,
+        phase: record.phase === "committed" ? "committed" : "editing",
+        startedAt: typeof record.startedAt === "string" ? record.startedAt : "",
+        version: 1
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeInkEditTransaction(file: TFile, record: PdfInkEditTransactionRecord): Promise<void> {
+    await this.ensureAdapterFolder(`${this.manifest.dir}/data/ink-edit-transactions`);
+    await this.app.vault.adapter.write(this.getInkEditTransactionPath(file.path), JSON.stringify(record, null, 2));
+  }
+
+  private async deleteInkEditTransaction(record: PdfInkEditTransactionRecord): Promise<void> {
+    const transactionPath = this.getInkEditTransactionPath(record.filePath);
+    if (await this.app.vault.adapter.exists(transactionPath)) {
+      await this.app.vault.adapter.remove(transactionPath);
+    }
+    if (await this.app.vault.adapter.exists(record.backupPdfPath)) {
+      await this.app.vault.adapter.remove(record.backupPdfPath);
+    }
+    if (record.backupAnnotationStatePath && await this.app.vault.adapter.exists(record.backupAnnotationStatePath)) {
+      await this.app.vault.adapter.remove(record.backupAnnotationStatePath);
+    }
+  }
+
+  private async restoreInkEditTransaction(file: TFile, record: PdfInkEditTransactionRecord, removeRecord: boolean): Promise<void> {
+    const backupBytes = await this.app.vault.adapter.readBinary(record.backupPdfPath);
+    await this.app.vault.modifyBinary(file, backupBytes);
+    const annotationStatePath = this.getAnnotationStatePath(file);
+    if (record.annotationStateExisted && record.backupAnnotationStatePath) {
+      const state = await this.app.vault.adapter.read(record.backupAnnotationStatePath);
+      await this.app.vault.adapter.write(annotationStatePath, state);
+    } else if (await this.app.vault.adapter.exists(annotationStatePath)) {
+      await this.app.vault.adapter.remove(annotationStatePath);
+    }
+    if (removeRecord) {
+      await this.deleteInkEditTransaction(record);
+    }
+  }
+
+  private async recoverPendingInkEditTransactions(): Promise<void> {
+    const dir = `${this.manifest.dir}/data/ink-edit-transactions`;
+    let listing: { files?: string[] };
+    try {
+      listing = await this.app.vault.adapter.list(dir);
+    } catch {
+      return;
+    }
+    for (const path of listing.files ?? []) {
+      if (!path.endsWith(".json")) {
+        continue;
+      }
+      try {
+        const raw = await this.app.vault.adapter.read(path);
+        const record = JSON.parse(raw) as PdfInkEditTransactionRecord;
+        const file = this.app.vault.getAbstractFileByPath(record.filePath);
+        if (!(file instanceof TFile) || record.version !== 1 || typeof record.backupPdfPath !== "string") {
+          continue;
+        }
+        if (record.phase === "committed") {
+          await this.deleteInkEditTransaction(record);
+          continue;
+        }
+        await this.restoreInkEditTransaction(file, record, true);
+        console.info(`pdftion recovered interrupted PDF ink editing for ${file.path}.`);
+      } catch (error) {
+        console.warn("pdftion could not recover an interrupted PDF ink transaction.", path, error);
+      }
+    }
   }
 
   private flushAllSessionsSoon(): void {
@@ -2441,6 +2698,7 @@ class InkSession {
   private preparingPdfInkForEditing = false;
   private pendingEditableInkPrepareAfterSave = false;
   private pendingSaveAfterCurrentSave = false;
+  private finishingPdfInkEditing: Promise<boolean> | null = null;
   private palette: HTMLElement | null = null;
   private penColor = DEFAULT_SETTINGS.penColor;
   private penOpacity = DEFAULT_SETTINGS.penOpacity;
@@ -2570,8 +2828,15 @@ class InkSession {
     }
   }
 
-  destroy(): void {
-    this.flushSoon();
+  destroy(commitInk = true): void {
+    if (commitInk && this.detachedInkEditPages.size > 0) {
+      const file = this.file;
+      const elements = this.getEditableElements().map(cloneElement);
+      const pages = new Set(this.detachedInkEditPages);
+      void this.plugin.completeInkEditTransaction(file, elements, pages);
+    } else if (this.detachedInkEditPages.size === 0) {
+      this.flushSoon();
+    }
     this.destroyed = true;
     this.enabled = false;
     this.restoreHiddenNativeInkAnnotations();
@@ -2630,7 +2895,14 @@ class InkSession {
       return;
     }
 
-    this.flushSoon();
+    const previousFile = this.file;
+    const previousPages = new Set(this.detachedInkEditPages);
+    const previousElements = this.getEditableElements().map(cloneElement);
+    if (previousPages.size > 0) {
+      void this.plugin.completeInkEditTransaction(previousFile, previousElements, previousPages);
+    } else {
+      this.flushSoon();
+    }
     this.restoreHiddenNativeInkAnnotations();
     this.closeNativeTextEditor(false);
     this.file = file;
@@ -2725,6 +2997,11 @@ class InkSession {
     this.textHistory = elements.filter((element): element is InkText => element.kind === "text");
     this.coverHistory = elements.filter((element): element is InkCover => element.kind === "cover");
     this.imageHistory = elements.filter((element): element is InkImage => element.kind === "image");
+    const transactionPages = await this.plugin.getInkEditTransactionPages(this.file);
+    if (loadToken !== this.annotationLoadToken || this.file.path !== filePath) {
+      return;
+    }
+    this.detachedInkEditPages = transactionPages;
     this.savedInkIsBurnedIntoPdf = state !== null && !state.overlayAnnotationsOnly && this.strokeHistory.some((stroke) => !Array.isArray(stroke.pdfPoints));
     this.savedTextIsBurnedIntoPdf = state !== null && !state.overlayAnnotationsOnly && !state.overlayTextOnly && this.textHistory.length > 0;
     if (this.savedInkIsBurnedIntoPdf || this.savedTextIsBurnedIntoPdf) {
@@ -3411,7 +3688,6 @@ class InkSession {
 
     if (this.enabled) {
       this.pendingEditableInkPrepareAfterSave = false;
-      this.detachedInkEditPages.clear();
       this.showToolbar();
       this.scanPages();
       this.primeNativeInkHidingForCurrentPages(true);
@@ -3449,9 +3725,7 @@ class InkSession {
       this.commentPopover = null;
       this.toolbar?.remove();
       this.toolbar = null;
-      if (this.hasPendingPdfWrite()) {
-        this.scheduleAutoSave(AUTO_SAVE_CLOSE_DELAY_MS);
-      }
+      void this.finishPdfInkEditing();
       this.redrawAll();
     }
   }
@@ -3470,7 +3744,7 @@ class InkSession {
       if (pageIndexes.size === 0) {
         return;
       }
-      this.preparePdfInkOverlayForEditing(pageIndexes);
+      await this.preparePdfInkOverlayForEditing(pageIndexes);
     } catch (error) {
       console.warn("pdftion could not prepare PDF ink for editable mode.", error);
     }
@@ -3503,36 +3777,58 @@ class InkSession {
     const pages = new Set<number>();
     const viewportHeight = activeWindow.innerHeight || activeDocument.documentElement.clientHeight || 1;
     const margin = force ? 160 : 80;
+    const candidates: Array<{ overlay: PageOverlay; visibleHeight: number }> = [];
     for (const overlay of this.overlays.values()) {
-      if (this.detachedInkEditPages.has(overlay.pageIndex)) {
-        continue;
-      }
       const rect = overlay.pageEl.getBoundingClientRect();
       if (rect.bottom >= -margin && rect.top <= viewportHeight + margin) {
-        pages.add(overlay.pageIndex);
+        candidates.push({
+          overlay,
+          visibleHeight: Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0))
+        });
       }
     }
-    if (pages.size === 0) {
+    const best = candidates.sort((a, b) => (
+      b.visibleHeight - a.visibleHeight || a.overlay.pageIndex - b.overlay.pageIndex
+    ))[0]?.overlay;
+    if (best) {
+      pages.add(best.pageIndex);
+    } else {
       const overlay = this.getVisibleOverlay() ?? Array.from(this.overlays.values()).sort((a, b) => a.pageIndex - b.pageIndex)[0];
-      if (overlay && !this.detachedInkEditPages.has(overlay.pageIndex)) {
+      if (overlay) {
         pages.add(overlay.pageIndex);
       }
     }
     return pages;
   }
 
-  private preparePdfInkOverlayForEditing(pageIndexes: Set<number>): void {
+  private async preparePdfInkOverlayForEditing(pageIndexes: Set<number>): Promise<void> {
     if (pageIndexes.size === 0 || this.preparingPdfInkForEditing) {
       return;
     }
 
     this.preparingPdfInkForEditing = true;
+    let transactionActive = false;
     try {
+      if (this.detachedInkEditPages.size > 0) {
+        const alreadyPrepared = Array.from(pageIndexes).every((pageIndex) => this.detachedInkEditPages.has(pageIndex));
+        if (alreadyPrepared) {
+          return;
+        }
+        const committed = await this.commitDetachedInkPages(new Set(this.detachedInkEditPages));
+        if (!committed || !this.enabled) {
+          return;
+        }
+      }
       for (const pageIndex of pageIndexes) {
         this.pendingNativeInkHidePages.add(pageIndex);
       }
       this.updateExternalInkLayerState();
-
+      await this.importPdfInkForPages(pageIndexes);
+      await this.plugin.beginInkEditTransaction(this.file, pageIndexes);
+      transactionActive = true;
+      const detachedBytes = await this.plugin.app.vault.readBinary(this.file);
+      await this.plugin.saveEditableAnnotationState(this.file, this.getEditableElements().map(cloneElement), detachedBytes);
+      await this.reloadNativePdfView();
       for (const pageIndex of pageIndexes) {
         this.detachedInkEditPages.add(pageIndex);
         this.pendingNativeInkHidePages.delete(pageIndex);
@@ -3541,8 +3837,118 @@ class InkSession {
       this.redrawAll();
     } catch (error) {
       console.warn("pdftion could not prepare PDF ink annotations for editing.", error);
+      if (transactionActive) {
+        try {
+          await this.plugin.rollbackInkEditTransaction(this.file);
+          await this.reloadEditableAnnotationsAfterInkRollback();
+        } catch (rollbackError) {
+          console.error("pdftion could not roll back the failed ink edit preparation.", rollbackError);
+        }
+      }
+      for (const pageIndex of pageIndexes) {
+        this.pendingNativeInkHidePages.delete(pageIndex);
+      }
+      this.updateExternalInkLayerState();
     } finally {
       this.preparingPdfInkForEditing = false;
+    }
+  }
+
+  private async commitDetachedInkPages(pageIndexes = new Set(this.detachedInkEditPages)): Promise<boolean> {
+    if (pageIndexes.size === 0) {
+      return true;
+    }
+    if (this.finishingPdfInkEditing) {
+      return this.finishingPdfInkEditing;
+    }
+    const targetFile = this.file;
+    const targetPath = targetFile.path;
+    const elements = this.getEditableElements().map(cloneElement);
+    this.clearAutoSaveTimer();
+    this.finishingPdfInkEditing = this.plugin.completeInkEditTransaction(targetFile, elements, pageIndexes)
+      .then(async (committed) => {
+        if (this.file.path !== targetPath) {
+          return committed;
+        }
+        if (!committed) {
+          await this.reloadEditableAnnotationsAfterInkRollback();
+          return false;
+        }
+        for (const stroke of this.strokeHistory) {
+          if (!pageIndexes.has(stroke.pageIndex)) {
+            continue;
+          }
+          stroke.externalDirty = false;
+          stroke.pdfPoints = stroke.points.map((point) => ({ ...point }));
+          stroke.pdfSaved = true;
+          stroke.saved = true;
+          stroke.source = "pdftion";
+        }
+        for (const pageIndex of pageIndexes) {
+          this.detachedInkEditPages.delete(pageIndex);
+          this.pendingNativeInkHidePages.delete(pageIndex);
+          this.dirtyInkPages.delete(pageIndex);
+        }
+        if (this.dirtyInkPages.size === 0) {
+          this.deletedExternalInkIds.clear();
+          this.deletedPdftionInkIds.clear();
+        }
+        this.dirty = this.getEditableElements().some((element) => !element.saved);
+        this.updateExternalInkLayerState();
+        this.redrawAll();
+        await this.reloadNativePdfView();
+        this.scheduleQuietScan();
+        return true;
+      })
+      .finally(() => {
+        this.finishingPdfInkEditing = null;
+      });
+    return this.finishingPdfInkEditing;
+  }
+
+  private async finishPdfInkEditing(): Promise<boolean> {
+    this.clearEditableInkPrepareTimer();
+    this.commitNativeTextEditor();
+    if (this.detachedInkEditPages.size > 0) {
+      const committed = await this.commitDetachedInkPages(new Set(this.detachedInkEditPages));
+      if (!committed) {
+        return false;
+      }
+    }
+    if (this.hasPendingPdfWrite()) {
+      await this.saveIntoPdf(true);
+    }
+    return true;
+  }
+
+  private async reloadEditableAnnotationsAfterInkRollback(): Promise<void> {
+    this.detachedInkEditPages.clear();
+    this.pendingNativeInkHidePages.clear();
+    this.dirtyInkPages.clear();
+    this.deletedExternalInkIds.clear();
+    this.deletedPdftionInkIds.clear();
+    this.strokeHistory = [];
+    this.textHistory = [];
+    this.coverHistory = [];
+    this.imageHistory = [];
+    this.loadedAnnotationState = false;
+    this.annotationLoadToken += 1;
+    this.annotationLoadPromise = null;
+    await this.loadEditableAnnotations();
+    await this.reloadNativePdfView();
+    this.updateExternalInkLayerState();
+    this.redrawAll();
+  }
+
+  private async reloadNativePdfView(): Promise<void> {
+    const view = this.leaf.view as unknown as PdfViewLike;
+    if (view.file?.path !== this.file.path || typeof view.onLoadFile !== "function") {
+      return;
+    }
+    try {
+      await view.onLoadFile(this.file);
+    } catch (error) {
+      console.debug("pdftion could not reload the current PDF view after an ink transaction.", error);
     }
   }
 
@@ -6791,7 +7197,7 @@ class InkSession {
       drag.moved = true;
       drag.current = point;
       this.updateExternalInkLayerState();
-      this.redrawOverlay(overlay);
+      this.redrawPageOverlays(overlay.pageIndex);
       return;
     }
 
@@ -6810,7 +7216,7 @@ class InkSession {
       drag.moved = true;
       drag.current = point;
       this.updateExternalInkLayerState();
-      this.redrawOverlay(overlay);
+      this.redrawPageOverlays(overlay.pageIndex);
       return;
     }
 
@@ -7426,6 +7832,10 @@ class InkSession {
     const elements = this.getEditableElements();
     const targetFile = this.file;
     const targetPath = targetFile.path;
+    if (this.detachedInkEditPages.size > 0) {
+      await this.commitDetachedInkPages(new Set(this.detachedInkEditPages));
+      return;
+    }
     const hasUnsavedPdfStroke = elements.some((element) => element.kind === "stroke" && element.pdfSaved !== true);
     const changedInkPages = new Set([
       ...Array.from(this.dirtyInkPages),
@@ -7904,10 +8314,12 @@ class InkSession {
     }
 
     ctx.drawImage(pdfCanvas, 0, 0, sourceWidth, sourceHeight, 0, 0, outputWidth, outputHeight);
+    const lines = collectEditableMarkdownLines(overlay);
+    const nativeVisual = await extractHtmlDerivedVisualLayer(canvas, lines, overlay.pageIndex);
     ctx.save();
     ctx.scale(outputWidth / Math.max(1, overlay.cssWidth), outputHeight / Math.max(1, overlay.cssHeight));
     const elements = this.getEditableElements();
-    const images: VisualConversionImage[] = [];
+    const images: VisualConversionImage[] = nativeVisual ? [nativeVisual] : [];
     for (const image of elements.filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
       images.push({
         dataUrl: await convertImageDataUrlToPng(image.dataUrl),
@@ -7946,7 +8358,7 @@ class InkSession {
       bytes: dataUrlToBytes(dataUrl),
       height: outputHeight,
       images,
-      lines: collectEditableMarkdownLines(overlay),
+      lines,
       pageIndex: overlay.pageIndex,
       sourceVisualRatio: measureCanvasVisualRatio(pdfCanvas),
       width: outputWidth
@@ -9960,6 +10372,26 @@ function removePdftionInkAnnotationsOnPages(pdf: PDFDocument, pageIndexes: Set<n
   }
 }
 
+function removeAllInkAnnotationsOnPages(pdf: PDFDocument, pageIndexes: Set<number>): void {
+  if (pageIndexes.size === 0) {
+    return;
+  }
+  const pages = pdf.getPages();
+  for (const pageIndex of pageIndexes) {
+    const annots = pages[pageIndex]?.node.Annots?.();
+    if (!annots) {
+      continue;
+    }
+    for (let index = annots.size() - 1; index >= 0; index -= 1) {
+      const annot = annots.lookupMaybe(index, PDFDict);
+      const subtype = annot?.lookupMaybe(PDFName.of("Subtype"), PDFName);
+      if (subtype?.decodeText() === "Ink") {
+        annots.remove(index);
+      }
+    }
+  }
+}
+
 function removeTargetInkAnnotations(pdf: PDFDocument, pdftionIds = new Set<string>(), importedExternalIds = new Set<string>()): void {
   const pages = pdf.getPages();
   for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
@@ -10748,7 +11180,7 @@ function renderEditableMarkdownLine(line: EditableMarkdownLine, baseFontSize: nu
 function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16): string {
   const validLink = run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link) ? run.link : undefined;
   const customFont = Boolean(run.fontFamily && !/^(?:inherit|initial|unset|system-ui|sans-serif)$/i.test(run.fontFamily));
-  const customSize = Math.abs(run.fontSize - baseFontSize) > 0.75;
+  const customSize = Math.abs(run.fontSize - baseFontSize) > Math.max(2, baseFontSize * 0.18);
   const customColor = run.color.toLowerCase() !== "#000000";
   if (run.underline || customFont || customSize || customColor) {
     const styles = [
@@ -10939,6 +11371,103 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
     });
   }
   return images;
+}
+
+async function extractHtmlDerivedVisualLayer(
+  pageCanvas: HTMLCanvasElement,
+  lines: EditableMarkdownLine[],
+  pageIndex: number
+): Promise<VisualConversionImage | null> {
+  if (pageCanvas.width <= 1 || pageCanvas.height <= 1) {
+    return null;
+  }
+  const layer = activeDocument.createElement("canvas");
+  layer.width = pageCanvas.width;
+  layer.height = pageCanvas.height;
+  const ctx = layer.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    return null;
+  }
+  ctx.drawImage(pageCanvas, 0, 0);
+
+  for (const line of lines) {
+    const fallbackLeft = line.left;
+    const fallbackWidth = line.width;
+    for (const run of line.runs) {
+      const left = run.left ?? fallbackLeft;
+      const width = run.width ?? fallbackWidth;
+      const x = left * layer.width;
+      const y = line.top * layer.height;
+      const w = width * layer.width;
+      const h = line.height * layer.height;
+      const padX = Math.max(2, layer.width * 0.0015);
+      const padY = Math.max(2, h * 0.35);
+      ctx.clearRect(
+        Math.max(0, x - padX),
+        Math.max(0, y - padY),
+        Math.min(layer.width, w + padX * 2),
+        Math.min(layer.height, h + padY * 2)
+      );
+    }
+  }
+
+  let pixels: ImageData;
+  try {
+    pixels = ctx.getImageData(0, 0, layer.width, layer.height);
+  } catch {
+    return null;
+  }
+  let minX = layer.width;
+  let minY = layer.height;
+  let maxX = -1;
+  let maxY = -1;
+  let visible = 0;
+  for (let y = 0; y < layer.height; y += 1) {
+    for (let x = 0; x < layer.width; x += 1) {
+      const offset = (y * layer.width + x) * 4;
+      const alpha = pixels.data[offset + 3];
+      const nearWhite = pixels.data[offset] >= 247 && pixels.data[offset + 1] >= 247 && pixels.data[offset + 2] >= 247;
+      if (alpha <= 12 || nearWhite) {
+        pixels.data[offset + 3] = 0;
+        continue;
+      }
+      visible += 1;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  const minimumVisible = Math.max(80, Math.round(layer.width * layer.height * 0.00008));
+  if (visible < minimumVisible || maxX < minX || maxY < minY) {
+    return null;
+  }
+  ctx.putImageData(pixels, 0, 0);
+  const padding = 2;
+  minX = Math.max(0, minX - padding);
+  minY = Math.max(0, minY - padding);
+  maxX = Math.min(layer.width - 1, maxX + padding);
+  maxY = Math.min(layer.height - 1, maxY + padding);
+  const width = maxX - minX + 1;
+  const height = maxY - minY + 1;
+  const cropped = activeDocument.createElement("canvas");
+  cropped.width = width;
+  cropped.height = height;
+  const croppedCtx = cropped.getContext("2d");
+  if (!croppedCtx) {
+    return null;
+  }
+  croppedCtx.drawImage(layer, minX, minY, width, height, 0, 0, width, height);
+  return {
+    dataUrl: cropped.toDataURL("image/png"),
+    height: height / layer.height,
+    id: `html-visual-page-${pageIndex + 1}`,
+    opacity: 1,
+    width: width / layer.width,
+    x: minX / layer.width,
+    y: minY / layer.height,
+    zIndex: -1
+  };
 }
 
 function sanitizeNoteDrawAssetName(value: string): string {
@@ -11142,16 +11671,27 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
     const imageRelId = addImage(page.bytes, "png");
     const fitted = fitDocxImage(page.width * 15, page.height * 15, contentWidthTwips, contentHeightTwips);
     const leftTwips = Math.max(0, Math.round((contentWidthTwips - fitted.widthTwips) / 2));
+    const pageDrawingId = drawingId;
+    drawingId += 1;
+    const visualLayers = page.images.map((image) => {
+      const layer = {
+        drawingId,
+        image,
+        relId: addImage(dataUrlToBytes(image.dataUrl), "png")
+      };
+      drawingId += 1;
+      return layer;
+    });
     body.push(buildDocxVisualPageParagraph(
       page,
       imageRelId,
       fitted.widthTwips,
       fitted.heightTwips,
-      drawingId,
+      pageDrawingId,
       `${title} page ${page.pageIndex + 1}`,
-      leftTwips
+      leftTwips,
+      visualLayers
     ));
-    drawingId += 1;
     if (index < sortedPages.length - 1) {
       body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
     }
@@ -11164,7 +11704,7 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
   const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
   const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.86</AppVersion></Properties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.87</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
@@ -11186,13 +11726,38 @@ function buildDocxVisualPageParagraph(
   heightTwips: number,
   drawingId: number,
   name: string,
-  leftTwips: number
+  leftTwips: number,
+  visualLayers: Array<{ drawingId: number; image: VisualConversionImage; relId: string }>
 ): string {
   const widthEmu = Math.max(635, Math.round(widthTwips * 635));
   const heightEmu = Math.max(635, Math.round(heightTwips * 635));
   const safeName = xmlEscape(name || `Image ${drawingId}`);
   const textLayer = buildDocxAbsoluteTextLayer(page, widthTwips, heightTwips, leftTwips, 0);
-  return `<w:p><w:pPr><w:ind w:left="${Math.max(0, leftTwips)}"/><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${drawingId}" name="${safeName}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${safeName}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>${textLayer}</w:p>`;
+  const visualLayerXml = visualLayers.map((layer) => buildDocxFloatingImageAnchor(
+    layer.image,
+    layer.relId,
+    layer.drawingId,
+    leftTwips,
+    widthTwips,
+    heightTwips
+  )).join("");
+  return `<w:p><w:pPr><w:ind w:left="${Math.max(0, leftTwips)}"/><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${drawingId}" name="${safeName}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${safeName}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>${textLayer}${visualLayerXml}</w:p>`;
+}
+
+function buildDocxFloatingImageAnchor(
+  image: VisualConversionImage,
+  relId: string,
+  drawingId: number,
+  leftTwips: number,
+  pageWidthTwips: number,
+  pageHeightTwips: number
+): string {
+  const xEmu = Math.max(0, Math.round((leftTwips + image.x * pageWidthTwips) * 635));
+  const yEmu = Math.max(0, Math.round(image.y * pageHeightTwips * 635));
+  const widthEmu = Math.max(635, Math.round(image.width * pageWidthTwips * 635));
+  const heightEmu = Math.max(635, Math.round(image.height * pageHeightTwips * 635));
+  const name = xmlEscape(`Page visual ${drawingId}`);
+  return `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${251659264 + drawingId}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>${xEmu}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>${yEmu}</wp:posOffset></wp:positionV><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="${drawingId}" name="${name}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${drawingId}" name="${name}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
 }
 
 function buildDocxAbsoluteTextLayer(
