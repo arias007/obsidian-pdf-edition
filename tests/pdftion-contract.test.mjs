@@ -54,13 +54,14 @@ test("Markdown conversion keeps native image references and delegates ink to Not
 
   assert.match(source, /const noteDraw = getNoteDrawWriteApi\(\)/);
   assert.match(source, /const visualPages = await this\.captureVisualConversionPages\(\{/);
-  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages, images\)/);
+  assert.match(source, /collectNoteDrawExportImages\(visualPages, this\.getEditableElements\(\)\)/);
+  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages, noteDraw \? \[\] : images\)/);
   assert.doesNotMatch(source, /writeVisualConversionImages\(pages\)/);
   assert.match(source, /persistNoteDrawExportImages/);
   assert.ok(source.includes('const assetDir = `${targetPath.replace(/\\.md$/i, "")}-assets`;'));
   assert.match(source, /assetPath: image\.assetPath/);
   assert.ok(source.includes('output.push(`![[${escapeObsidianWikilink(image.assetPath ?? image.assetName)}]]`'));
-  assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData/);
+  assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData\(targetPath, pages, this\.getEditableElements\(\), images\)\)/);
   assert.match(source, /const opened = await this\.openConvertedMarkdownFile\(targetFile\)/);
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
 });
@@ -132,6 +133,7 @@ test("visual export waits for rendered pages and keeps inserted images compatibl
   assert.match(source, /page\.images[\s\S]{0,500}?slide\.addImage/);
   assert.match(source, /dataUrl: await convertImageDataUrlToPng\(image\.dataUrl\)/);
   assert.match(source, /await this\.drawImageElementForExport\(ctx, element/);
+  assert.match(source, /for \(const image of \[\.\.\.page\.images\]\.sort/);
   assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
 });
 
@@ -142,6 +144,8 @@ test("placeholder pages, precise stroke hits, and immediate drag redraw stay int
   assert.match(source, /return strokeContainsPoint\(stroke, point, cssWidth, cssHeight, hitRadius\)/);
   assert.match(source, /startedFromFreshSelection: true/);
   assert.match(source, /this\.updateExternalInkLayerState\(\);\s*this\.redrawOverlay\(overlay\)/);
+  assert.match(source, /selectionContainsPdfInk\(overlay\.pageIndex\)/);
+  assert.match(source, /await this\.saveIntoPdf\(true\);\s*this\.requestNativePdfPageRender\(pageIndex\)/);
 });
 
 test("native PDF text selection follows the last highlight or copy action", async () => {

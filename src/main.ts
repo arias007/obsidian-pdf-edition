@@ -5161,14 +5161,32 @@ class InkSession {
   }
 
   private getPdfCanvas(overlay: PageOverlay): HTMLCanvasElement | null {
+    const viewer = this.getNativePdfViewerApp()?.pdfViewer;
+    const pageViewCanvas = viewer?.getPageView?.(overlay.pageIndex)?.canvas ?? viewer?._pages?.[overlay.pageIndex]?.canvas ?? null;
+    const wrappedCanvas = overlay.pageEl.querySelector<HTMLCanvasElement>(
+      ".canvasWrapper canvas:not(.pdftion-canvas), .notedraw-static-canvas:not(.pdftion-canvas)"
+    );
     const candidates = Array.from(new Set([
+      pageViewCanvas,
+      wrappedCanvas,
       overlay.observedCanvas ?? null,
-      overlay.pageEl.querySelector<HTMLCanvasElement>(".canvasWrapper canvas"),
       ...Array.from(overlay.pageEl.querySelectorAll<HTMLCanvasElement>("canvas"))
-    ].filter((canvas): canvas is HTMLCanvasElement => canvas !== null && !canvas.classList.contains("pdftion-canvas"))));
+    ].filter((canvas): canvas is HTMLCanvasElement => (
+      canvas !== null &&
+      !canvas.classList.contains("pdftion-canvas") &&
+      canvas.closest(".annotationLayer, .annotationEditorLayer") === null
+    ))));
     return candidates
       .filter((canvas) => canvas.width > 1 && canvas.height > 1)
-      .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] ?? candidates[0] ?? null;
+      .sort((a, b) => {
+        const score = (canvas: HTMLCanvasElement): number => {
+          const nativePriority = canvas === pageViewCanvas ? 1_000_000_000 : 0;
+          const wrapperPriority = canvas === wrappedCanvas || canvas.closest(".canvasWrapper") !== null ? 100_000_000 : 0;
+          const visibleContent = measureCanvasVisualRatio(canvas) * 10_000_000;
+          return nativePriority + wrapperPriority + visibleContent + canvas.width * canvas.height;
+        };
+        return score(b) - score(a);
+      })[0] ?? candidates[0] ?? null;
   }
 
   private blockNativePdfAnnotationEvent(event: Event): void {
@@ -6907,8 +6925,12 @@ class InkSession {
     if (drag.mode === "move") {
       if (drag.moved) {
         this.updateExternalInkLayerState();
-        this.redrawOverlay(overlay);
-        this.scheduleAutoSave(250);
+        this.redrawPageOverlays(overlay.pageIndex);
+        if (this.selectionContainsPdfInk(overlay.pageIndex)) {
+          void this.commitMovedPdfInk(overlay.pageIndex);
+        } else {
+          this.scheduleAutoSave(250);
+        }
       } else if (drag.clearSelectionOnTap) {
         this.clearEditableSelection();
         this.redrawAll();
@@ -6920,8 +6942,12 @@ class InkSession {
     if (drag.mode === "resize") {
       if (drag.moved) {
         this.updateExternalInkLayerState();
-        this.redrawOverlay(overlay);
-        this.scheduleAutoSave(250);
+        this.redrawPageOverlays(overlay.pageIndex);
+        if (this.selectionContainsPdfInk(overlay.pageIndex)) {
+          void this.commitMovedPdfInk(overlay.pageIndex);
+        } else {
+          this.scheduleAutoSave(250);
+        }
       }
       this.updateToolbarState();
       return;
@@ -6946,6 +6972,31 @@ class InkSession {
       this.redrawAll();
     }
     this.updateToolbarState();
+  }
+
+  private redrawPageOverlays(pageIndex: number): void {
+    for (const candidate of this.overlays.values()) {
+      if (candidate.pageIndex === pageIndex) {
+        this.redrawOverlay(candidate);
+      }
+    }
+  }
+
+  private selectionContainsPdfInk(pageIndex: number): boolean {
+    return this.getSelectedEditableElements(pageIndex).some((element) => (
+      element.kind === "stroke" && Array.isArray(element.pdfPoints)
+    ));
+  }
+
+  private async commitMovedPdfInk(pageIndex: number): Promise<void> {
+    await this.saveIntoPdf(true);
+    this.requestNativePdfPageRender(pageIndex);
+    for (const delay of [80, 260]) {
+      window.setTimeout(() => {
+        this.requestNativePdfPageRender(pageIndex);
+        this.redrawPageOverlays(pageIndex);
+      }, delay);
+    }
   }
 
   private onTouchStart(event: TouchEvent, overlay: PageOverlay): void {
@@ -7572,12 +7623,12 @@ class InkSession {
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "md");
       const images = await this.persistNoteDrawExportImages(
         targetPath,
-        collectNoteDrawExportImages([], this.getEditableElements())
+        collectNoteDrawExportImages(visualPages, this.getEditableElements())
       );
-      const markdown = buildEditableMarkdown(this.file, pages, images);
+      const markdown = buildEditableMarkdown(this.file, pages, noteDraw ? [] : images);
       const targetFile = await this.plugin.app.vault.create(targetPath, markdown);
       if (noteDraw) {
-        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements()));
+        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements(), images));
       }
       const opened = await this.openConvertedMarkdownFile(targetFile);
       if (options.notice !== false) {
@@ -10839,7 +10890,18 @@ function buildNoteDrawExportData(
 }
 
 function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: InkElement[]): NoteDrawExportImage[] {
-  const images: NoteDrawExportImage[] = elements
+  const imagesById = new Map<string, NoteDrawExportImage>();
+  for (const page of pages) {
+    for (const image of page.images) {
+      imagesById.set(image.id, {
+        ...image,
+        assetMime: dataUrlMimeType(image.dataUrl),
+        assetName: `pdftion-image-${image.id}.${dataUrlImageExtension(image.dataUrl)}`,
+        pageIndex: page.pageIndex
+      });
+    }
+  }
+  for (const image of elements
     .filter((element): element is InkImage => element.kind === "image")
     .map((image) => ({
       assetMime: dataUrlMimeType(image.dataUrl),
@@ -10853,7 +10915,10 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
       x: image.x,
       y: image.y,
       zIndex: image.zIndex
-    }));
+    }))) {
+    imagesById.set(image.id, image);
+  }
+  const images = Array.from(imagesById.values());
 
   for (const page of pages) {
     if (page.lines.length > 0 || page.sourceVisualRatio < 0.045) {
@@ -10966,16 +11031,6 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
     });
     const imageX = (slideWidth - width) / 2;
     const imageY = (slideHeight - height) / 2;
-    for (const image of page.images) {
-      slide.addImage({
-        data: image.dataUrl,
-        h: Math.max(0.01, image.height * height),
-        transparency: Math.round((1 - clamp(image.opacity, 0, 1)) * 100),
-        w: Math.max(0.01, image.width * width),
-        x: imageX + image.x * width,
-        y: imageY + image.y * height
-      });
-    }
     for (const line of page.lines) {
       const textRuns = line.runs.map((run) => ({
         text: run.text,
@@ -11004,6 +11059,17 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
         w: Math.max(0.05, line.width * width),
         x: imageX + line.left * width,
         y: imageY + line.top * height
+      });
+    }
+    for (const image of [...page.images].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))) {
+      const transparency = Math.round((1 - clamp(image.opacity, 0, 1)) * 100);
+      slide.addImage({
+        data: image.dataUrl,
+        h: Math.max(0.01, image.height * height),
+        ...(transparency > 0 ? { transparency } : {}),
+        w: Math.max(0.01, image.width * width),
+        x: imageX + image.x * width,
+        y: imageY + image.y * height
       });
     }
   }
@@ -11098,7 +11164,7 @@ function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): 
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="zh-CN"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos" w:eastAsia="等线"/></w:rPr></w:style></w:styles>`;
   const settingsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>`;
   const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${xmlEscape(title)}</dc:title><dc:creator>Murat</dc:creator><cp:lastModifiedBy>Murat</cp:lastModifiedBy></cp:coreProperties>`;
-  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.85</AppVersion></Properties>`;
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Pdftion</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company>Murat</Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>0.3.86</AppVersion></Properties>`;
 
   return zipStoreFiles([
     { name: "[Content_Types].xml", data: utf8Bytes(contentTypes) },
