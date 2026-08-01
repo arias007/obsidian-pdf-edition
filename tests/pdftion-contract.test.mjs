@@ -89,8 +89,12 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
   assert.match(markdownSource, /<span style=/);
   assert.match(markdownSource, /getEditableMarkdownHeadingLevel\(line, baseFontSize, text\)/);
   assert.match(markdownSource, /renderEditableMarkdownRun\(run, baseFontSize, true\)/);
+  assert.match(markdownSource, /detectEditableMarkdownTables\(page\.lines\)/);
+  assert.match(markdownSource, /function splitEditableMarkdownTableRow/);
+  assert.match(markdownSource, /`\| \$\{rows\[0\]\.join\(" \| "\)\} \|`/);
   assert.match(markdownSource, /Math\.max\(4, baseFontSize \* 0\.30\)/);
   assert.match(markdownSource, /isNearDefaultTextColor\(run\.color\)/);
+  assert.match(markdownSource, /const customUnderline = run\.underline && !validLink/);
   assert.doesNotMatch(markdownSource, /<section\b|<div\b|<input\b|<label\b/i);
 });
 
@@ -106,12 +110,14 @@ test("visual exports reuse the HTML-quality snapshot and keep editable text", as
   assert.match(source, /await this\.drawImageElementForExport/);
   assert.match(source, /<div class="text-layer"/);
   assert.ok(source.includes('<w:t xml:space="preserve">'));
-  assert.match(source, /buildDocxEditableTextParagraph\(item\.value, baseFontSize, contentWidthTwips, spacingBefore, addHyperlink\)/);
+  assert.match(source, /buildDocxEditableTextParagraph\(item\.value, baseFontSize, contentWidthTwips, spacingBefore, horizontalOrigin, addHyperlink\)/);
+  assert.match(source, /buildDocxEditableTable\(item\.value, baseFontSize, contentWidthTwips, spacingBefore, horizontalOrigin, addHyperlink\)/);
   assert.match(source, /buildDocxInlineImageParagraph\(/);
   assert.match(source, /addImage\(dataUrlToBytes\(image\.dataUrl\), "png"\)/);
   assert.match(source, /<w:hyperlink r:id=/);
   assert.match(source, /<wp:inline distT="0" distB="0" distL="0" distR="0">/);
   assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
+  assert.doesNotMatch(source, /w:right="\$\{rightTwips\}"/);
   assert.doesNotMatch(source, /<w:vanish\/>/);
 });
 
@@ -156,6 +162,9 @@ test("visual export waits for rendered pages and keeps inserted images compatibl
   const pptSource = source.slice(source.indexOf("async function buildPptxFromPageImages"), source.indexOf("function buildSelfContainedVisualHtml"));
   assert.ok(pptSource.indexOf("for (const image of [...page.images]") < pptSource.indexOf("for (const line of page.lines)"));
   assert.match(pptSource, /if \(page\.lines\.length === 0\) \{[\s\S]*?uint8ArrayToDataUrl\(page\.bytes/);
+  assert.match(pptSource, /slide\.addTable\(tableRows/);
+  assert.match(pptSource, /const fontScale = clamp\(12\.5 \/ Math\.max\(1, baseFontSize\), 0\.85, 1\.35\)/);
+  assert.doesNotMatch(pptSource, /fit: "shrink"/);
   assert.doesNotMatch(pptSource, /transparency: 100/);
   assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
 });
