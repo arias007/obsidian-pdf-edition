@@ -67,26 +67,45 @@ test("all requested visual formats share the page capture pipeline", async () =>
   assert.match(source, /const timeout = window\.setTimeout\(finish, 120\)/);
 });
 
-test("Markdown conversion keeps common image references and optional NoteDraw ink", async () => {
+test("Markdown conversion prioritizes links and keeps floating media in NoteDraw", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /const noteDraw = getNoteDrawWriteApi\(\)/);
   assert.match(source, /const visualPages = await this\.captureVisualConversionPages\(\{/);
   assert.match(source, /collectNoteDrawExportImages\(visualPages, this\.getEditableElements\(\)\)/);
   assert.match(source, /\.filter\(isUsefulMarkdownExportImage\)/);
+  assert.match(source, /partitionMarkdownExportImages\(pages, persistedImages\)/);
+  assert.match(source, /noteDraw \? inlineImages : \[\.\.\.inlineImages, \.\.\.floatingImages\]/);
   assert.match(source, /function isUsefulNativeExportImage\(image: VisualConversionImage\)/);
   assert.match(source, /estimatedBytes >= 16_000 \|\| image\.width \* image\.height >= 0\.12/);
-  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages, images, targetPath\)/);
+  assert.match(source, /placement\?: "floating" \| "flow" \| "ink-preview"/);
+  assert.match(source, /placement: "floating" as const/);
+  assert.match(source, /usesFullPageImage && image\.id\.startsWith\("pdf-raster-page-"\)/);
   assert.doesNotMatch(source, /writeVisualConversionImages\(pages\)/);
   assert.match(source, /persistNoteDrawExportImages/);
   assert.ok(source.includes('const assetDir = `${targetPath.replace(/\\.md$/i, "")}-assets`;'));
   assert.match(source, /assetPath: image\.assetPath/);
-  assert.match(source, /const imageMarkdown = `!\[\$\{alt\}\]\(\$\{escapeMarkdownLinkDestination\(path\)\}\)`/);
-  assert.doesNotMatch(source.slice(source.indexOf("function buildEditableMarkdown"), source.indexOf("function getCommonCalloutIcon")), /!\[\[/);
-  assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData\(targetPath, pages, this\.getEditableElements\(\)\)\)/);
+  assert.match(source, /const commonImage = `!\[\$\{alt\}\]\(\$\{escapeMarkdownLinkDestination\(relativePath\)\}\)`/);
+  assert.match(source, /return `!\[\[\$\{escapeObsidianWikilink\(image\.assetPath\)\}\]\]`/);
+  assert.match(source, /buildNoteDrawExportData\(targetPath, pages, this\.getEditableElements\(\), floatingImages\)/);
   assert.match(source, /function getRelativeMarkdownPath/);
   assert.match(source, /const opened = await this\.openConvertedMarkdownFile\(targetFile\)/);
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
+});
+
+test("Markdown conversion recovers external, Obsidian, PDF, image, and attachment links", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /annotation\.url \?\? annotation\.unsafeUrl/);
+  assert.match(source, /getPdfAnnotationExportLink\(annotation\)/);
+  assert.match(source, /\["href", "data-href", "data-linkpath", "data-url"\]/);
+  assert.match(source, /#nameddest=\$\{encodeURIComponent\(destination\)\}/);
+  assert.match(source, /normalizeSafeMarkdownExportLink\(run\.link\)/);
+  assert.match(source, /\^\(\?:data\|javascript\|vbscript\):/);
+  assert.match(source, /new URLSearchParams\(query\)\.get\("file"\)/);
+  assert.match(source, /escapeObsidianWikilink\(obsidianTarget \?\? pdfTarget \?\? ""\)/);
+  assert.match(source, /destination \? `\[\$\{commonImage\}\]\(\$\{escapeMarkdownLinkDestination\(destination\)\}\)`/);
+  assert.match(source, /image\.link \|\| image\.placement === "flow"/);
 });
 
 test("Markdown conversion uses native Markdown without HTML presentation elements", async () => {
@@ -100,11 +119,11 @@ test("Markdown conversion uses native Markdown without HTML presentation element
   assert.match(markdownSource, /block\.kind === "code"/);
   assert.match(markdownSource, /block\.kind === "table"/);
   assert.match(markdownSource, /block\.kind === "callout-title"/);
-  assert.match(markdownSource, /escapeMarkdownLinkDestination\(path\)/);
+  assert.match(markdownSource, /renderMarkdownExportImage\(file, block\.image, targetPath\)/);
   assert.doesNotMatch(markdownSource, /<\/?(?:a|div|font|label|section|span|style)\b/i);
   assert.match(source, /const headingProfile = buildEditableMarkdownHeadingProfile\(pages\)/);
   assert.match(source, /getEditableMarkdownHeadingLevel\(line, baseFontSize, text, headingProfile\)/);
-  assert.match(markdownSource, /renderEditableMarkdownRun\(run, document\.baseFontSize\)/);
+  assert.match(markdownSource, /renderEditableMarkdownRun\(run, document\.baseFontSize, false, file\)/);
   assert.match(source, /detectEditableMarkdownTables\(page\.lines\)/);
   assert.match(source, /const taskMarker = text\.match\(\/\^\[☐□◻☑☒✅\]/);
   assert.match(source, /getEditableMarkdownSemanticSection\(text\)/);
@@ -197,7 +216,7 @@ test("visual capture recovers native PDF text and separates text from image and 
   assert.match(source, /selectCompleteEditableLines\(renderedLines, pdfLines\)/);
   assert.match(source, /hasLinks\(pdfLines\) && !hasLinks\(renderedLines\)/);
   assert.match(source, /enrichEditableLineMetadata\(renderedLines, pdfLines\)/);
-  assert.match(source, /const link = run\.link \?\? supplemental\?\.link/);
+  assert.match(source, /const link = run\.link \?\? supplementalLink/);
   assert.match(source, /underline: run\.underline \|\| supplemental\.underline \|\| Boolean\(link\)/);
   assert.match(source, /mergeInkTextExportLines/);
   assert.match(source, /sampleEditableTextColors\(pdfCanvas, lines\)/);

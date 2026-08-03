@@ -1085,6 +1085,7 @@ interface NativePdfTextContentLike {
 }
 
 interface NativePdfAnnotationLike {
+  dest?: string | unknown[];
   rect?: number[];
   unsafeUrl?: string;
   url?: string;
@@ -1499,6 +1500,7 @@ interface NoteDrawExportImage extends VisualConversionImage {
   assetName: string;
   assetPath?: string;
   assetSize?: number;
+  placement?: "floating" | "flow" | "ink-preview";
   pageIndex: number;
   zIndex?: number;
 }
@@ -8416,14 +8418,23 @@ class InkSession {
         width: page.width
       }));
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "md");
-      const images = await this.persistNoteDrawExportImages(
+      const persistedImages = await this.persistNoteDrawExportImages(
         targetPath,
         collectNoteDrawExportImages(visualPages, this.getEditableElements()).filter(isUsefulMarkdownExportImage)
       );
-      const markdown = buildEditableMarkdown(this.file, pages, images, targetPath);
+      const { floating: floatingImages, inline: inlineImages } = partitionMarkdownExportImages(pages, persistedImages);
+      const markdown = buildEditableMarkdown(
+        this.file,
+        pages,
+        noteDraw ? inlineImages : [...inlineImages, ...floatingImages],
+        targetPath
+      );
       const targetFile = await this.plugin.app.vault.create(targetPath, markdown);
       if (noteDraw) {
-        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements()));
+        await noteDraw.writeDrawings(
+          targetFile,
+          buildNoteDrawExportData(targetPath, pages, this.getEditableElements(), floatingImages)
+        );
       }
       const opened = await this.openConvertedMarkdownFile(targetFile);
       if (options.notice !== false) {
@@ -11636,7 +11647,7 @@ function buildEditableMarkdown(
   const output: string[] = [];
   for (const page of document.pages) {
     for (const block of page.blocks) {
-      const text = block.runs.map((run) => renderEditableMarkdownRun(run, document.baseFontSize)).join("").trim();
+      const text = block.runs.map((run) => renderEditableMarkdownRun(run, document.baseFontSize, false, file)).join("").trim();
       if (block.kind === "heading") {
         output.push(`${"#".repeat(block.headingLevel ?? 1)} ${text}`, "");
       } else if (block.kind === "paragraph") {
@@ -11660,14 +11671,9 @@ function buildEditableMarkdown(
       } else if (block.kind === "separator") {
         output.push("---", "");
       } else if (block.kind === "table" && block.table) {
-        output.push(...renderEditableMarkdownTable(block.table, document.baseFontSize), "");
+        output.push(...renderEditableMarkdownTable(block.table, document.baseFontSize, file), "");
       } else if (block.kind === "image" && block.image?.assetPath) {
-        const path = getRelativeMarkdownPath(targetPath, block.image.assetPath);
-        const alt = escapeMarkdownImageAlt(block.image.assetName || file.basename);
-        const imageMarkdown = `![${alt}](${escapeMarkdownLinkDestination(path)})`;
-        output.push(block.image.link
-          ? `[${imageMarkdown}](${escapeMarkdownLinkDestination(block.image.link)})`
-          : imageMarkdown, "");
+        output.push(renderMarkdownExportImage(file, block.image, targetPath), "");
       }
     }
   }
@@ -11695,6 +11701,20 @@ function getRelativeMarkdownPath(fromFile: string, target: string): string {
 
 function escapeMarkdownImageAlt(value: string): string {
   return value.replace(/[\[\]\\]/g, "\\$&").replace(/\r?\n/g, " ");
+}
+
+function renderMarkdownExportImage(file: TFile, image: NoteDrawExportImage, targetPath: string): string {
+  if (!image.assetPath) {
+    return "";
+  }
+  const relativePath = getRelativeMarkdownPath(targetPath, image.assetPath);
+  const alt = escapeMarkdownImageAlt(image.assetName || file.basename);
+  const commonImage = `![${alt}](${escapeMarkdownLinkDestination(relativePath)})`;
+  if (image.link) {
+    const destination = normalizeMarkdownExportLinkDestination(image.link, file, targetPath);
+    return destination ? `[${commonImage}](${escapeMarkdownLinkDestination(destination)})` : commonImage;
+  }
+  return `![[${escapeObsidianWikilink(image.assetPath)}]]`;
 }
 
 function detectEditableMarkdownTables(lines: EditableMarkdownLine[]): EditableMarkdownTable[] {
@@ -11777,10 +11797,10 @@ function splitEditableMarkdownTableRow(line: EditableMarkdownLine): EditableMark
   return cells.every((cell) => cell.runs.length > 0) ? cells : null;
 }
 
-function renderEditableMarkdownTable(table: EditableMarkdownTable, baseFontSize: number): string[] {
+function renderEditableMarkdownTable(table: EditableMarkdownTable, baseFontSize: number, file?: TFile): string[] {
   const rows = table.rows.map((row) => row.map((cell) => (
     cell.runs
-      .map((run) => renderEditableMarkdownRun(run, baseFontSize, true))
+      .map((run) => renderEditableMarkdownRun(run, baseFontSize, true, file))
       .join("")
       .replace(/\s*\n\s*/g, " ")
       .trim() || " "
@@ -11815,85 +11835,45 @@ function partitionMarkdownExportImages(
 
   for (const image of images) {
     const page = pageByIndex.get(image.pageIndex);
-    if (!page || page.lines.length === 0 || image.id.startsWith("native-page-")) {
+    if (image.link || image.placement === "flow" || !page || page.lines.length === 0 || image.id.startsWith("native-page-")) {
       inline.push(image);
       continue;
     }
-    const sharesTextBand = page.lines.some((line) => normalizedRangesOverlap(
-      image.y,
-      image.y + image.height,
-      line.top,
-      line.top + line.height,
-      0.008
-    ));
-    if (!sharesTextBand) {
-      inline.push(image);
+    if (image.placement === "floating" || isClearlyFloatingMarkdownRaster(page, image)) {
+      floating.push(image);
       continue;
     }
-    const safePosition = findSafeMarkdownFloatingImagePosition(page, image);
-    if (!safePosition) {
-      inline.push(image);
-      continue;
-    }
-    floating.push({ ...image, x: safePosition.x, y: safePosition.y });
+    inline.push(image);
   }
 
   return { floating, inline };
 }
 
-function findSafeMarkdownFloatingImagePosition(
+function isClearlyFloatingMarkdownRaster(
   page: EditableMarkdownPage,
   image: NoteDrawExportImage
-): { x: number; y: number } | null {
-  const padding = 0.012;
-  const maxX = Math.max(0, 1 - image.width);
-  const maxY = Math.max(0, 1 - image.height);
-  const candidateXs = uniqueNormalizedPositions([
-    image.x,
-    padding,
-    maxX - padding,
-    maxX / 2,
-    ...page.lines.flatMap((line) => [line.left - image.width - padding, line.left + line.width + padding])
-  ], maxX);
-  const candidateYs = uniqueNormalizedPositions([
-    image.y,
-    padding,
-    maxY - padding,
-    maxY / 2,
-    ...page.lines.flatMap((line) => [line.top - image.height - padding, line.top + line.height + padding])
-  ], maxY);
-  const candidates = candidateYs.flatMap((y) => candidateXs.map((x) => ({
-    distance: Math.abs(x - image.x) + Math.abs(y - image.y),
-    x,
-    y
-  }))).sort((a, b) => a.distance - b.distance);
-
-  for (const candidate of candidates) {
-    const overlapsText = page.lines.some((line) => normalizedRectsOverlap(
-      candidate.x,
-      candidate.y,
-      image.width,
-      image.height,
-      line.left,
-      line.top,
-      line.width,
-      line.height,
-      padding
-    ));
-    if (!overlapsText) {
-      return { x: candidate.x, y: candidate.y };
-    }
+): boolean {
+  if (!image.id.startsWith("pdf-raster-page-") || image.width * image.height > 0.035) {
+    return false;
   }
-  return null;
-}
-
-function uniqueNormalizedPositions(values: number[], maximum: number): number[] {
-  const positions = new Map<string, number>();
-  for (const value of values) {
-    const normalized = clamp(value, 0, maximum);
-    positions.set(normalized.toFixed(4), normalized);
+  const imageArea = Math.max(0.0001, image.width * image.height);
+  const overlapArea = page.lines.reduce((total, line) => {
+    const overlapWidth = Math.max(0, Math.min(image.x + image.width, line.left + line.width) - Math.max(image.x, line.left));
+    const overlapHeight = Math.max(0, Math.min(image.y + image.height, line.top + line.height) - Math.max(image.y, line.top));
+    return total + overlapWidth * overlapHeight;
+  }, 0);
+  if (overlapArea / imageArea >= 0.12) {
+    return true;
   }
-  return Array.from(positions.values());
+  const textLeft = Math.min(...page.lines.map((line) => line.left));
+  const textRight = Math.max(...page.lines.map((line) => line.left + line.width));
+  const outsideTextColumn = image.x + image.width < textLeft - 0.01 || image.x > textRight + 0.01;
+  const besideText = page.lines.some((line) => {
+    const verticalOverlap = normalizedRangesOverlap(image.y, image.y + image.height, line.top, line.top + line.height, 0.006);
+    const horizontalGap = Math.max(line.left - (image.x + image.width), image.x - (line.left + line.width), 0);
+    return verticalOverlap && horizontalGap <= 0.03;
+  });
+  return outsideTextColumn && besideText;
 }
 
 function normalizedRangesOverlap(
@@ -11967,7 +11947,9 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
     const fontSize = Number.parseFloat(style.fontSize || "") || Math.max(4, rect.height * 0.82);
     const fontWeight = Number.parseInt(style.fontWeight || "400", 10);
     const decoration = style.textDecorationLine || style.textDecoration || "";
-    const directLink = span.closest<HTMLAnchorElement>("a[href]")?.getAttribute("href") ?? undefined;
+    const directLink = getDomExportLinkTarget(span.closest<HTMLElement>(
+      "a[href], [data-href], [data-linkpath], [data-dest], [data-url]"
+    ));
     fragments.push({
       bottom: rect.bottom,
       left: rect.left,
@@ -11997,16 +11979,30 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
 }
 
 function collectDomExportLinkRects(pageEl: HTMLElement): ExportLinkRect[] {
-  const links = Array.from(pageEl.querySelectorAll<HTMLAnchorElement>(
-    ".annotationLayer a[href], .linkAnnotation a[href], a[data-annotation-id][href]"
+  const links = Array.from(pageEl.querySelectorAll<HTMLElement>(
+    ".annotationLayer a, .linkAnnotation a, a[data-annotation-id], [data-href], [data-linkpath], [data-dest], [data-url]"
   ));
   return links.flatMap((link) => {
-    const href = link.getAttribute("href")?.trim();
+    const href = getDomExportLinkTarget(link);
     const rect = link.getBoundingClientRect();
     return href && rect.width > 0 && rect.height > 0
       ? [{ bottom: rect.bottom, href, left: rect.left, right: rect.right, top: rect.top }]
       : [];
   });
+}
+
+function getDomExportLinkTarget(element: HTMLElement | null): string | undefined {
+  if (!element) {
+    return undefined;
+  }
+  for (const attribute of ["href", "data-href", "data-linkpath", "data-url"]) {
+    const value = element.getAttribute(attribute)?.trim();
+    if (value && value !== "#") {
+      return value;
+    }
+  }
+  const destination = element.getAttribute("data-dest")?.trim();
+  return destination ? `#nameddest=${encodeURIComponent(destination)}` : undefined;
 }
 
 function findOverlappingExportLink(
@@ -12044,7 +12040,7 @@ async function collectPdfJsEditableLines(
       ? await pdfPage.getAnnotations({ intent: "display" }).catch(() => [])
       : [];
     const links = annotations.flatMap((annotation) => {
-      const href = (annotation.url ?? annotation.unsafeUrl)?.trim();
+      const href = getPdfAnnotationExportLink(annotation);
       const rect = annotation.rect;
       if (!href || !rect || rect.length < 4) {
         return [];
@@ -12104,6 +12100,19 @@ async function collectPdfJsEditableLines(
     console.debug("pdftion could not read the native PDF text model for conversion.", error);
     return [];
   }
+}
+
+function getPdfAnnotationExportLink(annotation: NativePdfAnnotationLike): string | undefined {
+  const url = (annotation.url ?? annotation.unsafeUrl)?.trim();
+  if (url) {
+    return url;
+  }
+  const destination = typeof annotation.dest === "string"
+    ? annotation.dest.trim()
+    : Array.isArray(annotation.dest) && typeof annotation.dest[0] === "string"
+      ? annotation.dest[0].trim()
+      : "";
+  return destination ? `#nameddest=${encodeURIComponent(destination)}` : undefined;
 }
 
 function multiplyPdfMatrices(left: number[], right: number[]): number[] {
@@ -12234,12 +12243,16 @@ function enrichEditableLineMetadata(
           const verticalRatio = Math.max(vertical / runHeight, vertical / candidateHeight);
           const candidateText = candidate.run.text.replace(/\s+/gu, "").trim();
           const textMatches = normalizedText.length > 0 && normalizedText === candidateText;
-          const score = horizontalRatio * verticalRatio + (textMatches ? 2 : 0) + (candidate.run.link ? 0.05 : 0);
-          return { candidate, score };
+          const geometricOverlap = horizontalRatio * verticalRatio;
+          const score = geometricOverlap + (textMatches ? 2 : 0) + (candidate.run.link ? 0.05 : 0);
+          return { candidate, geometricOverlap, score, textMatches };
         })
         .sort((a, b) => b.score - a.score)[0];
       const supplemental = matching && matching.score >= 0.12 ? matching.candidate.run : null;
-      const link = run.link ?? supplemental?.link;
+      const supplementalLink = matching && (matching.textMatches || matching.geometricOverlap >= 0.35)
+        ? supplemental?.link
+        : undefined;
+      const link = run.link ?? supplementalLink;
       return supplemental
         ? {
             ...run,
@@ -12528,8 +12541,13 @@ function getEditableMarkdownDocumentBaseFontSize(
   return clusters.sort((a, b) => (b.weight - a.weight) || (a.size - b.size))[0]?.size ?? 16;
 }
 
-function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16, suppressFontSize = false): string {
-  const validLink = run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link) ? run.link : undefined;
+function renderEditableMarkdownRun(
+  run: EditableMarkdownTextRun,
+  baseFontSize = 16,
+  suppressFontSize = false,
+  sourceFile?: TFile
+): string {
+  const validLink = normalizeSafeMarkdownExportLink(run.link);
   const leadingSpace = run.text.match(/^\s*/u)?.[0] ?? "";
   const trailingSpace = run.text.match(/\s*$/u)?.[0] ?? "";
   const coreText = run.text.slice(leadingSpace.length, run.text.length - trailingSpace.length);
@@ -12551,9 +12569,47 @@ function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 
     content = `~~${content}~~`;
   }
   if (validLink) {
-    content = `[${content}](${escapeMarkdownLinkDestination(validLink)})`;
+    const obsidianTarget = getObsidianOpenFileTarget(validLink);
+    const pdfTarget = sourceFile && /^#(?:page=\d+|nameddest=)/i.test(validLink)
+      ? `${sourceFile.path}${validLink}`
+      : null;
+    if (obsidianTarget || pdfTarget) {
+      content = `[[${escapeObsidianWikilink(obsidianTarget ?? pdfTarget ?? "")}|${escapeObsidianWikilink(coreText)}]]`;
+    } else {
+      content = `[${content}](${escapeMarkdownLinkDestination(validLink)})`;
+    }
   }
   return `${leadingSpace}${content}${trailingSpace}`;
+}
+
+function normalizeSafeMarkdownExportLink(raw: string | undefined): string | null {
+  const value = raw?.trim() ?? "";
+  if (!value || /[\u0000-\u001f\u007f]/u.test(value) || /^(?:data|javascript|vbscript):/i.test(value)) {
+    return null;
+  }
+  return value;
+}
+
+function normalizeMarkdownExportLinkDestination(raw: string, sourceFile: TFile, targetPath: string): string | null {
+  const value = normalizeSafeMarkdownExportLink(raw);
+  if (!value) {
+    return null;
+  }
+  return /^#(?:page=\d+|nameddest=)/i.test(value)
+    ? `${getRelativeMarkdownPath(targetPath, sourceFile.path)}${value}`
+    : value;
+}
+
+function getObsidianOpenFileTarget(value: string): string | null {
+  if (!/^obsidian:\/\/open\?/i.test(value)) {
+    return null;
+  }
+  try {
+    const query = value.slice(value.indexOf("?") + 1);
+    return new URLSearchParams(query).get("file")?.trim().replace(/\\/g, "/") || null;
+  } catch {
+    return null;
+  }
 }
 
 function isNearDefaultTextColor(value: string): boolean {
@@ -12675,11 +12731,22 @@ function buildNoteDrawExportData(
 function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: InkElement[]): NoteDrawExportImage[] {
   const imagesById = new Map<string, NoteDrawExportImage>();
   for (const page of pages) {
+    const usesFullPageImage = page.lines.length === 0 && page.sourceVisualRatio >= 0.045;
     for (const image of page.images) {
+      if (usesFullPageImage && image.id.startsWith("pdf-raster-page-")) {
+        continue;
+      }
       imagesById.set(image.id, {
         ...image,
         assetMime: dataUrlMimeType(image.dataUrl),
         assetName: `pdftion-image-${image.id}.${dataUrlImageExtension(image.dataUrl)}`,
+        placement: image.id.startsWith("pdftion-stroke-")
+          ? "ink-preview"
+          : image.id.startsWith("pdftion-cover-")
+            ? "floating"
+            : image.id.startsWith("native-page-")
+              ? "flow"
+              : undefined,
         pageIndex: page.pageIndex
       });
     }
@@ -12694,6 +12761,7 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
       id: image.id,
       opacity: image.opacity,
       pageIndex: image.pageIndex,
+      placement: "floating" as const,
       width: image.width,
       x: image.x,
       y: image.y,
@@ -12704,7 +12772,8 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
   const images = Array.from(imagesById.values());
 
   for (const page of pages) {
-    if (page.lines.length > 0 || page.sourceVisualRatio < 0.045) {
+    const usesFullPageImage = page.lines.length === 0 && page.sourceVisualRatio >= 0.045;
+    if (!usesFullPageImage) {
       continue;
     }
     images.push({
@@ -12715,6 +12784,7 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
       id: `native-page-${page.pageIndex + 1}`,
       opacity: 1,
       pageIndex: page.pageIndex,
+      placement: "flow",
       width: 1,
       x: 0,
       y: 0,
@@ -12726,17 +12796,23 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
 
 function isUsefulMarkdownExportImage(image: NoteDrawExportImage): boolean {
   return !image.id.startsWith("html-visual-page-") &&
-    !image.id.startsWith("native-page-") &&
-    isUsefulNativeExportImage(image);
+    image.placement !== "ink-preview" &&
+    (image.id.startsWith("pdf-raster-page-")
+      ? estimatedDataUrlBytes(image.dataUrl) >= 2_500 || image.width * image.height >= 0.004
+      : true);
 }
 
 function isUsefulNativeExportImage(image: VisualConversionImage): boolean {
   if (!image.id.startsWith("pdf-raster-page-")) {
     return true;
   }
-  const separator = image.dataUrl.indexOf(",");
-  const estimatedBytes = separator >= 0 ? Math.floor((image.dataUrl.length - separator - 1) * 0.75) : 0;
+  const estimatedBytes = estimatedDataUrlBytes(image.dataUrl);
   return estimatedBytes >= 16_000 || image.width * image.height >= 0.12;
+}
+
+function estimatedDataUrlBytes(dataUrl: string): number {
+  const separator = dataUrl.indexOf(",");
+  return separator >= 0 ? Math.floor((dataUrl.length - separator - 1) * 0.75) : 0;
 }
 
 function mergeVisualConversionPageImages(
