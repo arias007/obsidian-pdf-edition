@@ -73,7 +73,7 @@ test("Markdown conversion keeps native image references and delegates ink to Not
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
 });
 
-test("Markdown conversion keeps native Markdown and uses minimal HTML for non-native styles", async () => {
+test("Markdown conversion uses native Markdown without HTML presentation elements", async () => {
   const source = await readFile(sourceUrl, "utf8");
   const markdownSource = source.slice(
     source.indexOf("function buildEditableMarkdown"),
@@ -86,16 +86,13 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
   assert.ok(markdownSource.includes('return `- [${checked ? "x" : " "}]'));
   assert.ok(markdownSource.includes('content = `**${content}**`;'));
   assert.match(markdownSource, /escapeMarkdownLinkDestination\(validLink\)/);
-  assert.match(markdownSource, /<span style=/);
+  assert.doesNotMatch(markdownSource, /<\/?(?:a|div|font|label|section|span|style)\b/i);
   assert.match(markdownSource, /const headingProfile = buildEditableMarkdownHeadingProfile\(pages\)/);
   assert.match(markdownSource, /getEditableMarkdownHeadingLevel\(line, baseFontSize, text, headingProfile\)/);
   assert.match(markdownSource, /renderEditableMarkdownRun\(run, baseFontSize, true\)/);
   assert.match(markdownSource, /detectEditableMarkdownTables\(page\.lines\)/);
   assert.match(markdownSource, /function splitEditableMarkdownTableRow/);
   assert.match(markdownSource, /`\| \$\{rows\[0\]\.join\(" \| "\)\} \|`/);
-  assert.match(markdownSource, /Math\.max\(4, baseFontSize \* 0\.30\)/);
-  assert.match(markdownSource, /isNearDefaultTextColor\(run\.color\)/);
-  assert.match(markdownSource, /const customUnderline = run\.underline && !validLink/);
   assert.match(markdownSource, /const taskMarker = text\.match\(\/\^\[☐□◻☑☒✅\]/);
   assert.match(markdownSource, /const runs = taskMarker \? removePrefix\(taskMarker\[0\]\) : line\.runs/);
   assert.match(markdownSource, /getEditableMarkdownSemanticSection\(lineText\)/);
@@ -109,33 +106,31 @@ test("Markdown conversion keeps native Markdown and uses minimal HTML for non-na
   assert.doesNotMatch(markdownSource, /<section\b|<div\b|<input\b|<label\b/i);
 });
 
-test("visual exports reuse the HTML-quality snapshot and keep editable text", async () => {
+test("visual exports keep the composite page and use stable selectable text layers", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /const lines = collectEditableMarkdownLines\(overlay\)/);
   assert.match(source, /lines,\s*pageIndex: overlay\.pageIndex/);
   assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\)/);
-  assert.equal((source.match(/buildMarkdownInlineVisualExportPages\(capturedPages, this\.getEditableElements\(\)\)/g) ?? []).length, 2);
-  assert.match(source, /collectNoteDrawExportImages\(pages, elements\)\.filter\(isUsefulMarkdownExportImage\)/);
-  assert.match(source, /const visibleImages = await Promise\.all\(extractedImages\.map/);
-  assert.match(source, /flattenImageDataUrlOnWhite\(image\.dataUrl, image\.opacity\)/);
-  assert.match(source, /pages\.map\(\(page\) => \(\{ \.\.\.page, images: \[\] \}\)\)/);
+  assert.match(source, /exportConvertedDocx[\s\S]{0,220}?const pages = await this\.captureVisualConversionPages\(\)/);
+  assert.match(source, /exportConvertedPptx[\s\S]{0,220}?const pages = await this\.captureVisualConversionPages\(\)/);
   assert.match(source, /slide\.addText\(textRuns/);
   assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
   assert.match(source, /await this\.drawImageElementForExport/);
-  assert.match(source, /<div class="text-layer"/);
+  assert.match(source, /<svg class="text-layer"/);
+  assert.match(source, /viewBox="0 0 \$\{page\.width\} \$\{page\.height\}"/);
+  assert.match(source, /textLength="\$\{width\}" lengthAdjust="spacingAndGlyphs"/);
   assert.match(source, /await buildDocxFromPageImages\(pages, this\.file\.basename\)/);
   assert.match(source, /await import\("docx"\)/);
   assert.match(source, /new ImageRun\(\{/);
-  assert.match(source, /data: dataUrlToBytes\(image\.dataUrl\)/);
+  assert.match(source, /data: page\.bytes/);
   assert.equal((source.match(/return injectOfficePreviewPages\(/g) ?? []).length, 2);
   assert.match(source, /zip\.file\("mpe\/preview\/manifest\.json"/);
   assert.match(source, /generator: "Obsidian Mobile PDF Exporter"/);
   assert.match(source, /producer: "Pdftion"/);
   assert.match(source, /mpe\/preview\/page-\$\{String\(pageIndex \+ 1\)\.padStart\(4, "0"\)\}\.png/);
   assert.match(source, /pageCount: sortedPages\.length/);
-  assert.match(source, /new ExternalHyperlink\(\{ children: \[textRun\], link: validLink \}\)/);
-  assert.match(source, /new Table\(\{/);
+  assert.match(source, /transparency: 100/);
   assert.doesNotMatch(source.slice(source.indexOf("async function buildDocxFromPageImages"), source.indexOf("function exportHexColor")), /lineRule|<w:drawing>|<wp:inline/);
   assert.match(source, /ctx\.fillStyle = "#ffffff";\s*ctx\.fillRect/);
   assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
@@ -167,27 +162,26 @@ test("comments and element layers are interactive, persistent, and shared by ren
   assert.match(source, /elements\.sort\(compareInkElements\)/);
 });
 
-test("visual export waits for rendered pages and keeps inserted images compatible", async () => {
+test("visual export waits for rendered pages and includes the full annotation composite", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /pageEl\?\.scrollIntoView\(\{ behavior: "auto", block: "center", inline: "nearest" \}\)/);
   assert.match(source, /ensurePdfPageRenderedForExport\(pageIndex, pageEl\)/);
   assert.match(source, /canvasStillBlank = candidate\.sourceVisualRatio < 0\.00035 && candidate\.lines\.length > 0/);
-  assert.match(source, /page\.images[\s\S]{0,500}?slide\.addImage/);
+  assert.match(source, /ctx\.drawImage\(pdfCanvas/);
   assert.match(source, /dataUrl: await convertImageDataUrlToPng\(image\.dataUrl\)/);
   assert.match(source, /await this\.drawImageElementForExport\(ctx, element/);
-  assert.match(source, /for \(const image of \[\.\.\.page\.images\]\.sort/);
+  assert.match(source, /drawStroke\(ctx, element, overlay\.cssWidth, overlay\.cssHeight, false\)/);
+  assert.match(source, /drawTextElement\(ctx, element, overlay\.cssWidth, overlay\.cssHeight, false\)/);
   assert.match(source, /extractHtmlDerivedVisualLayers\(canvas, lines, overlay\.pageIndex\)/);
   assert.match(source, /id: `pdf-raster-page-\$\{pageIndex \+ 1\}-\$\{visuals\.length \+ 1\}`/);
   assert.match(source, /colors\.size >= 8/);
   assert.match(source, /density >= 0\.055/);
   const pptSource = source.slice(source.indexOf("async function buildPptxFromPageImages"), source.indexOf("function buildSelfContainedVisualHtml"));
-  assert.ok(pptSource.indexOf("for (const image of [...page.images]") < pptSource.indexOf("for (const line of page.lines)"));
-  assert.match(pptSource, /if \(page\.lines\.length === 0\) \{[\s\S]*?uint8ArrayToDataUrl\(page\.bytes/);
-  assert.match(pptSource, /slide\.addTable\(tableRows/);
-  assert.match(pptSource, /const fontScale = clamp\(12\.5 \/ Math\.max\(1, baseFontSize\), 0\.85, 1\.35\)/);
+  assert.match(pptSource, /slide\.addImage\(\{[\s\S]*?uint8ArrayToDataUrl\(page\.bytes/);
+  assert.ok(pptSource.indexOf("slide.addImage({") < pptSource.indexOf("for (const line of page.lines)"));
   assert.doesNotMatch(pptSource, /fit: "shrink"/);
-  assert.doesNotMatch(pptSource, /transparency: 100/);
+  assert.match(pptSource, /transparency: 100/);
   assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
 });
 

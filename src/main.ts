@@ -8162,8 +8162,7 @@ class InkSession {
   async exportConvertedDocx(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
       await this.prepareExportSnapshot();
-      const capturedPages = await this.captureVisualConversionPages();
-      const pages = await buildMarkdownInlineVisualExportPages(capturedPages, this.getEditableElements());
+      const pages = await this.captureVisualConversionPages();
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "docx");
       const docx = await buildDocxFromPageImages(pages, this.file.basename);
       const buffer = toArrayBufferCopy(docx);
@@ -8234,8 +8233,7 @@ class InkSession {
   async exportConvertedPptx(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
       await this.prepareExportSnapshot();
-      const capturedPages = await this.captureVisualConversionPages();
-      const pages = await buildMarkdownInlineVisualExportPages(capturedPages, this.getEditableElements());
+      const pages = await this.captureVisualConversionPages();
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "pptx");
       const pptx = await buildPptxFromPageImages(pages, this.file.basename);
       const targetFile = await this.plugin.app.vault.createBinary(targetPath, toArrayBufferCopy(pptx));
@@ -11726,24 +11724,6 @@ function getEditableMarkdownDocumentBaseFontSize(
 
 function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16, suppressFontSize = false): string {
   const validLink = run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link) ? run.link : undefined;
-  const customFont = Boolean(run.fontFamily && !/(?:inherit|initial|unset|system-ui|sans-serif|serif|arial|helvetica|aptos|calibri|times|simsun|simhei|microsoft yahei|noto sans|source han|pingfang|heiti|songti)/i.test(run.fontFamily));
-  const customSize = !suppressFontSize && Math.abs(run.fontSize - baseFontSize) > Math.max(4, baseFontSize * 0.30);
-  const customColor = !validLink && !isNearDefaultTextColor(run.color);
-  const customUnderline = run.underline && !validLink;
-  if (customUnderline || customFont || customSize || customColor) {
-    const styles = [
-      customColor ? `color:${run.color}` : "",
-      customUnderline ? "text-decoration:underline" : "",
-      run.strike ? "text-decoration:line-through" : "",
-      customSize ? `font-size:${Math.max(1, run.fontSize).toFixed(1)}px` : "",
-      customFont ? `font-family:${htmlAttributeEscape(run.fontFamily)}` : "",
-      run.bold ? "font-weight:700" : "",
-      run.italic ? "font-style:italic" : ""
-    ].filter(Boolean).join(";");
-    const escaped = htmlEscape(run.text);
-    const linked = validLink ? `<a href="${htmlAttributeEscape(validLink)}">${escaped}</a>` : escaped;
-    return `<span style="${styles}">${linked}</span>`;
-  }
   let content = escapeMarkdownInline(run.text);
   if (run.bold && run.italic) {
     content = `***${content}***`;
@@ -12249,71 +12229,20 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
   for (const page of [...pages].sort((a, b) => a.pageIndex - b.pageIndex)) {
     const slide = pptx.addSlide();
     slide.background = { color: "FFFFFF" };
-    const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
-    const fontScale = clamp(12.5 / Math.max(1, baseFontSize), 0.85, 1.35);
-    const tables = detectEditableMarkdownTables(page.lines);
-    const tableLines = new Set(tables.flatMap((table) => table.lines));
     const pageRatio = page.width / Math.max(1, page.height);
     const slideRatio = slideWidth / slideHeight;
     const width = pageRatio >= slideRatio ? slideWidth : slideHeight * pageRatio;
     const height = pageRatio >= slideRatio ? slideWidth / pageRatio : slideHeight;
     const imageX = (slideWidth - width) / 2;
     const imageY = (slideHeight - height) / 2;
-    if (page.lines.length === 0) {
-      slide.addImage({
-        data: uint8ArrayToDataUrl(page.bytes, "image/png"),
-        h: height,
-        w: width,
-        x: imageX,
-        y: imageY
-      });
-    }
-    for (const image of [...page.images].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))) {
-      const transparency = Math.round((1 - clamp(image.opacity, 0, 1)) * 100);
-      slide.addImage({
-        data: image.dataUrl,
-        h: Math.max(0.01, image.height * height),
-        ...(transparency > 0 ? { transparency } : {}),
-        w: Math.max(0.01, image.width * width),
-        x: imageX + image.x * width,
-        y: imageY + image.y * height
-      });
-    }
-    for (const table of tables) {
-      const tableWidth = Math.max(0.5, (table.right - table.left) * width);
-      const rowHeights = table.lines.map((line) => Math.max(0.2, line.height * height * 1.2));
-      const tableRows = table.rows.map((row, rowIndex) => row.map((cell) => {
-        const representative = cell.runs[0];
-        const cellFontSize = Math.max(8.5, Math.max(...cell.runs.map((run) => run.fontSize)) * fontScale);
-        return {
-          options: {
-            bold: rowIndex === 0 || cell.runs.some((run) => run.bold),
-            color: exportHexColor(representative?.color ?? "#000000"),
-            fill: rowIndex === 0 ? { color: "F4F6F8" } : { color: "FFFFFF" },
-            fontFace: exportFontFace(representative?.fontFamily ?? "Arial"),
-            fontSize: cellFontSize,
-            margin: 0.04,
-            valign: "middle" as const
-          },
-          text: cell.runs.map((run) => run.text).join("").trim()
-        };
-      }));
-      slide.addTable(tableRows, {
-        border: { color: "D7DCE3", pt: 0.6, type: "solid" },
-        colW: getEditableTableColumnWidths(table, tableWidth),
-        h: rowHeights.reduce((sum, rowHeight) => sum + rowHeight, 0),
-        margin: 0.04,
-        rowH: rowHeights,
-        w: tableWidth,
-        x: imageX + table.left * width,
-        y: imageY + table.top * height
-      });
-    }
+    slide.addImage({
+      data: uint8ArrayToDataUrl(page.bytes, "image/png"),
+      h: height,
+      w: width,
+      x: imageX,
+      y: imageY
+    });
     for (const line of page.lines) {
-      if (tableLines.has(line)) {
-        continue;
-      }
-      const largestFontSize = Math.max(...line.runs.map((run) => run.fontSize * fontScale), 8.5);
       const textRuns = line.runs.map((run) => ({
         text: run.text,
         options: {
@@ -12321,10 +12250,11 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
           breakLine: false,
           color: exportHexColor(run.color),
           fontFace: exportFontFace(run.fontFamily),
-          fontSize: Math.max(7.5, run.fontSize * fontScale),
+          fontSize: Math.max(1, line.height * height * 72 * 0.82),
           hyperlink: run.link && /^(?:https?:|mailto:)/i.test(run.link) ? { url: run.link } : undefined,
           italic: run.italic,
           strike: run.strike ? ("sngStrike" as const) : undefined,
+          transparency: 100,
           underline: run.underline ? { style: "sng" as const } : undefined
         }
       }));
@@ -12333,11 +12263,11 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
       }
       const x = imageX + line.left * width;
       slide.addText(textRuns, {
-        h: Math.max(line.height * height, largestFontSize * 1.2 / 72),
+        h: Math.max(0.01, line.height * height),
         margin: 0,
         paraSpaceAfter: 0,
-        valign: "middle",
-        w: Math.max(0.08, Math.min(imageX + width - x, line.width * width + 0.12)),
+        valign: "top",
+        w: Math.max(0.01, Math.min(imageX + width - x, line.width * width)),
         x,
         y: imageY + line.top * height
       });
@@ -12364,45 +12294,31 @@ function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]
     .map((page) => {
       const textLayer = page.lines.map((line) => {
         const runs = line.runs.map((run) => {
-          const styles = [
-            "color:transparent",
-            "-webkit-text-fill-color:transparent",
-            `font-size:${Math.max(4, run.fontSize).toFixed(1)}px`,
-            run.bold ? "font-weight:700" : "",
-            run.italic ? "font-style:italic" : "",
-            run.underline ? "text-decoration:underline" : "",
-            run.strike ? "text-decoration:line-through" : "",
-            run.fontFamily ? `font-family:${htmlAttributeEscape(run.fontFamily)}` : ""
-          ].filter(Boolean).join(";");
           const text = htmlEscape(run.text);
+          const x = ((run.left ?? line.left) * page.width).toFixed(2);
+          const width = Math.max(1, (run.width ?? line.width) * page.width).toFixed(2);
+          const attributes = `x="${x}" textLength="${width}" lengthAdjust="spacingAndGlyphs"`;
           return run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link)
-            ? `<a href="${htmlAttributeEscape(run.link)}" style="${styles}">${text}</a>`
-            : `<span style="${styles}">${text}</span>`;
+            ? `<a href="${htmlAttributeEscape(run.link)}"><tspan ${attributes}>${text}</tspan></a>`
+            : `<tspan ${attributes}>${text}</tspan>`;
         }).join("");
-        return `<div class="text-line" style="left:${(line.left * 100).toFixed(4)}%;top:${(line.top * 100).toFixed(4)}%;width:${(line.width * 100).toFixed(4)}%;height:${(line.height * 100).toFixed(4)}%">${runs}</div>`;
+        const fontSize = Math.max(1, line.height * page.height * 0.82).toFixed(2);
+        const baseline = ((line.top + line.height * 0.82) * page.height).toFixed(2);
+        return `<text y="${baseline}" font-size="${fontSize}">${runs}</text>`;
       }).join("");
-      return `<figure><div class="page-surface"><img src="${uint8ArrayToDataUrl(page.bytes, "image/png")}" alt="Page ${page.pageIndex + 1}"><div class="text-layer" aria-label="Page ${page.pageIndex + 1} text">${textLayer}</div></div><figcaption>Page ${page.pageIndex + 1}</figcaption></figure>`;
+      return `<figure><div class="page-surface"><img src="${uint8ArrayToDataUrl(page.bytes, "image/png")}" alt="Page ${page.pageIndex + 1}"><svg class="text-layer" viewBox="0 0 ${page.width} ${page.height}" preserveAspectRatio="none" aria-label="Page ${page.pageIndex + 1} text">${textLayer}</svg></div><figcaption>Page ${page.pageIndex + 1}</figcaption></figure>`;
     })
     .join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}.page-surface{position:relative}.page-surface>img{display:block;height:auto;width:100%}.text-layer{inset:0;overflow:hidden;position:absolute;user-select:text;-webkit-user-select:text}.text-line{line-height:1;position:absolute;white-space:pre;user-select:text;-webkit-user-select:text}.text-line span,.text-line a{cursor:text;user-select:text;-webkit-user-select:text}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}.text-layer{display:none}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}.page-surface{position:relative}.page-surface>img{display:block;height:auto;width:100%}.text-layer{fill:transparent;height:100%;inset:0;overflow:hidden;position:absolute;user-select:text;-webkit-user-select:text;width:100%}.text-layer text,.text-layer tspan{cursor:text;user-select:text;-webkit-user-select:text}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}.text-layer{display:none}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
 }
 
 async function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Promise<Uint8Array> {
   const {
     AlignmentType,
     Document,
-    ExternalHyperlink,
     ImageRun,
     Packer,
-    Paragraph,
-    ShadingType,
-    Table,
-    TableCell,
-    TableRow,
-    TextRun,
-    UnderlineType,
-    VerticalAlign,
-    WidthType
+    Paragraph
   } = await import("docx");
   const pageWidthTwips = 11906;
   const pageHeightTwips = 16838;
@@ -12411,23 +12327,6 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
   const contentHeightTwips = pageHeightTwips - pageMarginTwips * 2;
   const contentWidthPx = contentWidthTwips / 15;
   const contentHeightPx = contentHeightTwips / 15;
-  const headingProfile = buildEditableMarkdownHeadingProfile(pages);
-
-  const makeRuns = (runs: EditableMarkdownTextRun[], baseFontSize: number, forceBold = false) => runs.map((run) => {
-    const textRun = new TextRun({
-      bold: forceBold || run.bold,
-      color: exportHexColor(run.color),
-      font: exportFontFace(run.fontFamily),
-      italics: run.italic,
-      size: Math.max(18, Math.round(run.fontSize * 24 / Math.max(1, baseFontSize))),
-      strike: run.strike,
-      text: run.text,
-      underline: run.underline ? { type: UnderlineType.SINGLE } : undefined
-    });
-    const validLink = run.link && /^(?:https?:|mailto:)/i.test(run.link) ? run.link : null;
-    return validLink ? new ExternalHyperlink({ children: [textRun], link: validLink }) : textRun;
-  });
-
   const fitImage = (width: number, height: number): { height: number; width: number } => {
     const sourceWidth = Math.max(1, width);
     const sourceHeight = Math.max(1, height);
@@ -12441,98 +12340,16 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
   const sections = [...pages]
     .sort((a, b) => a.pageIndex - b.pageIndex)
     .map((page) => {
-      const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
-      const tables = detectEditableMarkdownTables(page.lines);
-      const tableLines = new Set(tables.flatMap((table) => table.lines));
-      const horizontalOrigin = page.lines.length > 0 ? Math.min(...page.lines.map((line) => line.left)) : 0;
-      const flowItems: Array<
-        | { kind: "image"; position: number; value: VisualConversionImage }
-        | { kind: "line"; position: number; value: EditableMarkdownLine }
-        | { kind: "table"; position: number; value: EditableMarkdownTable }
-      > = [
-        ...page.lines.filter((line) => !tableLines.has(line)).map((line) => ({ kind: "line" as const, position: line.top, value: line })),
-        ...tables.map((table) => ({ kind: "table" as const, position: table.top, value: table })),
-        ...page.images.map((image) => ({ kind: "image" as const, position: image.y, value: image }))
-      ].sort((a, b) => (a.position - b.position) || (a.kind === "image" ? -1 : 1));
-      const children: Array<InstanceType<typeof Paragraph> | InstanceType<typeof Table>> = [];
-      let previousBottom = 0;
-
-      if (flowItems.length === 0) {
-        const fitted = fitImage(page.width, page.height);
-        children.push(new Paragraph({
-          alignment: AlignmentType.CENTER,
-          children: [new ImageRun({
-            data: page.bytes,
-            transformation: fitted,
-            type: "png"
-          })]
-        }));
-      }
-
-      for (const item of flowItems) {
-        const spacingBefore = Math.round(clamp(item.position - previousBottom, 0, 0.045) * contentHeightTwips);
-        if (item.kind === "line") {
-          const text = item.value.runs.map((run) => run.text).join("").trim();
-          const headingLevel = getEditableMarkdownHeadingLevel(item.value, baseFontSize, text, headingProfile);
-          const leftTwips = Math.round(clamp(
-            (item.value.left - horizontalOrigin) * contentWidthTwips,
-            0,
-            contentWidthTwips * 0.42
-          ));
-          children.push(new Paragraph({
-            children: makeRuns(item.value.runs, baseFontSize, headingLevel !== null),
-            indent: leftTwips > 0 ? { left: leftTwips } : undefined,
-            keepLines: true,
-            keepNext: headingLevel !== null,
-            outlineLevel: headingLevel !== null ? Math.min(8, headingLevel - 1) : undefined,
-            spacing: { after: headingLevel !== null ? 120 : 80, before: spacingBefore }
-          }));
-          previousBottom = Math.max(previousBottom, item.value.top + item.value.height);
-          continue;
-        }
-        if (item.kind === "table") {
-          const tableWidth = Math.round(clamp(
-            (item.value.right - item.value.left) * contentWidthTwips,
-            contentWidthTwips * 0.42,
-            contentWidthTwips
-          ));
-          const columnWidths = getEditableTableColumnWidths(item.value, tableWidth).map((width) => Math.max(360, Math.round(width)));
-          if (spacingBefore > 0) {
-            children.push(new Paragraph({ spacing: { before: spacingBefore, after: 0 } }));
-          }
-          children.push(new Table({
-            columnWidths,
-            rows: item.value.rows.map((row, rowIndex) => new TableRow({
-              cantSplit: true,
-              children: row.map((cell, cellIndex) => new TableCell({
-                children: [new Paragraph({
-                  children: makeRuns(cell.runs, baseFontSize, rowIndex === 0),
-                  spacing: { after: 40 }
-                })],
-                shading: rowIndex === 0 ? { fill: "F4F6F8", type: ShadingType.CLEAR } : undefined,
-                verticalAlign: VerticalAlign.CENTER,
-                width: { size: columnWidths[cellIndex] ?? Math.round(tableWidth / Math.max(1, row.length)), type: WidthType.DXA }
-              }))
-            })),
-            width: { size: tableWidth, type: WidthType.DXA }
-          }));
-          previousBottom = Math.max(previousBottom, item.value.bottom);
-          continue;
-        }
-        const image = item.value;
-        const fitted = fitImage(image.width * contentWidthPx, image.height * contentHeightPx);
-        children.push(new Paragraph({
-          alignment: AlignmentType.CENTER,
-          children: [new ImageRun({
-            data: dataUrlToBytes(image.dataUrl),
-            transformation: fitted,
-            type: "png"
-          })],
-          keepLines: true,
-          spacing: { after: 80, before: spacingBefore }
-        }));
-        previousBottom = Math.max(previousBottom, image.y + image.height);
-      }
+      const fitted = fitImage(page.width, page.height);
+      const children = [new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [new ImageRun({
+          data: page.bytes,
+          transformation: fitted,
+          type: "png"
+        })],
+        spacing: { after: 0, before: 0 }
+      })];
 
       return {
         children,
