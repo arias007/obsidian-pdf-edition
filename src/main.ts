@@ -42,6 +42,24 @@ const TEXT_FONTS = [
 ];
 const TEXT_SELECTION_HIGHLIGHT_COLORS = ["#ffe066", "#ff8787", "#69db7c", "#74c0fc"];
 type PdftionLocale = "ar" | "de" | "en" | "es" | "fr" | "id" | "ja" | "ko" | "pt" | "ru" | "tr" | "vi" | "zh";
+type PdftionLanguageSetting = "auto" | PdftionLocale;
+const PDFTION_LANGUAGE_OPTIONS: ReadonlyArray<{ label: string; value: PdftionLanguageSetting }> = [
+  { label: "", value: "auto" },
+  { label: "简体中文", value: "zh" },
+  { label: "English", value: "en" },
+  { label: "العربية", value: "ar" },
+  { label: "Deutsch", value: "de" },
+  { label: "Español", value: "es" },
+  { label: "Français", value: "fr" },
+  { label: "Bahasa Indonesia", value: "id" },
+  { label: "日本語", value: "ja" },
+  { label: "한국어", value: "ko" },
+  { label: "Português", value: "pt" },
+  { label: "Русский", value: "ru" },
+  { label: "Türkçe", value: "tr" },
+  { label: "Tiếng Việt", value: "vi" }
+];
+let pdftionLanguagePreference: PdftionLanguageSetting = "auto";
 const PDFTION_TRANSLATIONS: Partial<Record<PdftionLocale, Record<string, string>>> = {
   ar: {
     "Alpha": "الشفافية",
@@ -560,6 +578,7 @@ const BUILTIN_BINANCE_QR_PATH = "plugins/pdftion/assets/binance.png";
 interface PdftionSettings {
   autoEnableAnnotationToolbar: boolean;
   boostPdfMenus: boolean;
+  language: PdftionLanguageSetting;
   lastCropBottom: number;
   lastCropLeft: number;
   lastCropRight: number;
@@ -591,6 +610,7 @@ interface PdftionSettings {
 const DEFAULT_SETTINGS: PdftionSettings = {
   autoEnableAnnotationToolbar: false,
   boostPdfMenus: true,
+  language: "auto",
   lastCropBottom: 0.03,
   lastCropLeft: 0.03,
   lastCropRight: 0.03,
@@ -667,6 +687,9 @@ function normalizePdftionLocale(language: string): PdftionLocale | null {
 }
 
 function getPdftionLocale(): PdftionLocale {
+  if (pdftionLanguagePreference !== "auto") {
+    return pdftionLanguagePreference;
+  }
   const languages: string[] = [];
   if (activeDocument.documentElement.lang) {
     languages.push(activeDocument.documentElement.lang);
@@ -1700,6 +1723,7 @@ export default class PdftionPlugin extends Plugin {
   }
 
   applyRuntimeSettings(): void {
+    pdftionLanguagePreference = this.settings.language;
     const body = getActiveBody();
     body.classList.toggle("pdftion-menu-boost", this.settings.boostPdfMenus);
     body.setCssProps({
@@ -2517,6 +2541,28 @@ class PdftionSettingTab extends PluginSettingTab {
       .setName(uiText("Pdftion 设置", "Pdftion settings"))
       .setHeading();
 
+    new Setting(containerEl)
+      .setName(uiText("界面语言", "Interface language"))
+      .setDesc(uiText(
+        "默认跟随 Obsidian。切换后立即生效；如果已打开的 PDF 仍有少量旧文字，请重新打开该 PDF。",
+        "Follow Obsidian by default. Changes apply immediately; reopen an existing PDF if a few labels remain unchanged."
+      ))
+      .addDropdown((dropdown) => {
+        for (const option of PDFTION_LANGUAGE_OPTIONS) {
+          dropdown.addOption(
+            option.value,
+            option.value === "auto" ? uiText("跟随 Obsidian", "Follow Obsidian") : option.label
+          );
+        }
+        dropdown
+          .setValue(this.plugin.settings.language)
+          .onChange(async (value) => {
+            this.plugin.settings.language = normalizePdftionLanguageSetting(value);
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      });
+
     this.addSection(uiText("导出", "Export"));
     new Setting(containerEl)
       .setName(uiText("导出后自动打开", "Open after export"))
@@ -2638,7 +2684,7 @@ class PdftionSettingTab extends PluginSettingTab {
     placeholder: string,
     key: Exclude<
       { [K in keyof PdftionSettings]: PdftionSettings[K] extends string ? K : never }[keyof PdftionSettings],
-      "nativeTextSelectionAction"
+      "language" | "nativeTextSelectionAction"
     >
   ): void {
     new Setting(this.containerEl)
@@ -2719,6 +2765,7 @@ function normalizeSettings(data: unknown): PdftionSettings {
     boostPdfMenus: typeof record.boostPdfMenus === "boolean"
       ? record.boostPdfMenus
       : DEFAULT_SETTINGS.boostPdfMenus,
+    language: normalizePdftionLanguageSetting(record.language),
     lastCropBottom: normalizeNumberSetting(record.lastCropBottom, DEFAULT_SETTINGS.lastCropBottom, 0, 0.45, 0.001),
     lastCropLeft: normalizeNumberSetting(record.lastCropLeft, DEFAULT_SETTINGS.lastCropLeft, 0, 0.45, 0.001),
     lastCropRight: normalizeNumberSetting(record.lastCropRight, DEFAULT_SETTINGS.lastCropRight, 0, 0.45, 0.001),
@@ -2750,6 +2797,13 @@ function normalizeSettings(data: unknown): PdftionSettings {
     toolbarMaxWidth: normalizeNumberSetting(record.toolbarMaxWidth, DEFAULT_SETTINGS.toolbarMaxWidth, 360, 1200),
     toolbarTopOffset: normalizeNumberSetting(record.toolbarTopOffset, DEFAULT_SETTINGS.toolbarTopOffset, 0, 160)
   };
+}
+
+function normalizePdftionLanguageSetting(value: unknown): PdftionLanguageSetting {
+  if (value === "auto") {
+    return "auto";
+  }
+  return typeof value === "string" ? normalizePdftionLocale(value) ?? DEFAULT_SETTINGS.language : DEFAULT_SETTINGS.language;
 }
 
 function normalizeNumberSetting(value: unknown, fallback: number, min: number, max: number, step = 1): number {

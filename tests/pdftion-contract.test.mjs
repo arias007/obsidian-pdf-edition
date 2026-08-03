@@ -8,6 +8,18 @@ const bundleUrl = new URL("../main.js", import.meta.url);
 const manifestUrl = new URL("../manifest.json", import.meta.url);
 const packageUrl = new URL("../package.json", import.meta.url);
 
+test("settings expose and persist every supported interface language", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /type PdftionLanguageSetting = "auto" \| PdftionLocale/);
+  assert.match(source, /language: PdftionLanguageSetting/);
+  assert.match(source, /language: normalizePdftionLanguageSetting\(record\.language\)/);
+  assert.match(source, /if \(pdftionLanguagePreference !== "auto"\)/);
+  assert.match(source, /\.setName\(uiText\("界面语言", "Interface language"\)\)/);
+  assert.match(source, /for \(const option of PDFTION_LANGUAGE_OPTIONS\)/);
+  assert.match(source, /this\.plugin\.settings\.language = normalizePdftionLanguageSetting\(value\)/);
+});
+
 test("saved PDF ink hides its original native layer as soon as editing begins", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
