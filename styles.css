@@ -473,6 +473,10 @@ body.pdftion-editing-active .pdfAnnotationPopup {
   width: 18px;
 }
 
+.pdftion-native-selection-color-none {
+  color: var(--text-muted);
+}
+
 .pdftion-native-selection-color-advanced {
   background: var(--background-secondary);
   overflow: hidden;

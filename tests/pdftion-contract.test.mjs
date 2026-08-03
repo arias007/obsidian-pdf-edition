@@ -217,7 +217,12 @@ test("placeholder pages, precise stroke hits, and immediate drag redraw stay int
   assert.match(source, /return candidate\.clientWidth > 0 && candidate\.clientHeight > 0/);
   assert.match(source, /return strokeContainsPoint\(stroke, point, cssWidth, cssHeight, hitRadius\)/);
   assert.match(source, /startedFromFreshSelection: true/);
-  assert.match(source, /this\.updateExternalInkLayerState\(\);\s*this\.redrawPageOverlays\(overlay\.pageIndex\)/);
+  const dragMoveSource = source.slice(
+    source.indexOf("private moveSelectionInteraction"),
+    source.indexOf("private onPointerUp")
+  );
+  assert.match(dragMoveSource, /this\.redrawPageOverlays\(overlay\.pageIndex\)/);
+  assert.doesNotMatch(dragMoveSource, /updateExternalInkLayerState|scheduleExternalInkLayerUpdate/);
   assert.equal((dragEndSource.match(/this\.scheduleAutoSave\(250\)/g) ?? []).length, 2);
   assert.doesNotMatch(dragEndSource, /saveIntoPdf|reloadNativePdfView|requestNativePdfPageRender|commitDetachedInkPages/);
 });
@@ -239,6 +244,19 @@ test("PDF zoom debounces mutation work and preserves transient sessions", async 
   assert.match(surfaceScanSource, /this\.missingPdfSurfaces\.set\(rootEl, now\)/);
   assert.match(surfaceScanSource, /now - missingSince < PDF_SURFACE_MISSING_GRACE_MS/);
   assert.ok(surfaceScanSource.indexOf("now - missingSince < PDF_SURFACE_MISSING_GRACE_MS") < surfaceScanSource.indexOf("session.destroy()"));
+});
+
+test("text selection supports no highlight and frequent rendering work is frame-coalesced", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /createIconButton\("ban", uiText\("无色", "No highlight"\)\)/);
+  assert.match(source, /private applyNativeTextNoHighlight\(\): void/);
+  assert.match(source, /this\.prepareNativeTextCopy\(info\)/);
+  assert.match(source, /private scheduleVisibleOverlayRefresh\(\): void[\s\S]{0,420}?window\.requestAnimationFrame/);
+  assert.match(source, /private scheduleExternalInkLayerUpdate\(\): void[\s\S]{0,420}?window\.requestAnimationFrame/);
+  assert.match(source, /overlay\.geometryFrame = window\.requestAnimationFrame/);
+  assert.match(source, /private redrawAll\(\): void \{\s*this\.scheduleExternalInkLayerUpdate\(\)/);
+  assert.doesNotMatch(source.slice(source.indexOf("private moveSelectionInteraction"), source.indexOf("private onPointerUp")), /updateExternalInkLayerState/);
 });
 
 test("PDF ink editing is transactional and restores interrupted work", async () => {

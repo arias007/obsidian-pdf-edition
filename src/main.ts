@@ -1247,6 +1247,7 @@ interface PageOverlay {
   cssHeight: number;
   cssWidth: number;
   dpr: number;
+  geometryFrame?: number | null;
   observedCanvas?: HTMLCanvasElement | null;
   pageEl: HTMLElement;
   pageIndex: number;
@@ -2826,6 +2827,8 @@ class InkSession {
   private settingsSaveTimer: number | null = null;
   private scanTimer: number | null = null;
   private healthTimer: number | null = null;
+  private externalInkLayerFrame: number | null = null;
+  private visibleOverlayRefreshFrame: number | null = null;
   private zoomGeometryTimer: number | null = null;
   private inkPrepareTimer: number | null = null;
   private inkPrepareTimerForce = false;
@@ -2887,7 +2890,7 @@ class InkSession {
     this.mutationObserver = new MutationObserver((mutations) => {
       if (this.shouldScanForMutations(mutations)) {
         if (this.enabled) {
-          this.updateExternalInkLayerState();
+          this.scheduleExternalInkLayerUpdate();
           this.scheduleEditableInkPrepare(320, true);
         }
         this.scheduleQuietScan();
@@ -2908,7 +2911,7 @@ class InkSession {
     });
     this.rootEl.addEventListener("scroll", () => {
       this.scheduleEditableInkPrepare(180);
-      this.refreshVisibleOverlays();
+      this.scheduleVisibleOverlayRefresh();
     }, {
       capture: true,
       passive: true,
@@ -2916,7 +2919,7 @@ class InkSession {
     });
     activeDocument.addEventListener("scroll", () => {
       this.scheduleEditableInkPrepare(180);
-      this.refreshVisibleOverlays();
+      this.scheduleVisibleOverlayRefresh();
     }, {
       capture: true,
       passive: true,
@@ -2953,6 +2956,14 @@ class InkSession {
     this.clearScanTimer();
     this.clearEditableInkPrepareTimer();
     this.clearZoomGeometryTimer();
+    if (this.externalInkLayerFrame !== null) {
+      window.cancelAnimationFrame(this.externalInkLayerFrame);
+      this.externalInkLayerFrame = null;
+    }
+    if (this.visibleOverlayRefreshFrame !== null) {
+      window.cancelAnimationFrame(this.visibleOverlayRefreshFrame);
+      this.visibleOverlayRefreshFrame = null;
+    }
     this.clearNativePopupHideTimers();
     this.stopOverlayHealthCheck();
     this.stopNativeAnnotationPopupSuppressor();
@@ -2980,6 +2991,9 @@ class InkSession {
       overlay.resizeObserver?.disconnect();
       if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
         window.cancelAnimationFrame(overlay.redrawFrame);
+      }
+      if (overlay.geometryFrame !== null && overlay.geometryFrame !== undefined) {
+        window.cancelAnimationFrame(overlay.geometryFrame);
       }
       if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
         window.clearTimeout(overlay.resizeTimer);
@@ -3433,6 +3447,7 @@ class InkSession {
         cssHeight: 0,
         cssWidth: 0,
         dpr: 1,
+        geometryFrame: null,
         observedCanvas: null,
         pageEl,
         pageIndex,
@@ -3565,7 +3580,14 @@ class InkSession {
       }
       return;
     }
-    this.syncOverlayCssGeometry(overlay);
+    if (overlay.geometryFrame === null || overlay.geometryFrame === undefined) {
+      overlay.geometryFrame = window.requestAnimationFrame(() => {
+        overlay.geometryFrame = null;
+        if (overlay.pageEl.isConnected) {
+          this.syncOverlayCssGeometry(overlay);
+        }
+      });
+    }
     if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
       window.clearTimeout(overlay.resizeTimer);
     }
@@ -3642,6 +3664,16 @@ class InkSession {
         this.requestOverlayRedraw(overlay);
       }
     }
+  }
+
+  private scheduleVisibleOverlayRefresh(): void {
+    if (this.visibleOverlayRefreshFrame !== null) {
+      return;
+    }
+    this.visibleOverlayRefreshFrame = window.requestAnimationFrame(() => {
+      this.visibleOverlayRefreshFrame = null;
+      this.refreshVisibleOverlays();
+    });
   }
 
   private scheduleZoomGeometryRefresh(delay = PDF_ZOOM_SETTLE_DELAY_MS): void {
@@ -5301,6 +5333,10 @@ class InkSession {
       button.addEventListener("click", () => this.applyNativeTextHighlight(color));
       colorRow.appendChild(button);
     }
+    const noColor = createIconButton("ban", uiText("无色", "No highlight"));
+    noColor.classList.add("pdftion-native-selection-color", "pdftion-native-selection-color-none");
+    noColor.addEventListener("click", () => this.applyNativeTextNoHighlight());
+    colorRow.appendChild(noColor);
     colorRow.appendChild(this.createNativeTextAdvancedColorButton());
     panel.appendChild(colorRow);
 
@@ -5444,6 +5480,16 @@ class InkSession {
       this.scheduleAutoSave();
     }
 
+    activeDocument.getSelection()?.removeAllRanges();
+    this.hideNativeTextSelectionMenu();
+  }
+
+  private applyNativeTextNoHighlight(): void {
+    const info = this.nativeTextSelectionInfo;
+    if (!info) {
+      return;
+    }
+    this.prepareNativeTextCopy(info);
     activeDocument.getSelection()?.removeAllRanges();
     this.hideNativeTextSelectionMenu();
   }
@@ -7314,7 +7360,6 @@ class InkSession {
       this.redoStack = [];
       drag.moved = true;
       drag.current = point;
-      this.updateExternalInkLayerState();
       this.redrawPageOverlays(overlay.pageIndex);
       return;
     }
@@ -7333,7 +7378,6 @@ class InkSession {
       this.redoStack = [];
       drag.moved = true;
       drag.current = point;
-      this.updateExternalInkLayerState();
       this.redrawPageOverlays(overlay.pageIndex);
       return;
     }
@@ -7448,7 +7492,7 @@ class InkSession {
 
     if (drag.mode === "move") {
       if (drag.moved) {
-        this.updateExternalInkLayerState();
+        this.scheduleExternalInkLayerUpdate();
         this.redrawPageOverlays(overlay.pageIndex);
         this.scheduleAutoSave(250);
       } else if (drag.clearSelectionOnTap) {
@@ -7461,7 +7505,7 @@ class InkSession {
 
     if (drag.mode === "resize") {
       if (drag.moved) {
-        this.updateExternalInkLayerState();
+        this.scheduleExternalInkLayerUpdate();
         this.redrawPageOverlays(overlay.pageIndex);
         this.scheduleAutoSave(250);
       }
@@ -7789,7 +7833,7 @@ class InkSession {
   }
 
   private redrawAll(): void {
-    this.updateExternalInkLayerState();
+    this.scheduleExternalInkLayerUpdate();
     for (const overlay of this.overlays.values()) {
       if (this.isOverlayNearViewport(overlay)) {
         this.requestOverlayRedraw(overlay);
@@ -9432,6 +9476,18 @@ class InkSession {
     this.restoreHiddenNativeInkAnnotations(activePages);
   }
 
+  private scheduleExternalInkLayerUpdate(): void {
+    if (this.externalInkLayerFrame !== null) {
+      return;
+    }
+    this.externalInkLayerFrame = window.requestAnimationFrame(() => {
+      this.externalInkLayerFrame = null;
+      if (!this.destroyed) {
+        this.updateExternalInkLayerState();
+      }
+    });
+  }
+
   private rememberNativeInkHidePagesForCurrentPages(force = false): boolean {
     const pageIndexes = this.getCurrentInkPreparePages(force);
     if (pageIndexes.size === 0) {
@@ -10365,6 +10421,9 @@ class InkSession {
       overlay.resizeObserver?.disconnect();
       if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
         window.cancelAnimationFrame(overlay.redrawFrame);
+      }
+      if (overlay.geometryFrame !== null && overlay.geometryFrame !== undefined) {
+        window.cancelAnimationFrame(overlay.geometryFrame);
       }
       if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
         window.clearTimeout(overlay.resizeTimer);
