@@ -187,13 +187,17 @@ test("visual export waits for rendered pages and includes the full annotation co
 
 test("placeholder pages, precise stroke hits, and immediate drag redraw stay interactive", async () => {
   const source = await readFile(sourceUrl, "utf8");
+  const dragEndSource = source.slice(
+    source.indexOf("private endSelectionInteraction"),
+    source.indexOf("private onTouchStart")
+  );
 
   assert.match(source, /return candidate\.clientWidth > 0 && candidate\.clientHeight > 0/);
   assert.match(source, /return strokeContainsPoint\(stroke, point, cssWidth, cssHeight, hitRadius\)/);
   assert.match(source, /startedFromFreshSelection: true/);
   assert.match(source, /this\.updateExternalInkLayerState\(\);\s*this\.redrawPageOverlays\(overlay\.pageIndex\)/);
-  assert.match(source, /selectionContainsPdfInk\(overlay\.pageIndex\)/);
-  assert.match(source, /await this\.saveIntoPdf\(true\);\s*this\.requestNativePdfPageRender\(pageIndex\)/);
+  assert.equal((dragEndSource.match(/this\.scheduleAutoSave\(250\)/g) ?? []).length, 2);
+  assert.doesNotMatch(dragEndSource, /saveIntoPdf|reloadNativePdfView|requestNativePdfPageRender|commitDetachedInkPages/);
 });
 
 test("PDF ink editing is transactional and restores interrupted work", async () => {

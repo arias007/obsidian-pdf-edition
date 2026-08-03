@@ -7435,11 +7435,7 @@ class InkSession {
       if (drag.moved) {
         this.updateExternalInkLayerState();
         this.redrawPageOverlays(overlay.pageIndex);
-        if (this.selectionContainsPdfInk(overlay.pageIndex)) {
-          void this.commitMovedPdfInk(overlay.pageIndex);
-        } else {
-          this.scheduleAutoSave(250);
-        }
+        this.scheduleAutoSave(250);
       } else if (drag.clearSelectionOnTap) {
         this.clearEditableSelection();
         this.redrawAll();
@@ -7452,11 +7448,7 @@ class InkSession {
       if (drag.moved) {
         this.updateExternalInkLayerState();
         this.redrawPageOverlays(overlay.pageIndex);
-        if (this.selectionContainsPdfInk(overlay.pageIndex)) {
-          void this.commitMovedPdfInk(overlay.pageIndex);
-        } else {
-          this.scheduleAutoSave(250);
-        }
+        this.scheduleAutoSave(250);
       }
       this.updateToolbarState();
       return;
@@ -7488,23 +7480,6 @@ class InkSession {
       if (candidate.pageIndex === pageIndex) {
         this.redrawOverlay(candidate);
       }
-    }
-  }
-
-  private selectionContainsPdfInk(pageIndex: number): boolean {
-    return this.getSelectedEditableElements(pageIndex).some((element) => (
-      element.kind === "stroke" && Array.isArray(element.pdfPoints)
-    ));
-  }
-
-  private async commitMovedPdfInk(pageIndex: number): Promise<void> {
-    await this.saveIntoPdf(true);
-    this.requestNativePdfPageRender(pageIndex);
-    for (const delay of [80, 260]) {
-      window.setTimeout(() => {
-        this.requestNativePdfPageRender(pageIndex);
-        this.redrawPageOverlays(pageIndex);
-      }, delay);
     }
   }
 
