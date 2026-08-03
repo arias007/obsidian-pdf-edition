@@ -1,5 +1,7 @@
 import { Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import { PDFArray, PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, PDFString, degrees, rgb } from "pdf-lib";
+import { clusterEditableTextFragments, type EditableTextFragment } from "./export-layout";
+import { getExtendedPdftionTranslation } from "./i18n";
 
 // Mobile WebViews do not expose Obsidian desktop-only activeWindow globals.
 const activeWindow = window;
@@ -689,7 +691,7 @@ function uiText(zh: string, en: string): string {
   if (locale === "en") {
     return en;
   }
-  return PDFTION_TRANSLATIONS[locale]?.[en] ?? en;
+  return PDFTION_TRANSLATIONS[locale]?.[en] ?? getExtendedPdftionTranslation(locale, en) ?? en;
 }
 
 function toArrayBufferCopy(bytes: Uint8Array): ArrayBuffer {
@@ -11506,13 +11508,7 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
   const candidates = textSpans.length > 0
     ? textSpans
     : Array.from(overlay.pageEl.querySelectorAll<HTMLElement>("[data-canvas-width]"));
-  const fragments: Array<{
-    bottom: number;
-    left: number;
-    run: EditableMarkdownTextRun;
-    right: number;
-    top: number;
-  }> = [];
+  const fragments: Array<EditableTextFragment<EditableMarkdownTextRun>> = [];
 
   for (const span of candidates) {
     const text = span.textContent?.replace(/\u00a0/g, " ").replace(/[\t\r\n ]+/g, " ").trim();
@@ -11547,32 +11543,7 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
     });
   }
 
-  const sorted = fragments.sort((a, b) => (a.top - b.top) || (a.left - b.left));
-  const lines: Array<{ bottom: number; fragments: typeof fragments; left: number; right: number; top: number }> = [];
-  for (const fragment of sorted) {
-    const fragmentHeight = Math.max(1, fragment.bottom - fragment.top);
-    const existing = lines
-      .map((line) => {
-        const overlap = Math.max(0, Math.min(line.bottom, fragment.bottom) - Math.max(line.top, fragment.top));
-        const lineHeight = Math.max(1, line.bottom - line.top);
-        const overlapRatio = overlap / Math.min(lineHeight, fragmentHeight);
-        const baselineDistance = Math.abs(line.bottom - fragment.bottom);
-        return { baselineDistance, line, overlapRatio };
-      })
-      .filter(({ baselineDistance, overlapRatio }) => (
-        overlapRatio >= 0.24 || baselineDistance <= Math.max(4, fragment.run.fontSize * 0.72)
-      ))
-      .sort((a, b) => (b.overlapRatio - a.overlapRatio) || (a.baselineDistance - b.baselineDistance))[0]?.line;
-    if (existing) {
-      existing.fragments.push(fragment);
-      existing.bottom = Math.max(existing.bottom, fragment.bottom);
-      existing.left = Math.min(existing.left, fragment.left);
-      existing.right = Math.max(existing.right, fragment.right);
-      existing.top = Math.min(existing.top, fragment.top);
-    } else {
-      lines.push({ bottom: fragment.bottom, fragments: [fragment], left: fragment.left, right: fragment.right, top: fragment.top });
-    }
-  }
+  const lines = clusterEditableTextFragments(fragments);
 
   return lines
     .sort((a, b) => (a.top - b.top) || (a.left - b.left))
@@ -12403,7 +12374,7 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
           hyperlink: run.link && /^(?:https?:|mailto:)/i.test(run.link) ? { url: run.link } : undefined,
           italic: run.italic,
           strike: run.strike ? ("sngStrike" as const) : undefined,
-          transparency: 100,
+          transparency: 99,
           underline: run.underline ? { style: "sng" as const } : undefined
         }
       }));
@@ -12438,36 +12409,42 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
 }
 
 function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]): string {
+  const locale = getPdftionLocale();
   const figures = [...pages]
     .sort((a, b) => a.pageIndex - b.pageIndex)
     .map((page) => {
+      const pageLabel = uiText(`第 ${page.pageIndex + 1} 页`, `Page ${page.pageIndex + 1}`);
       const textLayer = page.lines.map((line) => {
         const runs = line.runs.map((run) => {
           const text = htmlEscape(run.text);
-          const x = ((run.left ?? line.left) * page.width).toFixed(2);
-          const width = Math.max(1, (run.width ?? line.width) * page.width).toFixed(2);
-          const attributes = `x="${x}" textLength="${width}" lengthAdjust="spacingAndGlyphs"`;
+          const left = ((run.left ?? line.left) * 100).toFixed(4);
+          const width = Math.max(0.01, (run.width ?? line.width) * 100).toFixed(4);
+          const fontSize = (Math.max(1, line.height * page.height * 0.82) / Math.max(1, page.width) * 100).toFixed(5);
+          const styles = `left:${left}%;width:${width}%;font-size:${fontSize}cqw`;
           return run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link)
-            ? `<a href="${htmlAttributeEscape(run.link)}"><tspan ${attributes}>${text}</tspan></a>`
-            : `<tspan ${attributes}>${text}</tspan>`;
+            ? `<a class="text-run" href="${htmlAttributeEscape(run.link)}" style="${styles}">${text}</a>`
+            : `<span class="text-run" style="${styles}">${text}</span>`;
         }).join("");
-        const fontSize = Math.max(1, line.height * page.height * 0.82).toFixed(2);
-        const baseline = ((line.top + line.height * 0.82) * page.height).toFixed(2);
-        return `<text y="${baseline}" font-size="${fontSize}">${runs}</text>`;
+        return `<div class="text-line" style="top:${(line.top * 100).toFixed(4)}%;height:${Math.max(0.01, line.height * 100).toFixed(4)}%">${runs}<br class="text-break"></div>`;
       }).join("");
-      return `<figure><div class="page-surface"><img src="${uint8ArrayToDataUrl(page.bytes, "image/png")}" alt="Page ${page.pageIndex + 1}"><svg class="text-layer" viewBox="0 0 ${page.width} ${page.height}" preserveAspectRatio="none" aria-label="Page ${page.pageIndex + 1} text">${textLayer}</svg></div><figcaption>Page ${page.pageIndex + 1}</figcaption></figure>`;
+      return `<figure><div class="page-surface"><img src="${uint8ArrayToDataUrl(page.bytes, "image/png")}" alt="${htmlAttributeEscape(pageLabel)}"><div class="text-layer" aria-label="${htmlAttributeEscape(`${pageLabel} ${uiText("文字", "Text")}`)}">${textLayer}</div></div><figcaption>${htmlEscape(pageLabel)}</figcaption></figure>`;
     })
     .join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}.page-surface{position:relative}.page-surface>img{display:block;height:auto;width:100%}.text-layer{fill:transparent;height:100%;inset:0;overflow:hidden;position:absolute;user-select:text;-webkit-user-select:text;width:100%}.text-layer text,.text-layer tspan{cursor:text;user-select:text;-webkit-user-select:text}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}.text-layer{display:none}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
+  return `<!doctype html><html lang="${locale}"${locale === "ar" ? ' dir="rtl"' : ""}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}.page-surface{container-type:inline-size;position:relative}.page-surface>img{display:block;height:auto;width:100%}.text-layer{height:100%;inset:0;overflow:hidden;position:absolute;user-select:text;-webkit-user-select:text;width:100%}.text-line{left:0;line-height:1;position:absolute;width:100%}.text-run{color:transparent;cursor:text;display:block;overflow:visible;position:absolute;text-decoration:none;-webkit-text-fill-color:transparent;white-space:pre;user-select:text;-webkit-user-select:text}.text-run::selection{background:rgba(25,113,194,.32)}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}.text-layer{display:none}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
 }
 
 async function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Promise<Uint8Array> {
   const {
-    AlignmentType,
     Document,
+    ExternalHyperlink,
+    HorizontalPositionRelativeFrom,
     ImageRun,
+    LineRuleType,
     Packer,
-    Paragraph
+    Paragraph,
+    TextRun,
+    UnderlineType,
+    VerticalPositionRelativeFrom
   } = await import("docx");
   const pageWidthTwips = 11906;
   const pageHeightTwips = 16838;
@@ -12490,15 +12467,66 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
     .sort((a, b) => a.pageIndex - b.pageIndex)
     .map((page) => {
       const fitted = fitImage(page.width, page.height);
+      const imageLeftTwips = Math.max(0, Math.round((contentWidthPx - fitted.width) * 7.5));
+      const imageLeftEmu = Math.round((pageMarginTwips + imageLeftTwips) * 635);
+      const imageTopEmu = pageMarginTwips * 635;
       const children = [new Paragraph({
-        alignment: AlignmentType.CENTER,
         children: [new ImageRun({
           data: page.bytes,
+          floating: {
+            allowOverlap: true,
+            behindDocument: true,
+            horizontalPosition: { offset: imageLeftEmu, relative: HorizontalPositionRelativeFrom.PAGE },
+            verticalPosition: { offset: imageTopEmu, relative: VerticalPositionRelativeFrom.PAGE }
+          },
           transformation: fitted,
           type: "png"
         })],
-        spacing: { after: 0, before: 0 }
+        spacing: { after: 0, before: 0, line: 1, lineRule: LineRuleType.EXACT }
       })];
+
+      let previousBottomPx = 0;
+      for (const line of [...page.lines].sort((a, b) => (a.top - b.top) || (a.left - b.left))) {
+        const lineTopPx = line.top * fitted.height;
+        const lineHeightPx = Math.max(1, line.height * fitted.height);
+        const spacingBefore = Math.max(0, Math.round((lineTopPx - previousBottomPx) * 15));
+        const lineSize = Math.max(2, Math.round(lineHeightPx * 1.5 * 0.82));
+        const runs = line.runs.map((run) => {
+          const textRun = new TextRun({
+            bold: run.bold,
+            color: exportHexColor(run.color),
+            font: exportFontFace(run.fontFamily),
+            italics: run.italic,
+            size: lineSize,
+            strike: run.strike,
+            style: "PdftionSelectableText",
+            text: run.text,
+            underline: run.underline ? { type: UnderlineType.SINGLE } : undefined
+          });
+          return run.link && /^(?:https?:|mailto:)/i.test(run.link)
+            ? new ExternalHyperlink({ children: [textRun], link: run.link })
+            : textRun;
+        });
+        if (runs.length === 0) {
+          continue;
+        }
+        children.push(new Paragraph({
+          children: runs,
+          indent: {
+            left: imageLeftTwips + Math.round(line.left * fitted.width * 15),
+            right: Math.max(0, Math.round((1 - line.left - line.width) * fitted.width * 15))
+          },
+          keepLines: true,
+          spacing: {
+            after: 0,
+            before: spacingBefore,
+            line: Math.max(1, Math.round(lineHeightPx * 15)),
+            lineRule: LineRuleType.EXACT
+          },
+          widowControl: false
+        }));
+        previousBottomPx = lineTopPx + lineHeightPx;
+      }
 
       return {
         children,
@@ -12515,15 +12543,48 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
     creator: "Murat",
     description: "Pdftion editable conversion with embedded source images.",
     sections,
+    styles: {
+      characterStyles: [{ id: "PdftionSelectableText", name: "Pdftion selectable text" }]
+    },
     title
   });
   const blob = await Packer.toBlob(document);
+  const selectable = await injectDocxSelectableTextTransparency(new Uint8Array(await blob.arrayBuffer()));
   return injectOfficePreviewPages(
-    new Uint8Array(await blob.arrayBuffer()),
+    selectable,
     pages,
     pageWidthTwips / 20,
     pageHeightTwips / 20
   );
+}
+
+async function injectDocxSelectableTextTransparency(docxBytes: Uint8Array): Promise<Uint8Array> {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(docxBytes);
+  const documentFile = zip.file("word/document.xml");
+  if (!documentFile) {
+    throw new Error("DOCX document XML is missing.");
+  }
+  let xml = await documentFile.async("string");
+  if (!xml.includes("PdftionSelectableText")) {
+    return docxBytes;
+  }
+  if (!xml.includes("xmlns:w14=")) {
+    xml = xml.replace(
+      /<w:document\b/,
+      '<w:document xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+    );
+  }
+  xml = xml.replace(
+    /<w:rPr>([\s\S]*?<w:rStyle w:val="PdftionSelectableText"\/>[\s\S]*?)<\/w:rPr>/g,
+    (_match, properties: string) => {
+      const color = properties.match(/<w:color w:val="([0-9A-F]{6})"\/>/i)?.[1] ?? "000000";
+      const cleaned = properties.replace(/<w:rStyle w:val="PdftionSelectableText"\/>/, "");
+      return `<w:rPr>${cleaned}<w14:textFill><a:solidFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:srgbClr val="${color}"><a:alpha val="1000"/></a:srgbClr></a:solidFill></w14:textFill></w:rPr>`;
+    }
+  );
+  zip.file("word/document.xml", xml);
+  return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 }
 
 async function injectOfficePreviewPages(

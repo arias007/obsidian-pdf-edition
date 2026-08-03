@@ -140,9 +140,11 @@ test("visual exports keep the composite page and use stable selectable text laye
   assert.match(source, /slide\.addText\(textRuns/);
   assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
   assert.match(source, /await this\.drawImageElementForExport/);
-  assert.match(source, /<svg class="text-layer"/);
-  assert.match(source, /viewBox="0 0 \$\{page\.width\} \$\{page\.height\}"/);
-  assert.match(source, /textLength="\$\{width\}" lengthAdjust="spacingAndGlyphs"/);
+  assert.match(source, /<div class="text-layer"/);
+  assert.match(source, /<div class="text-line"/);
+  assert.match(source, /class="text-run"/);
+  assert.match(source, /<br class="text-break">/);
+  assert.match(source, /container-type:inline-size/);
   assert.match(source, /await buildDocxFromPageImages\(pages, this\.file\.basename\)/);
   assert.match(source, /await import\("docx"\)/);
   assert.match(source, /new ImageRun\(\{/);
@@ -153,8 +155,12 @@ test("visual exports keep the composite page and use stable selectable text laye
   assert.match(source, /producer: "Pdftion"/);
   assert.match(source, /mpe\/preview\/page-\$\{String\(pageIndex \+ 1\)\.padStart\(4, "0"\)\}\.png/);
   assert.match(source, /pageCount: sortedPages\.length/);
-  assert.match(source, /transparency: 100/);
-  assert.doesNotMatch(source.slice(source.indexOf("async function buildDocxFromPageImages"), source.indexOf("function exportHexColor")), /lineRule|<w:drawing>|<wp:inline/);
+  assert.match(source, /transparency: 99/);
+  assert.match(source, /behindDocument: true/);
+  assert.match(source, /new TextRun\(\{/);
+  assert.match(source, /style: "PdftionSelectableText"/);
+  assert.match(source, /<w14:textFill>/);
+  assert.match(source, /<a:alpha val="1000"\/>/);
   assert.match(source, /ctx\.fillStyle = "#ffffff";\s*ctx\.fillRect/);
   assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
   assert.doesNotMatch(source, /w:right="\$\{rightTwips\}"/);
@@ -204,7 +210,7 @@ test("visual export waits for rendered pages and includes the full annotation co
   assert.match(pptSource, /slide\.addImage\(\{[\s\S]*?uint8ArrayToDataUrl\(page\.bytes/);
   assert.ok(pptSource.indexOf("slide.addImage({") < pptSource.indexOf("for (const line of page.lines)"));
   assert.doesNotMatch(pptSource, /fit: "shrink"/);
-  assert.match(pptSource, /transparency: 100/);
+  assert.match(pptSource, /transparency: 99/);
   assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
 });
 
