@@ -18,15 +18,15 @@ test("saved PDF ink hides its original native layer as soon as editing begins", 
 test("selection interiors move while only the four visible corner handles resize", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
-  assert.match(source, /return findResizeHandleAt\(bounds, point, overlay\.cssWidth, overlay\.cssHeight, 5, 0\)/);
+  assert.match(source, /return findResizeHandleAt\(bounds, point, overlay\.cssWidth, overlay\.cssHeight, 8, 0\)/);
   assert.doesNotMatch(source, /textOnly \? 10 : 5/);
   assert.doesNotMatch(source, /textOnly \? 12 : 0/);
   assert.doesNotMatch(source, /canMoveFreshSelection|selectionWasExplicitTap|startedFromFreshSelection/);
-  assert.match(source, /this\.selectionBoxContainsPoint\(overlay, point\)[\s\S]{0,400}?mode: "move"/);
-  assert.match(source, /point\.x >= bounds\.minX &&[\s\S]{0,180}?point\.y <= bounds\.maxY/);
+  assert.match(source, /this\.selectionBoxContainsPoint\(overlay, point, selectionBounds\)[\s\S]{0,500}?mode: "move"/);
+  assert.match(source, /const padX = 9 \/ Math\.max\(1, overlay\.cssWidth\)/);
   assert.match(source, /private setSelectedElementForEditing\(element: InkElement\): void \{\s*this\.setSingleSelectedElement\(element\.id\);\s*\}/);
   assert.doesNotMatch(source, /findStrokeEditGroup|strokesAreVisuallyConnected/);
-  assert.match(source, /const ordered = this\.getEditableElements\(\).*\.reverse\(\)/);
+  assert.match(source, /const ordered = this\.getEditableElementsForPage\(overlay\.pageIndex\)\.reverse\(\)/);
   assert.match(source, /const selectedElements = this\.findElementsInSelection[\s\S]{0,160}?this\.setSelectedElements\(selectedElements\)/);
 });
 
@@ -174,14 +174,14 @@ test("comments and element layers are interactive, persistent, and shared by ren
   assert.match(source, /private reorderSelectedLayers\(mode: "up" \| "down" \| "top" \| "bottom"\)/);
   assert.match(source, /private startLayerLongPress\(overlay: PageOverlay/);
   assert.match(source, /private showLayerMenuForElement\(element: InkElement, overlay: PageOverlay\)/);
-  assert.match(source, /this\.startLayerLongPress\(overlay, point, event\.clientX, event\.clientY\)/);
-  assert.match(source, /this\.startLayerLongPress\(overlay, point, touch\.clientX, touch\.clientY\)/);
+  assert.match(source, /this\.startLayerLongPress\(overlay, point, event\.clientX, event\.clientY, hitElement\)/);
+  assert.match(source, /this\.startLayerLongPress\(overlay, point, touch\.clientX, touch\.clientY, hitElement\)/);
   assert.doesNotMatch(source.slice(source.indexOf("private createPaletteSelectionGroup"), source.indexOf("private createPaletteColorButton")), /pdftion-layer-actions/);
   assert.match(source, /preview\.textContent = comment\.text\.trim\(\)/);
   assert.match(source, /normalizeInkElementLayers\(elements\)/);
   assert.match(source, /return elements\.sort\(compareInkElements\)/);
-  assert.match(source, /const orderedElements = this\.getEditableElements\(\)\.filter/);
-  assert.match(source, /const ordered = this\.getEditableElements\(\).*\.reverse\(\)/);
+  assert.match(source, /const orderedElements = this\.getEditableElementsForPage\(overlay\.pageIndex\)/);
+  assert.match(source, /const ordered = this\.getEditableElementsForPage\(overlay\.pageIndex\)\.reverse\(\)/);
   assert.match(source, /elements\.sort\(compareInkElements\)/);
 });
 
@@ -217,13 +217,21 @@ test("placeholder pages, precise stroke hits, and immediate drag redraw stay int
 
   assert.match(source, /return candidate\.clientWidth > 0 && candidate\.clientHeight > 0/);
   assert.match(source, /return strokeContainsPoint\(stroke, point, cssWidth, cssHeight, hitRadius\)/);
+  assert.match(source, /Math\.max\(12, displayWidth \* 2\.4\)/);
+  assert.match(source, /coverBoxContainsPoint\(element, point, overlay\.cssWidth, overlay\.cssHeight, 7\)/);
   assert.doesNotMatch(source, /startedFromFreshSelection|selectionWasExplicitTap/);
   const dragMoveSource = source.slice(
     source.indexOf("private moveSelectionInteraction"),
     source.indexOf("private onPointerUp")
   );
   assert.match(dragMoveSource, /this\.redrawPageOverlays\(overlay\.pageIndex\)/);
+  assert.match(dragMoveSource, /drag\.elements \?\? this\.getSelectedEditableElements/);
   assert.doesNotMatch(dragMoveSource, /updateExternalInkLayerState|scheduleExternalInkLayerUpdate/);
+  assert.match(source, /private redrawPageOverlays[\s\S]{0,220}?this\.requestOverlayRedraw\(candidate\)/);
+  assert.match(source, /private redrawSelectionState[\s\S]{0,260}?this\.requestOverlayRedraw\(overlay\)/);
+  assert.match(source, /const orderedElements = this\.getEditableElementsForPage\(overlay\.pageIndex\)/);
+  assert.match(source, /const hitElement = this\.findElementAt\(overlay, point\);\s*this\.startLayerLongPress[\s\S]{0,180}?this\.beginInkInteraction\(point, overlay, hitElement\)/);
+  assert.doesNotMatch(source.slice(source.indexOf("private rememberHistory"), source.indexOf("private findElementById")), /JSON\.stringify/);
   assert.equal((dragEndSource.match(/this\.scheduleAutoSave\(250\)/g) ?? []).length, 2);
   assert.doesNotMatch(dragEndSource, /saveIntoPdf|reloadNativePdfView|requestNativePdfPageRender|commitDetachedInkPages/);
 });
@@ -301,7 +309,8 @@ test("native PDF text selection follows the last highlight or copy action", asyn
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /nativeTextSelectionAction: "copy" \| "highlight"/);
-  assert.match(source, /if \(this\.nativeTextSelectionAction === "highlight"\) \{\s*this\.ensureNativeTextAutoHighlight\(info\)/);
+  assert.match(source, /nativeTextSelectionAction: "copy"/);
+  assert.doesNotMatch(source, /if \(this\.nativeTextSelectionAction === "highlight"\) \{\s*this\.ensureNativeTextAutoHighlight\(info\)/);
   assert.match(source, /private ensureNativeTextAutoHighlight\(info: NativeTextSelectionInfo/);
   assert.match(source, /createdIds: \[\]/);
   assert.match(source, /private prepareNativeTextCopy\(info: NativeTextSelectionInfo\)/);
@@ -309,6 +318,7 @@ test("native PDF text selection follows the last highlight or copy action", asyn
   assert.match(source, /this\.nativeTextSelectionAction = "copy"/);
   assert.match(source, /this\.coverHistory = this\.coverHistory\.filter\(\(cover\) => !ids\.has\(cover\.id\)\)/);
   assert.match(source, /this\.nativeTextSelectionAction = "highlight"/);
+  assert.match(source, /horizontalOverlap >= 0\.55 && verticalOverlap >= 0\.6/);
 });
 
 test("PPTX dependencies are browser-safe and the release bundle has no dynamic execution", async () => {

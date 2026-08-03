@@ -604,7 +604,7 @@ const DEFAULT_SETTINGS: PdftionSettings = {
   highlightOpacity: 0.36,
   highlightWidth: 9,
   nativeTextHighlightColor: "#ffd43b",
-  nativeTextSelectionAction: "highlight",
+  nativeTextSelectionAction: "copy",
   penColor: "#d9480f",
   penOpacity: 1,
   penWidth: 3,
@@ -1424,6 +1424,7 @@ interface TouchScrollState {
 interface SelectionDragState {
   clearSelectionOnTap?: boolean;
   current: InkPoint;
+  elements?: InkElement[];
   handle?: ResizeHandle;
   historyRecorded?: boolean;
   moved: boolean;
@@ -4693,8 +4694,9 @@ class InkSession {
       return;
     }
     overlay.canvas.setPointerCapture(event.pointerId);
-    this.startLayerLongPress(overlay, point, event.clientX, event.clientY);
-    this.beginInkInteraction(point, overlay);
+    const hitElement = this.findElementAt(overlay, point);
+    this.startLayerLongPress(overlay, point, event.clientX, event.clientY, hitElement);
+    this.beginInkInteraction(point, overlay, hitElement);
   }
 
   private onDoubleClick(event: MouseEvent, overlay: PageOverlay): void {
@@ -4740,8 +4742,7 @@ class InkSession {
     return false;
   }
 
-  private beginInkInteraction(point: InkPoint, overlay: PageOverlay): void {
-    const hitElement = this.findElementAt(overlay, point);
+  private beginInkInteraction(point: InkPoint, overlay: PageOverlay, hitElement = this.findElementAt(overlay, point)): void {
     if (this.tool === "image-crop") {
       if (this.pendingImageCrop?.pageIndex === overlay.pageIndex && nativeRegionContainsPoint(this.pendingImageCrop, point)) {
         const region = this.pendingImageCrop;
@@ -4776,16 +4777,19 @@ class InkSession {
 
     const tool = this.tool;
     const drawingTool = this.isDrawingToolMode(tool);
-    const startsInsideEditableSelection = this.findSelectionHandleAt(overlay, point) !== null || this.selectionBoxContainsPoint(overlay, point);
+    const selectedElements = this.getSelectedEditableElements(overlay.pageIndex);
+    const selectionBounds = normalizedElementsBounds(selectedElements);
+    const selectionHandle = selectionBounds ? this.findSelectionHandleAt(overlay, point, selectionBounds) : null;
+    const startsInsideEditableSelection = selectionHandle !== null || (selectionBounds !== null && this.selectionBoxContainsPoint(overlay, point, selectionBounds));
     const canDragSelection =
       tool !== "eraser" &&
       tool !== "cover" &&
       !drawingTool &&
-      this.hasEditableSelection(overlay.pageIndex) &&
+      selectedElements.length > 0 &&
       startsInsideEditableSelection &&
-      this.canDragSelectedElements(overlay.pageIndex);
+      this.canDragSelectedElements(overlay.pageIndex, selectedElements);
     if (canDragSelection) {
-      this.beginSelectionInteraction(point, overlay);
+      this.beginSelectionInteraction(point, overlay, hitElement, selectedElements, selectionBounds, selectionHandle);
       return;
     }
 
@@ -4820,12 +4824,12 @@ class InkSession {
     }
 
     if (hitElement && !drawingTool && tool !== "eraser" && tool !== "cover") {
-      this.beginSelectionInteraction(point, overlay);
+      this.beginSelectionInteraction(point, overlay, hitElement, selectedElements, selectionBounds, selectionHandle);
       return;
     }
 
     if (tool === "select") {
-      this.beginSelectionInteraction(point, overlay);
+      this.beginSelectionInteraction(point, overlay, hitElement, selectedElements, selectionBounds, selectionHandle);
       return;
     }
 
@@ -5354,9 +5358,6 @@ class InkSession {
     appendToActiveBody(panel);
     this.nativeTextSelectionMenu = panel;
     this.positionNativeTextSelectionMenu(info, panel);
-    if (this.nativeTextSelectionAction === "highlight") {
-      this.ensureNativeTextAutoHighlight(info);
-    }
   }
 
   private createNativeTextAdvancedColorButton(): HTMLElement {
@@ -5592,12 +5593,15 @@ class InkSession {
   private nativeTextHighlightMatchesObject(cover: InkCover, object: PdfNativeObject, overlay: PageOverlay): boolean {
     const toleranceX = Math.max(3 / Math.max(1, overlay.cssWidth), 0.002);
     const toleranceY = Math.max(3 / Math.max(1, overlay.cssHeight), 0.002);
-    return (
-      Math.abs(cover.x - object.x) <= toleranceX &&
-      Math.abs(cover.y - object.y) <= toleranceY &&
-      Math.abs(cover.width - object.width) <= toleranceX * 2 &&
-      Math.abs(cover.height - object.height) <= toleranceY * 2
-    );
+    const coverRight = cover.x + cover.width;
+    const coverBottom = cover.y + cover.height;
+    const objectRight = object.x + object.width;
+    const objectBottom = object.y + object.height;
+    const overlapWidth = Math.max(0, Math.min(coverRight, objectRight) - Math.max(cover.x, object.x));
+    const overlapHeight = Math.max(0, Math.min(coverBottom, objectBottom) - Math.max(cover.y, object.y));
+    const horizontalOverlap = overlapWidth / Math.max(toleranceX, Math.min(cover.width, object.width));
+    const verticalOverlap = overlapHeight / Math.max(toleranceY, Math.min(cover.height, object.height));
+    return horizontalOverlap >= 0.55 && verticalOverlap >= 0.6;
   }
 
   private getNativeTextSelectionKey(info: NativeTextSelectionInfo): string {
@@ -5952,15 +5956,22 @@ class InkSession {
     return /复制|信息|注释|批注|copy|info|annotation/i.test(text);
   }
 
-  private beginSelectionInteraction(point: InkPoint, overlay: PageOverlay): void {
-    const handle = this.findSelectionHandleAt(overlay, point);
-    if (handle && this.canDragSelectedElements(overlay.pageIndex)) {
-      const selected = this.getSelectedEditableElements(overlay.pageIndex);
-      const bounds = normalizedElementsBounds(selected);
+  private beginSelectionInteraction(
+    point: InkPoint,
+    overlay: PageOverlay,
+    hitElement = this.findElementAt(overlay, point),
+    selectedElements = this.getSelectedEditableElements(overlay.pageIndex),
+    selectionBounds = normalizedElementsBounds(selectedElements),
+    selectionHandle = selectionBounds ? this.findSelectionHandleAt(overlay, point, selectionBounds) : null
+  ): void {
+    if (selectionHandle && this.canDragSelectedElements(overlay.pageIndex, selectedElements)) {
+      const selected = selectedElements;
+      const bounds = selectionBounds;
       if (selected.length > 0 && bounds) {
         this.selectionDrag = {
           current: point,
-          handle,
+          elements: selected,
+          handle: selectionHandle,
           mode: "resize",
           moved: false,
           originalBounds: bounds,
@@ -5968,56 +5979,60 @@ class InkSession {
           pageIndex: overlay.pageIndex,
           start: point
         };
-        this.redrawAll();
+        this.redrawSelectionState();
         return;
       }
     }
 
-    const selected = this.findElementAt(overlay, point);
+    const selected = hitElement;
     if (selected) {
       if (!this.selectedStrokeIds.has(selected.id)) {
         this.setSelectedElementForEditing(selected);
-        this.selectionDrag = this.canDragSelectedElements(overlay.pageIndex)
+        const dragElements = [selected];
+        this.selectionDrag = this.canDragSelectedElements(overlay.pageIndex, dragElements)
           ? {
               current: point,
+              elements: dragElements,
               mode: "move",
               moved: false,
               pageIndex: overlay.pageIndex,
               start: point
             }
           : null;
-        this.redrawAll();
+        this.redrawSelectionState();
         return;
       }
-      if (!this.canDragSelectedElements(overlay.pageIndex)) {
+      if (!this.canDragSelectedElements(overlay.pageIndex, selectedElements)) {
         this.nativeSelection = null;
         this.selectionDrag = null;
-        this.redrawAll();
+        this.redrawSelectionState();
         return;
       }
       this.nativeSelection = null;
       this.selectionDrag = {
         current: point,
+        elements: selectedElements,
         mode: "move",
         moved: false,
         pageIndex: overlay.pageIndex,
         start: point
       };
-      this.redrawAll();
+      this.redrawSelectionState();
       return;
     }
 
-    if (this.hasEditableSelection(overlay.pageIndex) && this.selectionBoxContainsPoint(overlay, point) && this.canDragSelectedElements(overlay.pageIndex)) {
+    if (selectedElements.length > 0 && selectionBounds && this.selectionBoxContainsPoint(overlay, point, selectionBounds) && this.canDragSelectedElements(overlay.pageIndex, selectedElements)) {
       this.nativeSelection = null;
       this.selectionDrag = {
         clearSelectionOnTap: true,
         current: point,
+        elements: selectedElements,
         mode: "move",
         moved: false,
         pageIndex: overlay.pageIndex,
         start: point
       };
-      this.redrawAll();
+      this.redrawSelectionState();
       return;
     }
 
@@ -6025,14 +6040,14 @@ class InkSession {
       if (this.selectedStrokeIds.size > 0 || this.nativeSelection !== null) {
         this.clearEditableSelection();
         this.selectionDrag = null;
-        this.redrawAll();
+        this.redrawSelectionState();
         return;
       }
       const blockingCover = this.findCoverElementAt(overlay, point, true);
       if (blockingCover?.source === "native-text") {
         this.clearEditableSelection();
         this.selectionDrag = null;
-        this.redrawAll();
+        this.redrawSelectionState();
         return;
       }
       const native = this.findNativeObjectAt(overlay, point);
@@ -6040,7 +6055,7 @@ class InkSession {
         this.clearEditableSelection();
         this.nativeSelection = native;
         this.selectionDrag = null;
-        this.redrawAll();
+        this.redrawSelectionState();
         return;
       }
       this.clearEditableSelection();
@@ -6055,14 +6070,14 @@ class InkSession {
       this.selectionDrag = null;
     }
 
-    this.redrawAll();
+    this.redrawSelectionState();
   }
 
-  private startLayerLongPress(overlay: PageOverlay, point: InkPoint, clientX: number, clientY: number): void {
+  private startLayerLongPress(overlay: PageOverlay, point: InkPoint, clientX: number, clientY: number, hitElement = this.findElementAt(overlay, point)): void {
     this.clearLayerLongPress();
     this.layerMenu?.remove();
     this.layerMenu = null;
-    const element = this.findElementAt(overlay, point);
+    const element = hitElement;
     if (!element) {
       return;
     }
@@ -7391,7 +7406,7 @@ class InkSession {
     const moved = normalizedDistance(drag.current, point, overlay.cssWidth, overlay.cssHeight) > 0.45;
 
     if (drag.mode === "move") {
-      const selected = this.getSelectedEditableElements(overlay.pageIndex);
+      const selected = drag.elements ?? this.getSelectedEditableElements(overlay.pageIndex);
       if (selected.length === 0 || !moved) {
         return;
       }
@@ -7433,7 +7448,7 @@ class InkSession {
 
     drag.current = point;
     drag.moved = drag.moved || moved;
-    this.redrawOverlay(overlay);
+    this.requestOverlayRedraw(overlay);
   }
 
   private onPointerUp(event: PointerEvent, overlay: PageOverlay): void {
@@ -7586,7 +7601,15 @@ class InkSession {
   private redrawPageOverlays(pageIndex: number): void {
     for (const candidate of this.overlays.values()) {
       if (candidate.pageIndex === pageIndex) {
-        this.redrawOverlay(candidate);
+        this.requestOverlayRedraw(candidate);
+      }
+    }
+  }
+
+  private redrawSelectionState(): void {
+    for (const overlay of this.overlays.values()) {
+      if (this.isOverlayNearViewport(overlay)) {
+        this.requestOverlayRedraw(overlay);
       }
     }
   }
@@ -7609,7 +7632,7 @@ class InkSession {
       const centerPoint = this.getOverlayInputPoint(overlay, center.x, center.y);
       const selected = this.getSelectedEditableElements(overlay.pageIndex);
       const bounds = normalizedElementsBounds(selected);
-      const resizeSelection = this.tool === "select" && selected.length > 0 && bounds !== null && this.selectionBoxContainsPoint(overlay, centerPoint);
+      const resizeSelection = this.tool === "select" && selected.length > 0 && bounds !== null && this.selectionBoxContainsPoint(overlay, centerPoint, bounds);
       this.touchScroll = {
         initialDistance: getTouchDistance(event.touches),
         initialBounds: resizeSelection ? bounds : undefined,
@@ -7653,8 +7676,9 @@ class InkSession {
       this.activeTouchId = null;
       return;
     }
-    this.startLayerLongPress(overlay, point, touch.clientX, touch.clientY);
-    this.beginInkInteraction(point, overlay);
+    const hitElement = this.findElementAt(overlay, point);
+    this.startLayerLongPress(overlay, point, touch.clientX, touch.clientY, hitElement);
+    this.beginInkInteraction(point, overlay, hitElement);
   }
 
   private onTouchMove(event: TouchEvent, overlay: PageOverlay): void {
@@ -7933,7 +7957,7 @@ class InkSession {
       drawCoverElement(ctx, this.nativeTextEditorCover, overlay.cssWidth, overlay.cssHeight, false);
     }
 
-    const orderedElements = this.getEditableElements().filter((element) => element.pageIndex === overlay.pageIndex);
+    const orderedElements = this.getEditableElementsForPage(overlay.pageIndex);
     for (const element of orderedElements) {
       const selected = tintEditableSelection && this.selectedStrokeIds.has(element.id);
       if (element.kind === "cover") {
@@ -7957,7 +7981,7 @@ class InkSession {
       drawMarqueeBox(ctx, this.selectionDrag.start, this.selectionDrag.current, overlay.cssWidth, overlay.cssHeight);
     }
 
-    const selected = this.getSelectedEditableElements(overlay.pageIndex);
+    const selected = orderedElements.filter((element) => this.selectedStrokeIds.has(element.id));
     if (showEditableSelectionControls && selected.length > 0) {
       drawSelectionGroup(ctx, selected, overlay.cssWidth, overlay.cssHeight);
     }
@@ -8807,18 +8831,18 @@ class InkSession {
   }
 
   private findElementAt(overlay: PageOverlay, point: InkPoint): InkElement | null {
-    const ordered = this.getEditableElements().filter((element) => element.pageIndex === overlay.pageIndex).reverse();
+    const ordered = this.getEditableElementsForPage(overlay.pageIndex).reverse();
     for (const element of ordered) {
       if (element.kind === "text" && textBoxContainsPoint(element, point, overlay.cssWidth, overlay.cssHeight)) {
         return element;
       }
-      if (element.kind === "image" && imageBoxContainsPoint(element, point)) {
+      if (element.kind === "image" && imageBoxContainsPoint(element, point, overlay.cssWidth, overlay.cssHeight, 7)) {
         return element;
       }
       if (element.kind === "stroke" && strokeBoxContainsPoint(element, point, overlay.cssWidth, overlay.cssHeight)) {
         return element;
       }
-      if (element.kind === "cover" && coverBoxContainsPoint(element, point)) {
+      if (element.kind === "cover" && coverBoxContainsPoint(element, point, overlay.cssWidth, overlay.cssHeight, 7)) {
         return element;
       }
     }
@@ -8826,15 +8850,12 @@ class InkSession {
   }
 
   private findCoverElementAt(overlay: PageOverlay, point: InkPoint, includeNativeTextCover = true): InkCover | null {
-    const covers = this.getEditableElements().filter((element): element is InkCover => element.kind === "cover").reverse();
+    const covers = this.getEditableElementsForPage(overlay.pageIndex).filter((element): element is InkCover => element.kind === "cover").reverse();
     for (const cover of covers) {
-      if (cover.pageIndex !== overlay.pageIndex) {
-        continue;
-      }
       if (!includeNativeTextCover && cover.source === "native-text") {
         continue;
       }
-      if (coverBoxContainsPoint(cover, point)) {
+      if (coverBoxContainsPoint(cover, point, overlay.cssWidth, overlay.cssHeight, 7)) {
         return cover;
       }
     }
@@ -8843,10 +8864,7 @@ class InkSession {
   }
 
   private findElementsInSelection(overlay: PageOverlay, start: InkPoint, end: InkPoint): InkElement[] {
-    return this.getEditableElements().filter((element) => {
-      if (element.pageIndex !== overlay.pageIndex) {
-        return false;
-      }
+    return this.getEditableElementsForPage(overlay.pageIndex).filter((element) => {
       if (element.kind === "stroke") {
         return strokeIntersectsSelection(element, start, end, overlay.cssWidth, overlay.cssHeight);
       }
@@ -9435,11 +9453,11 @@ class InkSession {
     }
   }
 
-  private canDragSelectedElements(pageIndex?: number): boolean {
+  private canDragSelectedElements(pageIndex?: number, selectedElements?: InkElement[]): boolean {
     if (this.nativeTextEditor !== null) {
       return false;
     }
-    return this.getSelectedEditableElements(pageIndex).every((element) => element.kind !== "text" || element.text.trim().length > 0);
+    return (selectedElements ?? this.getSelectedEditableElements(pageIndex)).every((element) => element.kind !== "text" || element.text.trim().length > 0);
   }
 
   private pruneSelection(): void {
@@ -9452,12 +9470,12 @@ class InkSession {
   }
 
   private getSelectedEditableElements(pageIndex?: number): InkElement[] {
-    return this.getEditableElements().filter((element) => {
+    return [...this.strokeHistory, ...this.textHistory, ...this.coverHistory, ...this.imageHistory].filter((element) => {
       if (!this.selectedStrokeIds.has(element.id)) {
         return false;
       }
       return pageIndex === undefined || element.pageIndex === pageIndex;
-    });
+    }).sort(compareInkElements);
   }
 
   private hasEditableSelection(pageIndex?: number): boolean {
@@ -9601,28 +9619,24 @@ class InkSession {
     }
   }
 
-  private selectionBoxContainsPoint(overlay: PageOverlay, point: InkPoint): boolean {
-    const bounds = normalizedElementsBounds(this.getSelectedEditableElements(overlay.pageIndex));
+  private selectionBoxContainsPoint(overlay: PageOverlay, point: InkPoint, selectionBounds?: NormalizedBounds): boolean {
+    const bounds = selectionBounds ?? normalizedElementsBounds(this.getSelectedEditableElements(overlay.pageIndex));
     if (!bounds) {
       return false;
     }
 
-    return (
-      point.x >= bounds.minX &&
-      point.x <= bounds.maxX &&
-      point.y >= bounds.minY &&
-      point.y <= bounds.maxY
-    );
+    const padX = 9 / Math.max(1, overlay.cssWidth);
+    const padY = 9 / Math.max(1, overlay.cssHeight);
+    return point.x >= bounds.minX - padX && point.x <= bounds.maxX + padX && point.y >= bounds.minY - padY && point.y <= bounds.maxY + padY;
   }
 
-  private findSelectionHandleAt(overlay: PageOverlay, point: InkPoint): ResizeHandle | null {
-    const selected = this.getSelectedEditableElements(overlay.pageIndex);
-    const bounds = normalizedElementsBounds(selected);
+  private findSelectionHandleAt(overlay: PageOverlay, point: InkPoint, selectionBounds?: NormalizedBounds): ResizeHandle | null {
+    const bounds = selectionBounds ?? normalizedElementsBounds(this.getSelectedEditableElements(overlay.pageIndex));
     if (!bounds) {
       return null;
     }
 
-    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, 5, 0);
+    return findResizeHandleAt(bounds, point, overlay.cssWidth, overlay.cssHeight, 8, 0);
   }
 
   private resizeSelectedElements(drag: SelectionDragState, point: InkPoint): void {
@@ -9672,6 +9686,17 @@ class InkSession {
 
   private getEditableElements(): InkElement[] {
     const elements = [...this.strokeHistory, ...this.textHistory, ...this.coverHistory, ...this.imageHistory];
+    normalizeInkElementLayers(elements);
+    return elements.sort(compareInkElements);
+  }
+
+  private getEditableElementsForPage(pageIndex: number): InkElement[] {
+    const elements = [
+      ...this.strokeHistory.filter((element) => element.pageIndex === pageIndex),
+      ...this.textHistory.filter((element) => element.pageIndex === pageIndex),
+      ...this.coverHistory.filter((element) => element.pageIndex === pageIndex),
+      ...this.imageHistory.filter((element) => element.pageIndex === pageIndex)
+    ];
     normalizeInkElementLayers(elements);
     return elements.sort(compareInkElements);
   }
@@ -9768,10 +9793,6 @@ class InkSession {
 
   private rememberHistory(): void {
     const snapshot = this.createHistorySnapshot();
-    const previous = this.undoStack.at(-1);
-    if (previous && JSON.stringify(previous) === JSON.stringify(snapshot)) {
-      return;
-    }
     this.undoStack.push(snapshot);
     if (this.undoStack.length > 80) {
       this.undoStack.shift();
@@ -13149,7 +13170,7 @@ function strokeBoxContainsPoint(stroke: InkStroke, point: InkPoint, cssWidth: nu
   const displayWidth = strokeDisplayWidth(stroke, cssWidth);
   const hitRadius = stroke.source === "external-ink"
     ? Math.max(16, displayWidth * 3)
-    : Math.max(9, displayWidth * 2);
+    : Math.max(12, displayWidth * 2.4);
   if (stroke.points.length === 1) {
     return normalizedDistance(stroke.points[0], point, cssWidth, cssHeight) <= hitRadius;
   }
@@ -13158,7 +13179,7 @@ function strokeBoxContainsPoint(stroke: InkStroke, point: InkPoint, cssWidth: nu
 
 function textBoxContainsPoint(text: InkText, point: InkPoint, cssWidth: number, cssHeight: number): boolean {
   const box = textBounds(text, cssWidth, cssHeight);
-  const pad = Math.max(8, text.fontSize * 0.45);
+  const pad = Math.max(11, text.fontSize * 0.5);
   const px = point.x * cssWidth;
   const py = point.y * cssHeight;
   return px >= box.minX - pad && px <= box.maxX + pad && py >= box.minY - pad && py <= box.maxY + pad;
@@ -13194,8 +13215,16 @@ function textIntersectsSelection(text: InkText, start: InkPoint, end: InkPoint, 
   return box.maxX >= minX && box.minX <= maxX && box.maxY >= minY && box.minY <= maxY;
 }
 
-function coverBoxContainsPoint(cover: InkCover | InkImage, point: InkPoint): boolean {
-  return point.x >= cover.x && point.x <= cover.x + cover.width && point.y >= cover.y && point.y <= cover.y + cover.height;
+function coverBoxContainsPoint(
+  cover: InkCover | InkImage,
+  point: InkPoint,
+  cssWidth = 1,
+  cssHeight = 1,
+  paddingPx = 0
+): boolean {
+  const padX = paddingPx / Math.max(1, cssWidth);
+  const padY = paddingPx / Math.max(1, cssHeight);
+  return point.x >= cover.x - padX && point.x <= cover.x + cover.width + padX && point.y >= cover.y - padY && point.y <= cover.y + cover.height + padY;
 }
 
 function coverIntersectsSelection(cover: InkCover | InkImage, start: InkPoint, end: InkPoint): boolean {
@@ -13206,8 +13235,8 @@ function coverIntersectsSelection(cover: InkCover | InkImage, start: InkPoint, e
   return cover.x + cover.width >= minX && cover.x <= maxX && cover.y + cover.height >= minY && cover.y <= maxY;
 }
 
-function imageBoxContainsPoint(image: InkImage, point: InkPoint): boolean {
-  return coverBoxContainsPoint(image, point);
+function imageBoxContainsPoint(image: InkImage, point: InkPoint, cssWidth = 1, cssHeight = 1, paddingPx = 0): boolean {
+  return coverBoxContainsPoint(image, point, cssWidth, cssHeight, paddingPx);
 }
 
 function imageIntersectsSelection(image: InkImage, start: InkPoint, end: InkPoint): boolean {
@@ -13706,6 +13735,10 @@ function strokeContainsPoint(
   const px = point.x * cssWidth;
   const py = point.y * cssHeight;
   const radius = Math.max(eraserWidth, strokeDisplayWidth(stroke, cssWidth) * 2.2);
+  const box = strokeBounds(stroke, cssWidth, cssHeight);
+  if (!box || px < box.minX - radius || px > box.maxX + radius || py < box.minY - radius || py > box.maxY + radius) {
+    return false;
+  }
 
   for (let i = 1; i < stroke.points.length; i += 1) {
     const start = stroke.points[i - 1];
