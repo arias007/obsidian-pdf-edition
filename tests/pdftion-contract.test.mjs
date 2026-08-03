@@ -90,24 +90,6 @@ test("Markdown conversion keeps native image references and delegates ink to Not
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
 });
 
-test("Markdown conversion maps PDF annotation links onto text runs", async () => {
-  const source = await readFile(sourceUrl, "utf8");
-  const markdownSource = source.slice(
-    source.indexOf("function collectEditableMarkdownLines"),
-    source.indexOf("function getNoteDrawWriteApi")
-  );
-
-  assert.match(markdownSource, /collectPdfTextLinkRegions\(overlay\.pageEl\)/);
-  assert.match(markdownSource, /\.annotationLayer a, \.annotationLayer \[data-url\], \.annotationLayer \[data-unsafe-url\]/);
-  assert.match(markdownSource, /findPdfTextLinkForRect\(rect, linkRegions\)/);
-  assert.match(markdownSource, /width \* height \/ spanArea/);
-  assert.match(markdownSource, /readHiddenPdfAnnotationRect\(annotation, pageRect\)/);
-  assert.match(markdownSource, /match\(\/\^\(-\?\\d\+\(\?:\\\.\\d\+\)\?\)\(%\|px\)\$\//);
-  assert.match(markdownSource, /normalizeEditableExportLink\(run\.link\)/);
-  assert.match(markdownSource, /\^\(\?:javascript\|data\|vbscript\):/);
-  assert.ok(markdownSource.includes('content = `[${content}](${escapeMarkdownLinkDestination(validLink)})`;'));
-});
-
 test("Markdown conversion uses native Markdown without HTML presentation elements", async () => {
   const source = await readFile(sourceUrl, "utf8");
   const markdownSource = source.slice(
@@ -141,7 +123,7 @@ test("Markdown conversion uses native Markdown without HTML presentation element
   assert.doesNotMatch(markdownSource, /<section\b|<div\b|<input\b|<label\b/i);
 });
 
-test("visual exports keep the composite page and use stable selectable text layers", async () => {
+test("visual exports use the 0.3.96 document generation logic", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /const lines = collectEditableMarkdownLines\(overlay\)/);
@@ -152,11 +134,9 @@ test("visual exports keep the composite page and use stable selectable text laye
   assert.match(source, /slide\.addText\(textRuns/);
   assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
   assert.match(source, /await this\.drawImageElementForExport/);
-  assert.match(source, /<div class="text-layer"/);
-  assert.match(source, /<div class="text-line"/);
-  assert.match(source, /class="text-run"/);
-  assert.match(source, /<br class="text-break">/);
-  assert.match(source, /container-type:inline-size/);
+  assert.match(source, /<svg class="text-layer"/);
+  assert.match(source, /viewBox="0 0 \$\{page\.width\} \$\{page\.height\}"/);
+  assert.match(source, /textLength="\$\{width\}" lengthAdjust="spacingAndGlyphs"/);
   assert.match(source, /await buildDocxFromPageImages\(pages, this\.file\.basename\)/);
   assert.match(source, /await import\("docx"\)/);
   assert.match(source, /new ImageRun\(\{/);
@@ -167,12 +147,10 @@ test("visual exports keep the composite page and use stable selectable text laye
   assert.match(source, /producer: "Pdftion"/);
   assert.match(source, /mpe\/preview\/page-\$\{String\(pageIndex \+ 1\)\.padStart\(4, "0"\)\}\.png/);
   assert.match(source, /pageCount: sortedPages\.length/);
-  assert.match(source, /transparency: 99/);
-  assert.match(source, /behindDocument: true/);
-  assert.match(source, /new TextRun\(\{/);
-  assert.match(source, /style: "PdftionSelectableText"/);
-  assert.match(source, /<w14:textFill>/);
-  assert.match(source, /<a:alpha val="1000"\/>/);
+  assert.match(source, /transparency: 100/);
+  assert.doesNotMatch(source.slice(source.indexOf("async function buildDocxFromPageImages"), source.indexOf("function exportHexColor")), /lineRule|<w:drawing>|<wp:inline/);
+  assert.match(source, /const sorted = fragments\.sort\(\(a, b\) => \(a\.top - b\.top\) \|\| \(a\.left - b\.left\)\)/);
+  assert.doesNotMatch(source, /clusterEditableTextFragments|normalizeEditableExportLink|injectDocxSelectableTextTransparency/);
   assert.match(source, /ctx\.fillStyle = "#ffffff";\s*ctx\.fillRect/);
   assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
   assert.doesNotMatch(source, /w:right="\$\{rightTwips\}"/);
@@ -222,7 +200,7 @@ test("visual export waits for rendered pages and includes the full annotation co
   assert.match(pptSource, /slide\.addImage\(\{[\s\S]*?uint8ArrayToDataUrl\(page\.bytes/);
   assert.ok(pptSource.indexOf("slide.addImage({") < pptSource.indexOf("for (const line of page.lines)"));
   assert.doesNotMatch(pptSource, /fit: "shrink"/);
-  assert.match(pptSource, /transparency: 99/);
+  assert.match(pptSource, /transparency: 100/);
   assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
 });
 
