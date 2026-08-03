@@ -1431,7 +1431,6 @@ interface SelectionDragState {
   originalBounds?: NormalizedBounds;
   originalElements?: InkElement[];
   pageIndex: number;
-  startedFromFreshSelection?: boolean;
   start: InkPoint;
 }
 
@@ -2845,13 +2844,12 @@ class InkSession {
   private selectedPageIndexes = new Set<number>();
   private selectedStrokeIds = new Set<string>();
   private selectionChangedAt = 0;
-  private selectionWasExplicitTap = false;
   private dirtyInkPages = new Set<number>();
   private deletedExternalInkIds = new Set<string>();
   private deletedPdftionInkIds = new Set<string>();
   private nativeTextSelectionMenu: HTMLElement | null = null;
   private nativeTextSelectionInfo: NativeTextSelectionInfo | null = null;
-  private nativeTextAutoHighlight: { ids: string[]; key: string; pageIndex: number } | null = null;
+  private nativeTextAutoHighlight: { createdIds: string[]; ids: string[]; key: string; pageIndex: number } | null = null;
   private nativeTextSelectionTimer: number | null = null;
   private nativeTextSelectionAbort = new AbortController();
   private saving = false;
@@ -4785,7 +4783,6 @@ class InkSession {
       !drawingTool &&
       this.hasEditableSelection(overlay.pageIndex) &&
       startsInsideEditableSelection &&
-      this.canMoveFreshSelection() &&
       this.canDragSelectedElements(overlay.pageIndex);
     if (canDragSelection) {
       this.beginSelectionInteraction(point, overlay);
@@ -5457,19 +5454,16 @@ class InkSession {
     this.nativeTextSelectionAction = "highlight";
     this.scheduleToolSettingsSave();
     const selectionKey = this.getNativeTextSelectionKey(info);
-    const pending = this.nativeTextAutoHighlight?.key === selectionKey
-      ? this.nativeTextAutoHighlight
-      : null;
-    const pendingCovers = pending
-      ? pending.ids
-          .map((id) => this.coverHistory.find((cover) => cover.id === id))
-          .filter((cover): cover is InkCover => cover !== undefined)
-      : [];
+    const pending = this.nativeTextAutoHighlight?.key === selectionKey ? this.nativeTextAutoHighlight : null;
+    const collapsed = this.collapseNativeTextHighlightCovers(info, this.findNativeTextHighlightCovers(info));
+    const pendingCovers = collapsed.kept;
 
     if (pendingCovers.length === 0) {
       this.ensureNativeTextAutoHighlight(info, normalizedColor);
-    } else if (pendingCovers.some((cover) => normalizeHexColor(cover.color) !== normalizedColor)) {
+    } else if (collapsed.duplicates.length > 0 || pendingCovers.some((cover) => normalizeHexColor(cover.color) !== normalizedColor)) {
       this.rememberHistory();
+      const duplicateIds = new Set(collapsed.duplicates.map((cover) => cover.id));
+      this.coverHistory = this.coverHistory.filter((cover) => !duplicateIds.has(cover.id));
       for (const cover of pendingCovers) {
         cover.color = normalizedColor;
         cover.saved = false;
@@ -5479,6 +5473,13 @@ class InkSession {
       this.redrawOverlay(info.overlay);
       this.scheduleAutoSave();
     }
+    const currentCovers = this.findNativeTextHighlightCovers(info);
+    this.nativeTextAutoHighlight = {
+      createdIds: pending?.createdIds ?? currentCovers.map((cover) => cover.id),
+      ids: currentCovers.map((cover) => cover.id),
+      key: selectionKey,
+      pageIndex: info.overlay.pageIndex
+    };
 
     activeDocument.getSelection()?.removeAllRanges();
     this.hideNativeTextSelectionMenu();
@@ -5489,23 +5490,43 @@ class InkSession {
     if (!info) {
       return;
     }
-    this.prepareNativeTextCopy(info);
+    this.nativeTextSelectionAction = "copy";
+    this.scheduleToolSettingsSave();
+    const covers = this.findNativeTextHighlightCovers(info);
+    if (covers.length > 0) {
+      this.rememberHistory();
+      const ids = new Set(covers.map((cover) => cover.id));
+      this.coverHistory = this.coverHistory.filter((cover) => !ids.has(cover.id));
+      this.redoStack = [];
+      this.markDirty();
+      this.redrawOverlay(info.overlay);
+      this.scheduleAutoSave();
+    }
+    this.nativeTextAutoHighlight = null;
     activeDocument.getSelection()?.removeAllRanges();
     this.hideNativeTextSelectionMenu();
   }
 
   private ensureNativeTextAutoHighlight(info: NativeTextSelectionInfo, color = this.nativeTextHighlightColor): void {
     const selectionKey = this.getNativeTextSelectionKey(info);
-    if (
-      this.nativeTextAutoHighlight?.key === selectionKey &&
-      this.nativeTextAutoHighlight.ids.some((id) => this.coverHistory.some((cover) => cover.id === id))
-    ) {
+    const collapsed = this.collapseNativeTextHighlightCovers(info, this.findNativeTextHighlightCovers(info));
+    const existing = collapsed.kept;
+    const missing = info.objects.filter((object) => !existing.some((cover) => this.nativeTextHighlightMatchesObject(cover, object, info.overlay)));
+    if (missing.length === 0 && collapsed.duplicates.length === 0) {
+      this.nativeTextAutoHighlight = {
+        createdIds: [],
+        ids: existing.map((cover) => cover.id),
+        key: selectionKey,
+        pageIndex: info.overlay.pageIndex
+      };
       return;
     }
 
     this.rememberHistory();
+    const duplicateIds = new Set(collapsed.duplicates.map((cover) => cover.id));
+    this.coverHistory = this.coverHistory.filter((cover) => !duplicateIds.has(cover.id));
     const normalizedColor = normalizeHexColor(color);
-    const ids = info.objects.map((object) => {
+    const createdIds = missing.map((object) => {
       const id = makeStrokeId();
       this.coverHistory.push({
         color: normalizedColor,
@@ -5524,11 +5545,59 @@ class InkSession {
       });
       return id;
     });
-    this.nativeTextAutoHighlight = { ids, key: selectionKey, pageIndex: info.overlay.pageIndex };
+    this.nativeTextAutoHighlight = {
+      createdIds,
+      ids: [...existing.map((cover) => cover.id), ...createdIds],
+      key: selectionKey,
+      pageIndex: info.overlay.pageIndex
+    };
     this.redoStack = [];
     this.markDirty();
     this.redrawOverlay(info.overlay);
     this.scheduleAutoSave();
+  }
+
+  private findNativeTextHighlightCovers(info: NativeTextSelectionInfo): InkCover[] {
+    return this.coverHistory.filter((cover) => (
+      cover.pageIndex === info.overlay.pageIndex &&
+      cover.source === "native-text" &&
+      cover.opacity < 0.9 &&
+      info.objects.some((object) => this.nativeTextHighlightMatchesObject(cover, object, info.overlay))
+    ));
+  }
+
+  private collapseNativeTextHighlightCovers(
+    info: NativeTextSelectionInfo,
+    covers: InkCover[]
+  ): { duplicates: InkCover[]; kept: InkCover[] } {
+    const keptByObject = new Map<number, InkCover>();
+    const duplicates: InkCover[] = [];
+    for (const cover of covers) {
+      const objectIndex = info.objects.findIndex((object) => this.nativeTextHighlightMatchesObject(cover, object, info.overlay));
+      if (objectIndex < 0) {
+        continue;
+      }
+      const previous = keptByObject.get(objectIndex);
+      if (previous) {
+        duplicates.push(previous);
+      }
+      keptByObject.set(objectIndex, cover);
+    }
+    return {
+      duplicates,
+      kept: Array.from(keptByObject.entries()).sort((a, b) => a[0] - b[0]).map(([, cover]) => cover)
+    };
+  }
+
+  private nativeTextHighlightMatchesObject(cover: InkCover, object: PdfNativeObject, overlay: PageOverlay): boolean {
+    const toleranceX = Math.max(3 / Math.max(1, overlay.cssWidth), 0.002);
+    const toleranceY = Math.max(3 / Math.max(1, overlay.cssHeight), 0.002);
+    return (
+      Math.abs(cover.x - object.x) <= toleranceX &&
+      Math.abs(cover.y - object.y) <= toleranceY &&
+      Math.abs(cover.width - object.width) <= toleranceX * 2 &&
+      Math.abs(cover.height - object.height) <= toleranceY * 2
+    );
   }
 
   private getNativeTextSelectionKey(info: NativeTextSelectionInfo): string {
@@ -5546,7 +5615,7 @@ class InkSession {
       return;
     }
 
-    const ids = new Set(pending.ids);
+    const ids = new Set(pending.createdIds);
     if (this.coverHistory.some((cover) => ids.has(cover.id))) {
       this.rememberHistory();
       this.coverHistory = this.coverHistory.filter((cover) => !ids.has(cover.id));
@@ -5885,7 +5954,7 @@ class InkSession {
 
   private beginSelectionInteraction(point: InkPoint, overlay: PageOverlay): void {
     const handle = this.findSelectionHandleAt(overlay, point);
-    if (handle && this.canMoveFreshSelection() && this.canDragSelectedElements(overlay.pageIndex)) {
+    if (handle && this.canDragSelectedElements(overlay.pageIndex)) {
       const selected = this.getSelectedEditableElements(overlay.pageIndex);
       const bounds = normalizedElementsBounds(selected);
       if (selected.length > 0 && bounds) {
@@ -5897,7 +5966,6 @@ class InkSession {
           originalBounds: bounds,
           originalElements: selected.map(cloneElement),
           pageIndex: overlay.pageIndex,
-          startedFromFreshSelection: true,
           start: point
         };
         this.redrawAll();
@@ -5915,14 +5983,13 @@ class InkSession {
               mode: "move",
               moved: false,
               pageIndex: overlay.pageIndex,
-              startedFromFreshSelection: true,
               start: point
             }
           : null;
         this.redrawAll();
         return;
       }
-      if (!this.canMoveFreshSelection() || !this.canDragSelectedElements(overlay.pageIndex)) {
+      if (!this.canDragSelectedElements(overlay.pageIndex)) {
         this.nativeSelection = null;
         this.selectionDrag = null;
         this.redrawAll();
@@ -5934,14 +6001,13 @@ class InkSession {
         mode: "move",
         moved: false,
         pageIndex: overlay.pageIndex,
-        startedFromFreshSelection: true,
         start: point
       };
       this.redrawAll();
       return;
     }
 
-    if (this.hasEditableSelection(overlay.pageIndex) && this.selectionBoxContainsPoint(overlay, point) && this.canMoveFreshSelection() && this.canDragSelectedElements(overlay.pageIndex)) {
+    if (this.hasEditableSelection(overlay.pageIndex) && this.selectionBoxContainsPoint(overlay, point) && this.canDragSelectedElements(overlay.pageIndex)) {
       this.nativeSelection = null;
       this.selectionDrag = {
         clearSelectionOnTap: true,
@@ -5949,7 +6015,6 @@ class InkSession {
         mode: "move",
         moved: false,
         pageIndex: overlay.pageIndex,
-        startedFromFreshSelection: true,
         start: point
       };
       this.redrawAll();
@@ -5978,25 +6043,14 @@ class InkSession {
         this.redrawAll();
         return;
       }
-      if (this.selectionBoxContainsPoint(overlay, point) && this.canMoveFreshSelection() && this.canDragSelectedElements(overlay.pageIndex)) {
-        this.selectionDrag = {
-          current: point,
-          mode: "move",
-          moved: false,
-          pageIndex: overlay.pageIndex,
-          startedFromFreshSelection: true,
-          start: point
-        };
-      } else {
-        this.clearEditableSelection();
-        this.selectionDrag = {
-          current: point,
-          mode: "marquee",
-          moved: false,
-          pageIndex: overlay.pageIndex,
-          start: point
-        };
-      }
+      this.clearEditableSelection();
+      this.selectionDrag = {
+        current: point,
+        mode: "marquee",
+        moved: false,
+        pageIndex: overlay.pageIndex,
+        start: point
+      };
     } else {
       this.selectionDrag = null;
     }
@@ -7339,11 +7393,6 @@ class InkSession {
     if (drag.mode === "move") {
       const selected = this.getSelectedEditableElements(overlay.pageIndex);
       if (selected.length === 0 || !moved) {
-        return;
-      }
-      if (!drag.startedFromFreshSelection || !this.selectionWasExplicitTap) {
-        this.selectionDrag = null;
-        this.redrawAll();
         return;
       }
       if (!drag.historyRecorded) {
@@ -9364,7 +9413,6 @@ class InkSession {
       this.selectedStrokeIds.add(element.id);
     }
     this.selectionChangedAt = Date.now();
-    this.selectionWasExplicitTap = false;
   }
 
   private setSelectedElementForEditing(element: InkElement): void {
@@ -9376,7 +9424,6 @@ class InkSession {
     this.selectedStrokeIds.add(id);
     this.nativeSelection = null;
     this.selectionChangedAt = Date.now();
-    this.selectionWasExplicitTap = true;
   }
 
   private clearEditableSelection(): void {
@@ -9386,11 +9433,6 @@ class InkSession {
     if (hadSelection) {
       this.selectionChangedAt = Date.now();
     }
-    this.selectionWasExplicitTap = false;
-  }
-
-  private canMoveFreshSelection(): boolean {
-    return this.selectionWasExplicitTap;
   }
 
   private canDragSelectedElements(pageIndex?: number): boolean {
@@ -9565,14 +9607,11 @@ class InkSession {
       return false;
     }
 
-    // Give the move region a wider hit area so casual taps land on drag instead of resize.
-    const padX = Math.max(14 / overlay.cssWidth, 0.014);
-    const padY = Math.max(14 / overlay.cssHeight, 0.014);
     return (
-      point.x >= bounds.minX - padX &&
-      point.x <= bounds.maxX + padX &&
-      point.y >= bounds.minY - padY &&
-      point.y <= bounds.maxY + padY
+      point.x >= bounds.minX &&
+      point.x <= bounds.maxX &&
+      point.y >= bounds.minY &&
+      point.y <= bounds.maxY
     );
   }
 
@@ -9974,7 +10013,6 @@ class InkSession {
     }
     this.nativeSelection = null;
     this.selectionChangedAt = Date.now();
-    this.selectionWasExplicitTap = false;
     this.redrawAll();
     return this.selectedStrokeIds.size;
   }

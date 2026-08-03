@@ -21,8 +21,9 @@ test("selection interiors move while only the four visible corner handles resize
   assert.match(source, /return findResizeHandleAt\(bounds, point, overlay\.cssWidth, overlay\.cssHeight, 5, 0\)/);
   assert.doesNotMatch(source, /textOnly \? 10 : 5/);
   assert.doesNotMatch(source, /textOnly \? 12 : 0/);
-  assert.match(source, /private canMoveFreshSelection\(\): boolean \{\s*return this\.selectionWasExplicitTap/);
+  assert.doesNotMatch(source, /canMoveFreshSelection|selectionWasExplicitTap|startedFromFreshSelection/);
   assert.match(source, /this\.selectionBoxContainsPoint\(overlay, point\)[\s\S]{0,400}?mode: "move"/);
+  assert.match(source, /point\.x >= bounds\.minX &&[\s\S]{0,180}?point\.y <= bounds\.maxY/);
   assert.match(source, /private setSelectedElementForEditing\(element: InkElement\): void \{\s*this\.setSingleSelectedElement\(element\.id\);\s*\}/);
   assert.doesNotMatch(source, /findStrokeEditGroup|strokesAreVisuallyConnected/);
   assert.match(source, /const ordered = this\.getEditableElements\(\).*\.reverse\(\)/);
@@ -216,7 +217,7 @@ test("placeholder pages, precise stroke hits, and immediate drag redraw stay int
 
   assert.match(source, /return candidate\.clientWidth > 0 && candidate\.clientHeight > 0/);
   assert.match(source, /return strokeContainsPoint\(stroke, point, cssWidth, cssHeight, hitRadius\)/);
-  assert.match(source, /startedFromFreshSelection: true/);
+  assert.doesNotMatch(source, /startedFromFreshSelection|selectionWasExplicitTap/);
   const dragMoveSource = source.slice(
     source.indexOf("private moveSelectionInteraction"),
     source.indexOf("private onPointerUp")
@@ -251,7 +252,9 @@ test("text selection supports no highlight and frequent rendering work is frame-
 
   assert.match(source, /createIconButton\("ban", uiText\("无色", "No highlight"\)\)/);
   assert.match(source, /private applyNativeTextNoHighlight\(\): void/);
-  assert.match(source, /this\.prepareNativeTextCopy\(info\)/);
+  assert.match(source, /const covers = this\.findNativeTextHighlightCovers\(info\)/);
+  assert.match(source, /this\.collapseNativeTextHighlightCovers\(info, this\.findNativeTextHighlightCovers\(info\)\)/);
+  assert.match(source, /this\.coverHistory = this\.coverHistory\.filter\(\(cover\) => !ids\.has\(cover\.id\)\)/);
   assert.match(source, /private scheduleVisibleOverlayRefresh\(\): void[\s\S]{0,420}?window\.requestAnimationFrame/);
   assert.match(source, /private scheduleExternalInkLayerUpdate\(\): void[\s\S]{0,420}?window\.requestAnimationFrame/);
   assert.match(source, /overlay\.geometryFrame = window\.requestAnimationFrame/);
@@ -300,8 +303,9 @@ test("native PDF text selection follows the last highlight or copy action", asyn
   assert.match(source, /nativeTextSelectionAction: "copy" \| "highlight"/);
   assert.match(source, /if \(this\.nativeTextSelectionAction === "highlight"\) \{\s*this\.ensureNativeTextAutoHighlight\(info\)/);
   assert.match(source, /private ensureNativeTextAutoHighlight\(info: NativeTextSelectionInfo/);
-  assert.match(source, /this\.nativeTextAutoHighlight\?\.key === selectionKey/);
+  assert.match(source, /createdIds: \[\]/);
   assert.match(source, /private prepareNativeTextCopy\(info: NativeTextSelectionInfo\)/);
+  assert.match(source, /const ids = new Set\(pending\.createdIds\)/);
   assert.match(source, /this\.nativeTextSelectionAction = "copy"/);
   assert.match(source, /this\.coverHistory = this\.coverHistory\.filter\(\(cover\) => !ids\.has\(cover\.id\)\)/);
   assert.match(source, /this\.nativeTextSelectionAction = "highlight"/);
