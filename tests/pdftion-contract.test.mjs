@@ -23,9 +23,45 @@ test("settings expose and persist every supported interface language", async () 
 test("saved PDF ink hides its original native layer as soon as editing begins", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
-  assert.match(source, /const pdfInkStrokes = state \? \[\] : await this\.plugin\.loadPdfInkAnnotations\(this\.file\)/);
+  assert.match(source, /const pdfInkStrokes: InkStroke\[\] = \[\]/);
+  assert.match(source, /loadPdfInkAnnotations\(this\.file, pagesToScan\)/);
+  assert.match(source, /this\.nativeInkScannedPages\.add\(pageIndex\)/);
   assert.match(source, /if \(element\.pdfSaved === true\) \{[\s\S]*?this\.pendingNativeInkHidePages\.add\(element\.pageIndex\);\s*this\.updateExternalInkLayerState\(\)/);
   assert.match(source, /translateElement\(element, dx, dy\)/);
+});
+
+test("PDF sessions isolate file state and maintain only live plugin data", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const updateSource = source.slice(source.indexOf("updateFile(file: TFile)"), source.indexOf("private async loadEditableAnnotations"));
+  const verificationSource = source.slice(source.indexOf("private async loadVerifiedAnnotationRecord"), source.indexOf("private async ensureAdapterFolder"));
+
+  assert.match(source, /this\.app\.vault\.on\("delete"[\s\S]{0,220}?scheduleDataMaintenance\(DATA_MAINTENANCE_DELETE_DELAY_MS\)/);
+  assert.match(source, /this\.app\.vault\.on\("rename"[\s\S]{0,220}?migratePdfData\(oldPath, file\.path\)/);
+  assert.match(source, /private async pruneObsoletePdfData\(\)/);
+  assert.match(source, /state\.filePath !== keyPath \|\| elements\.length === 0/);
+  assert.match(source, /unreferencedAndOld/);
+  assert.match(source, /getAnnotationStatePathForPath/);
+  assert.match(verificationSource, /filePath !== file\.path/);
+  assert.match(verificationSource, /parsed\.pdfFingerprint\.sha256 !== currentFingerprint\.sha256/);
+  assert.match(verificationSource, /removeAdapterFile\(this\.getAnnotationStatePath\(file\)\)/);
+  assert.doesNotMatch(verificationSource, /pendingInk/);
+  for (const reset of [
+    "clearOverlayCanvases", "cropByPage.clear", "imageCache.clear", "selectedPageIndexes.clear",
+    "nativeInkScannedPages.clear", "savedInkIsBurnedIntoPdf = false", "savedTextIsBurnedIntoPdf = false"
+  ]) {
+    assert.ok(updateSource.includes(reset), `missing PDF switch reset: ${reset}`);
+  }
+});
+
+test("PDF loading keeps canvases and native ink work near the active viewport", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /adapter\.exists\(this\.getAnnotationStatePath\(file\)\)/);
+  assert.match(source, /\.filter\(\(item\) => this\.isPageElementNearViewport\(item\.pageEl\)\)/);
+  assert.match(source, /\.slice\(0, 12\)/);
+  assert.match(source, /cleanupUnretainedOverlays\(retainedElements\)/);
+  assert.match(source, /this\.scheduleScanPages\(90\)/);
+  assert.match(source, /private pruneImageCache\(\)/);
 });
 
 test("selection interiors move while only the four visible corner handles resize", async () => {
@@ -55,6 +91,7 @@ test("all requested visual formats share the page capture pipeline", async () =>
   assert.match(source, /buildCombinedPagePng\(pages\)/);
   assert.match(source, /buildPptxFromPageImages\(pages, this\.file\.basename\)/);
   assert.match(source, /buildSelfContainedVisualHtml\(this\.file, pages\)/);
+  assert.match(source, /id: "export-annotations-html"[\s\S]{0,320}?session\.exportConvertedHtml\(\)/);
   assert.match(source, /buildDocxFromPageImages\(pages, this\.file\.basename\)/);
   assert.match(source, /for \(const element of elements\.filter\(\(candidate\) => candidate\.pageIndex === overlay\.pageIndex\)\) \{/);
   assert.match(source, /element\.kind === "cover" && options\.includeCovers !== false/);
@@ -171,6 +208,27 @@ test("document exports use native editable text, tables, links, and image-only v
   assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
   assert.doesNotMatch(source, /w:right="\$\{rightTwips\}"/);
   assert.doesNotMatch(source, /<w:vanish\/>/);
+});
+
+test("HTML conversion uses compact flow layout with responsive real images", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const htmlSource = source.slice(
+    source.indexOf("function buildHtmlExportDocumentFromVisualPages"),
+    source.indexOf("async function buildDocxFromPageImages")
+  );
+
+  assert.match(htmlSource, /function buildHtmlExportDocumentFromVisualPages/);
+  assert.match(htmlSource, /\.filter\(isUsefulHtmlExportImage\)/);
+  assert.match(htmlSource, /estimatedBytes >= 2_500 \|\| image\.width \* image\.height >= 0\.004/);
+  assert.match(htmlSource, /<figure class="block block-visual/);
+  assert.match(htmlSource, /class="page-annotations"/);
+  assert.match(htmlSource, /\.filter\(\(page\) => page\.blocks\.length > 0\)/);
+  assert.match(htmlSource, /\.block-image\{height:auto;max-height:760px;object-fit:contain;width:100%\}/);
+  assert.match(htmlSource, /font-size:\$\{clamp\(15 \* run\.fontSize \/ baseFontSize, 10, 36\)/);
+  assert.doesNotMatch(htmlSource, /aspect-ratio:/);
+  assert.doesNotMatch(htmlSource, /position:absolute/);
+  assert.doesNotMatch(htmlSource, /container-type:/);
+  assert.match(source, /function buildNativeExportDocumentFromVisualPages[\s\S]{0,600}?\.filter\(isUsefulNativeExportImage\)/);
 });
 
 test("comments and element layers are interactive, persistent, and shared by rendering and export", async () => {
@@ -292,7 +350,7 @@ test("text selection supports no highlight and frequent rendering work is frame-
   assert.match(source, /private scheduleVisibleOverlayRefresh\(\): void[\s\S]{0,420}?window\.requestAnimationFrame/);
   assert.match(source, /private scheduleExternalInkLayerUpdate\(\): void[\s\S]{0,420}?window\.requestAnimationFrame/);
   assert.match(source, /overlay\.geometryFrame = window\.requestAnimationFrame/);
-  assert.match(source, /private redrawAll\(\): void \{\s*this\.scheduleExternalInkLayerUpdate\(\)/);
+  assert.match(source, /private redrawAll\(\): void \{\s*this\.pruneImageCache\(\);\s*this\.scheduleExternalInkLayerUpdate\(\)/);
   assert.doesNotMatch(source.slice(source.indexOf("private moveSelectionInteraction"), source.indexOf("private onPointerUp")), /updateExternalInkLayerState/);
 });
 

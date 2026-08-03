@@ -12,6 +12,8 @@ type PdfFontkitModule = typeof import("@pdf-lib/fontkit");
 
 const AUTO_SAVE_IDLE_DELAY_MS = 5200;
 const AUTO_SAVE_CLOSE_DELAY_MS = 200;
+const DATA_MAINTENANCE_DELETE_DELAY_MS = 30_000;
+const DATA_MAINTENANCE_START_DELAY_MS = 15_000;
 const OVERLAY_HEALTH_CHECK_MS = 5000;
 const OVERLAY_MAX_DPR = 2;
 const PDF_ZOOM_SETTLE_DELAY_MS = 160;
@@ -1653,6 +1655,9 @@ interface PdfInkEditTransactionRecord {
 
 export default class PdftionPlugin extends Plugin {
   private annotationFontBytes: Uint8Array | null = null;
+  private dataMaintenancePending = false;
+  private dataMaintenanceRunning = false;
+  private dataMaintenanceTimer: number | null = null;
   private inkCommitPromises = new Map<string, Promise<boolean>>();
   private missingPdfSurfaces = new Map<HTMLElement, number>();
   private sessions = new Map<HTMLElement, InkSession>();
@@ -1731,6 +1736,19 @@ export default class PdftionPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "export-annotations-html",
+      name: uiText("导出 HTML", "Export HTML"),
+      callback: () => {
+        const session = this.getActivePdfSession();
+        if (!session) {
+          new Notice(uiText("请先打开 PDF。", "Open a PDF first."));
+          return;
+        }
+        void session.exportConvertedHtml();
+      }
+    });
+
+    this.addCommand({
       id: "show-pdf-page-navigator",
       name: uiText("打开页面导航", "Show page navigator"),
       callback: () => {
@@ -1765,12 +1783,24 @@ export default class PdftionPlugin extends Plugin {
       this.flushSessionsOutsideFile(file);
       this.queuePdfSurfaceScans();
     }));
+    this.registerEvent(this.app.vault.on("delete", (file) => {
+      if (file instanceof TFile && file.extension.toLowerCase() === "pdf") {
+        this.scheduleDataMaintenance(DATA_MAINTENANCE_DELETE_DELAY_MS);
+      }
+    }));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      if (file instanceof TFile && (file.extension.toLowerCase() === "pdf" || oldPath.toLowerCase().endsWith(".pdf"))) {
+        void this.migratePdfData(oldPath, file.path);
+      }
+    }));
     this.registerDomEvent(activeDocument, "pointerdown", (event) => this.commitEditorsOnOutsidePointer(event), { capture: true });
     this.registerDomEvent(activeWindow, "pagehide", () => this.checkpointAllSessionsSoon());
     this.registerDomEvent(activeWindow, "beforeunload", () => this.checkpointAllSessionsSoon());
     this.register(() => this.clearSurfaceScanTimers());
+    this.register(() => this.clearDataMaintenanceTimer());
 
     this.queuePdfSurfaceScans();
+    this.scheduleDataMaintenance(DATA_MAINTENANCE_START_DELAY_MS);
     this.installAiApi();
   }
 
@@ -1801,6 +1831,7 @@ export default class PdftionPlugin extends Plugin {
     this.sessions.clear();
     this.missingPdfSurfaces.clear();
     this.clearSurfaceScanTimers();
+    this.clearDataMaintenanceTimer();
   }
 
   refreshGlobalEditingClass(): void {
@@ -1821,7 +1852,7 @@ export default class PdftionPlugin extends Plugin {
 
   private queuePdfSurfaceScans(): void {
     this.clearSurfaceScanTimers();
-    for (const delay of [0, 80, 180, 420, 900, 1800, 3200]) {
+    for (const delay of [0, 120, 480, 1400, 3200]) {
       const timer = window.setTimeout(() => {
         this.surfaceScanTimers = this.surfaceScanTimers.filter((value) => value !== timer);
         this.scanPdfSurfaces();
@@ -1835,6 +1866,277 @@ export default class PdftionPlugin extends Plugin {
       window.clearTimeout(timer);
     }
     this.surfaceScanTimers = [];
+  }
+
+  private scheduleDataMaintenance(delay: number): void {
+    this.clearDataMaintenanceTimer();
+    this.dataMaintenanceTimer = window.setTimeout(() => {
+      this.dataMaintenanceTimer = null;
+      void this.runDataMaintenance();
+    }, delay);
+  }
+
+  private clearDataMaintenanceTimer(): void {
+    if (this.dataMaintenanceTimer !== null) {
+      window.clearTimeout(this.dataMaintenanceTimer);
+      this.dataMaintenanceTimer = null;
+    }
+  }
+
+  private async runDataMaintenance(): Promise<void> {
+    if (this.dataMaintenanceRunning) {
+      this.dataMaintenancePending = true;
+      return;
+    }
+    this.dataMaintenanceRunning = true;
+    let removed = 0;
+    try {
+      removed = await this.pruneObsoletePdfData();
+      if (removed > 0) {
+        console.info(`pdftion removed ${removed} obsolete data files.`);
+      }
+    } catch (error) {
+      console.warn("pdftion could not finish background data maintenance.", error);
+    } finally {
+      this.dataMaintenanceRunning = false;
+      if (this.dataMaintenancePending) {
+        this.dataMaintenancePending = false;
+        this.scheduleDataMaintenance(1000);
+      }
+    }
+  }
+
+  private async listAdapterFiles(dir: string): Promise<string[]> {
+    try {
+      return (await this.app.vault.adapter.list(dir)).files ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  private async removeAdapterFile(path: string): Promise<boolean> {
+    try {
+      if (!(await this.app.vault.adapter.exists(path))) {
+        return false;
+      }
+      await this.app.vault.adapter.remove(path);
+      return true;
+    } catch (error) {
+      console.debug("pdftion could not remove obsolete data.", path, error);
+      return false;
+    }
+  }
+
+  private async moveAdapterFile(from: string, to: string): Promise<boolean> {
+    if (!(await this.app.vault.adapter.exists(from))) {
+      return false;
+    }
+    if (await this.app.vault.adapter.exists(to)) {
+      await this.app.vault.adapter.remove(to);
+    }
+    await this.app.vault.adapter.rename(from, to);
+    return true;
+  }
+
+  private async adapterFileIsOlderThan(path: string, ageMs: number): Promise<boolean> {
+    try {
+      const stat = await this.app.vault.adapter.stat(path);
+      return Boolean(stat && Date.now() - stat.mtime >= ageMs);
+    } catch {
+      return false;
+    }
+  }
+
+  private getAnnotationStatePathForPath(filePath: string): string {
+    return `${this.manifest.dir}/data/annotations/${safeAnnotationKey(filePath)}.json`;
+  }
+
+  private async migratePdfData(oldPath: string, newPath: string): Promise<void> {
+    if (oldPath === newPath) {
+      return;
+    }
+    const oldKey = safeAnnotationKey(oldPath);
+    const newKey = safeAnnotationKey(newPath);
+    try {
+      const oldStatePath = this.getAnnotationStatePathForPath(oldPath);
+      const newStatePath = this.getAnnotationStatePathForPath(newPath);
+      if (await this.app.vault.adapter.exists(oldStatePath)) {
+        const state = JSON.parse(await this.app.vault.adapter.read(oldStatePath)) as Record<string, unknown>;
+        state.filePath = newPath;
+        await this.app.vault.adapter.write(newStatePath, JSON.stringify(state, null, 2));
+        await this.removeAdapterFile(oldStatePath);
+      }
+
+      const baseDir = `${this.manifest.dir}/data/base-pdfs`;
+      for (const path of await this.listAdapterFiles(baseDir)) {
+        const name = path.slice(path.lastIndexOf("/") + 1);
+        if (name.startsWith(`${oldKey}--`)) {
+          await this.moveAdapterFile(path, `${baseDir}/${newKey}${name.slice(oldKey.length)}`);
+        }
+      }
+
+      const rewriteDir = `${this.manifest.dir}/data/rewrite-backups`;
+      const oldRewritePdf = `${rewriteDir}/${oldKey}.pdf`;
+      const newRewritePdf = `${rewriteDir}/${newKey}.pdf`;
+      const oldRewriteJson = `${rewriteDir}/${oldKey}.json`;
+      const newRewriteJson = `${rewriteDir}/${newKey}.json`;
+      await this.moveAdapterFile(oldRewritePdf, newRewritePdf);
+      if (await this.app.vault.adapter.exists(oldRewriteJson)) {
+        const record = JSON.parse(await this.app.vault.adapter.read(oldRewriteJson)) as Partial<PdfRewriteBackupRecord>;
+        record.filePath = newPath;
+        record.pdfPath = newRewritePdf;
+        await this.app.vault.adapter.write(newRewriteJson, JSON.stringify(record, null, 2));
+        await this.removeAdapterFile(oldRewriteJson);
+      }
+
+      const transactionDir = `${this.manifest.dir}/data/ink-edit-transactions`;
+      const oldTransactionJson = `${transactionDir}/${oldKey}.json`;
+      const newTransactionJson = `${transactionDir}/${newKey}.json`;
+      if (await this.app.vault.adapter.exists(oldTransactionJson)) {
+        const record = JSON.parse(await this.app.vault.adapter.read(oldTransactionJson)) as PdfInkEditTransactionRecord;
+        const newBackupPdfPath = `${transactionDir}/${newKey}.pdf`;
+        const newBackupStatePath = record.backupAnnotationStatePath ? `${transactionDir}/${newKey}.state.json` : undefined;
+        await this.moveAdapterFile(record.backupPdfPath, newBackupPdfPath);
+        if (record.backupAnnotationStatePath && newBackupStatePath) {
+          await this.moveAdapterFile(record.backupAnnotationStatePath, newBackupStatePath);
+        }
+        record.filePath = newPath;
+        record.backupPdfPath = newBackupPdfPath;
+        record.backupAnnotationStatePath = newBackupStatePath;
+        await this.app.vault.adapter.write(newTransactionJson, JSON.stringify(record, null, 2));
+        await this.removeAdapterFile(oldTransactionJson);
+      }
+    } catch (error) {
+      console.warn("pdftion could not migrate PDF data after rename.", oldPath, newPath, error);
+    } finally {
+      this.scheduleDataMaintenance(1000);
+    }
+  }
+
+  private async pruneObsoletePdfData(): Promise<number> {
+    const dataDir = `${this.manifest.dir}/data`;
+    const annotationDir = `${dataDir}/annotations`;
+    const baseDir = `${dataDir}/base-pdfs`;
+    const rewriteDir = `${dataDir}/rewrite-backups`;
+    const transactionDir = `${dataDir}/ink-edit-transactions`;
+    const referencedBasePaths = new Set<string>();
+    let removed = 0;
+    let processed = 0;
+    const yieldIfNeeded = async (): Promise<void> => {
+      processed += 1;
+      if (processed % 12 === 0) {
+        await sleepMs(0);
+      }
+    };
+    const remove = async (path: string): Promise<void> => {
+      if (await this.removeAdapterFile(path)) {
+        removed += 1;
+      }
+      await yieldIfNeeded();
+    };
+
+    for (const path of await this.listAdapterFiles(annotationDir)) {
+      if (!path.endsWith(".json")) {
+        continue;
+      }
+      const name = path.slice(path.lastIndexOf("/") + 1, -5);
+      let keyPath = "";
+      try {
+        keyPath = decodeURIComponent(name);
+      } catch {
+        await remove(path);
+        continue;
+      }
+      try {
+        const state = JSON.parse(await this.app.vault.adapter.read(path)) as Partial<AnnotationStateRecord>;
+        const source = this.app.vault.getAbstractFileByPath(keyPath);
+        const elements = Array.isArray(state.elements) ? state.elements.filter(isInkElement) : [];
+        if (!(source instanceof TFile) || source.extension.toLowerCase() !== "pdf" || state.filePath !== keyPath || elements.length === 0) {
+          await remove(path);
+          continue;
+        }
+        if (isPdfFingerprint(state.basePdfFingerprint)) {
+          referencedBasePaths.add(`${baseDir}/${safeAnnotationKey(keyPath)}--${state.basePdfFingerprint.sha256}.pdf`);
+        }
+        await yieldIfNeeded();
+      } catch {
+        await remove(path);
+      }
+    }
+
+    for (const path of await this.listAdapterFiles(baseDir)) {
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      const match = name.match(/^(.*)--([0-9a-f]{64})\.pdf$/i);
+      if (!match) {
+        await remove(path);
+        continue;
+      }
+      let sourcePath = "";
+      try {
+        sourcePath = decodeURIComponent(match[1]);
+      } catch {
+        await remove(path);
+        continue;
+      }
+      const source = this.app.vault.getAbstractFileByPath(sourcePath);
+      const unreferencedAndOld = !referencedBasePaths.has(path) && await this.adapterFileIsOlderThan(path, 60 * 60 * 1000);
+      if (!(source instanceof TFile) || source.extension.toLowerCase() !== "pdf" || unreferencedAndOld) {
+        await remove(path);
+      } else {
+        await yieldIfNeeded();
+      }
+    }
+
+    const validRewritePdfs = new Set<string>();
+    for (const path of (await this.listAdapterFiles(rewriteDir)).filter((item) => item.endsWith(".json"))) {
+      try {
+        const record = JSON.parse(await this.app.vault.adapter.read(path)) as PdfRewriteBackupRecord;
+        const source = this.app.vault.getAbstractFileByPath(record.filePath);
+        if (!(source instanceof TFile) || source.extension.toLowerCase() !== "pdf" || !(await this.app.vault.adapter.exists(record.pdfPath))) {
+          await remove(record.pdfPath);
+          await remove(path);
+          continue;
+        }
+        validRewritePdfs.add(record.pdfPath);
+        await yieldIfNeeded();
+      } catch {
+        await remove(path);
+      }
+    }
+    for (const path of (await this.listAdapterFiles(rewriteDir)).filter((item) => item.endsWith(".pdf"))) {
+      if (!validRewritePdfs.has(path)) {
+        await remove(path);
+      }
+    }
+
+    const validTransactionFiles = new Set<string>();
+    for (const path of (await this.listAdapterFiles(transactionDir)).filter((item) => item.endsWith(".json"))) {
+      try {
+        const record = JSON.parse(await this.app.vault.adapter.read(path)) as PdfInkEditTransactionRecord;
+        const source = this.app.vault.getAbstractFileByPath(record.filePath);
+        if (!(source instanceof TFile) || source.extension.toLowerCase() !== "pdf" || !(await this.app.vault.adapter.exists(record.backupPdfPath))) {
+          await remove(record.backupPdfPath);
+          if (record.backupAnnotationStatePath) {
+            await remove(record.backupAnnotationStatePath);
+          }
+          await remove(path);
+          continue;
+        }
+        validTransactionFiles.add(record.backupPdfPath);
+        if (record.backupAnnotationStatePath) {
+          validTransactionFiles.add(record.backupAnnotationStatePath);
+        }
+        await yieldIfNeeded();
+      } catch {
+        await remove(path);
+      }
+    }
+    for (const path of await this.listAdapterFiles(transactionDir)) {
+      if (!path.endsWith(".json") && !validTransactionFiles.has(path)) {
+        await remove(path);
+      }
+    }
+    return removed;
   }
 
   async loadAnnotationFontBytes(): Promise<Uint8Array> {
@@ -1853,6 +2155,9 @@ export default class PdftionPlugin extends Plugin {
   }
 
   async loadAnnotationState(file: TFile): Promise<{ elements: InkElement[]; overlayAnnotationsOnly: boolean; overlayTextOnly: boolean } | null> {
+    if (!(await this.app.vault.adapter.exists(this.getAnnotationStatePath(file)))) {
+      return null;
+    }
     const currentBytes = await this.app.vault.readBinary(file);
     const currentFingerprint = await fingerprintPdfBytes(currentBytes, file.stat.mtime);
     const state = await this.loadVerifiedAnnotationRecord(file, currentFingerprint);
@@ -1955,7 +2260,7 @@ export default class PdftionPlugin extends Plugin {
   }
 
   private getAnnotationStatePath(file: TFile): string {
-    return `${this.manifest.dir}/data/annotations/${safeAnnotationKey(file.path)}.json`;
+    return this.getAnnotationStatePathForPath(file.path);
   }
 
   private getBasePdfPath(file: TFile, sha256: string): string {
@@ -1983,11 +2288,14 @@ export default class PdftionPlugin extends Plugin {
         return null;
       }
       const filePath = typeof parsed.filePath === "string" ? parsed.filePath : undefined;
-      const pendingInk = parsed.elements
-        .filter(isInkElement)
-        .some((element) => element.kind === "stroke" && element.pdfSaved !== true);
-      if (parsed.pdfFingerprint.sha256 !== currentFingerprint.sha256 && !(pendingInk && filePath === file.path)) {
+      if (filePath !== file.path) {
+        console.warn("pdftion removed annotation state assigned to another PDF.", file.path, filePath);
+        await this.removeAdapterFile(this.getAnnotationStatePath(file));
+        return null;
+      }
+      if (parsed.pdfFingerprint.sha256 !== currentFingerprint.sha256) {
         console.warn("pdftion skipped annotation state for a replaced PDF.", file.path);
+        await this.removeAdapterFile(this.getAnnotationStatePath(file));
         return null;
       }
 
@@ -2980,6 +3288,7 @@ class InkSession {
   private recentInkGroup: RecentInkGroup | null = null;
   private selectionDrag: SelectionDragState | null = null;
   private nativeSelection: PdfNativeObject | null = null;
+  private nativeInkScannedPages = new Set<number>();
   private pendingImageCrop: PdfNativeObject | null = null;
   private pageNavigator: HTMLElement | null = null;
   private commentManager: HTMLElement | null = null;
@@ -3051,6 +3360,7 @@ class InkSession {
       signal: this.nativeTextSelectionAbort.signal
     });
     this.rootEl.addEventListener("scroll", () => {
+      this.scheduleScanPages(90);
       this.scheduleEditableInkPrepare(180);
       this.scheduleVisibleOverlayRefresh();
     }, {
@@ -3059,6 +3369,7 @@ class InkSession {
       signal: this.nativeTextSelectionAbort.signal
     });
     activeDocument.addEventListener("scroll", () => {
+      this.scheduleScanPages(90);
       this.scheduleEditableInkPrepare(180);
       this.scheduleVisibleOverlayRefresh();
     }, {
@@ -3144,6 +3455,7 @@ class InkSession {
       overlay.pageEl.classList.remove("pdftion-page", "pdftion-hide-native-ink-layer");
     }
     this.overlays.clear();
+    this.imageCache.clear();
     this.pendingImageCrop = null;
     this.rootEl.classList.remove("pdftion-enabled", "pdftion-root", "pdftion-selecting");
     this.plugin.refreshGlobalEditingClass();
@@ -3172,12 +3484,19 @@ class InkSession {
     }
     this.restoreHiddenNativeInkAnnotations();
     this.closeNativeTextEditor(false);
+    this.clearOverlayCanvases();
     this.file = file;
     this.clearAutoSaveTimer();
     this.clearEditableInkPrepareTimer();
     this.clearCurrentStroke();
+    this.currentCover = null;
     this.recentInkGroup = null;
+    this.activeTouchId = null;
+    this.touchScroll = null;
     this.dirty = false;
+    this.cropByPage.clear();
+    this.cropPreview = null;
+    this.imageCache.clear();
     this.pendingNativeInkHidePages.clear();
     this.dirtyInkPages.clear();
     this.deletedExternalInkIds.clear();
@@ -3189,10 +3508,16 @@ class InkSession {
     this.clearEditableSelection();
     this.hideNativeTextSelectionMenu();
     this.pendingImageCrop = null;
+    this.selectedPageIndexes.clear();
+    this.savedInkIsBurnedIntoPdf = false;
+    this.savedTextIsBurnedIntoPdf = false;
+    this.lastTap = null;
+    this.nativeTextAutoHighlight = null;
     this.strokeHistory = [];
     this.textHistory = [];
     this.coverHistory = [];
     this.imageHistory = [];
+    this.nativeInkScannedPages.clear();
     this.clearLayerLongPress();
     this.layerMenu?.remove();
     this.layerMenu = null;
@@ -3202,12 +3527,21 @@ class InkSession {
     this.commentManager = null;
     this.commentPopover?.remove();
     this.commentPopover = null;
+    this.pageNavigator?.remove();
+    this.pageNavigator = null;
     this.detachedInkEditPages.clear();
     this.loadedAnnotationState = false;
     this.annotationLoadToken += 1;
     this.annotationLoadPromise = null;
     void this.loadEditableAnnotations();
     this.redrawAll();
+  }
+
+  private clearOverlayCanvases(): void {
+    for (const overlay of this.overlays.values()) {
+      overlay.staticCanvas.width = overlay.staticCanvas.width;
+      overlay.canvas.width = overlay.canvas.width;
+    }
   }
 
   private async loadEditableAnnotations(): Promise<void> {
@@ -3233,10 +3567,7 @@ class InkSession {
     if (loadToken !== this.annotationLoadToken || this.file.path !== filePath) {
       return;
     }
-    const pdfInkStrokes = state ? [] : await this.plugin.loadPdfInkAnnotations(this.file);
-    if (loadToken !== this.annotationLoadToken || this.file.path !== filePath) {
-      return;
-    }
+    const pdfInkStrokes: InkStroke[] = [];
     const loadedElements: InkElement[] = [
       ...(state?.elements ?? []),
       ...pdfInkStrokes.filter((stroke) => !(state?.elements ?? []).some((element) => (
@@ -3295,9 +3626,20 @@ class InkSession {
     this.cleanupDetachedOverlays();
 
     const pageEls = this.findPageElements();
-    for (let i = 0; i < pageEls.length; i += 1) {
-      this.ensureOverlay(pageEls[i], i);
+    const viewportCenter = activeWindow.innerHeight / 2;
+    const retainedPages = pageEls
+      .map((pageEl, index) => {
+        const rect = pageEl.getBoundingClientRect();
+        return { distance: Math.abs((rect.top + rect.bottom) / 2 - viewportCenter), index, pageEl };
+      })
+      .filter((item) => this.isPageElementNearViewport(item.pageEl))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 12);
+    const retainedElements = new Set(retainedPages.map((item) => item.pageEl));
+    for (const item of retainedPages) {
+      this.ensureOverlay(item.pageEl, item.index);
     }
+    this.cleanupUnretainedOverlays(retainedElements);
 
     if (this.enabled) {
       this.rememberNativeInkHidePagesForCurrentPages();
@@ -4247,9 +4589,21 @@ class InkSession {
     if (pageIndexes?.size === 0) {
       return false;
     }
+    const pagesToScan = pageIndexes
+      ? new Set(Array.from(pageIndexes).filter((pageIndex) => !this.nativeInkScannedPages.has(pageIndex)))
+      : undefined;
+    if (pagesToScan?.size === 0) {
+      return false;
+    }
     const targetPath = this.file.path;
-    const pdfInkStrokes = await this.plugin.loadPdfInkAnnotations(this.file, pageIndexes);
-    if (this.file.path !== targetPath || pdfInkStrokes.length === 0) {
+    const pdfInkStrokes = await this.plugin.loadPdfInkAnnotations(this.file, pagesToScan);
+    if (this.file.path !== targetPath) {
+      return false;
+    }
+    for (const pageIndex of pagesToScan ?? []) {
+      this.nativeInkScannedPages.add(pageIndex);
+    }
+    if (pdfInkStrokes.length === 0) {
       return false;
     }
 
@@ -8084,10 +8438,20 @@ class InkSession {
   }
 
   private redrawAll(): void {
+    this.pruneImageCache();
     this.scheduleExternalInkLayerUpdate();
     for (const overlay of this.overlays.values()) {
       if (this.isOverlayNearViewport(overlay)) {
         this.requestOverlayRedraw(overlay);
+      }
+    }
+  }
+
+  private pruneImageCache(): void {
+    const activeDataUrls = new Set(this.imageHistory.map((image) => image.dataUrl));
+    for (const dataUrl of this.imageCache.keys()) {
+      if (!activeDataUrls.has(dataUrl)) {
+        this.imageCache.delete(dataUrl);
       }
     }
   }
@@ -8114,7 +8478,11 @@ class InkSession {
   }
 
   private isOverlayNearViewport(overlay: PageOverlay): boolean {
-    const rect = overlay.pageEl.getBoundingClientRect();
+    return this.isPageElementNearViewport(overlay.pageEl);
+  }
+
+  private isPageElementNearViewport(pageEl: HTMLElement): boolean {
+    const rect = pageEl.getBoundingClientRect();
     const margin = Math.max(activeWindow.innerHeight * 1.5, 900);
     return rect.bottom >= -margin && rect.top <= activeWindow.innerHeight + margin;
   }
@@ -10689,23 +11057,42 @@ class InkSession {
       if (this.rootEl.contains(pageEl)) {
         continue;
       }
-
-      overlay.abort.abort();
-      overlay.resizeObserver?.disconnect();
-      if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
-        window.cancelAnimationFrame(overlay.redrawFrame);
-      }
-      if (overlay.geometryFrame !== null && overlay.geometryFrame !== undefined) {
-        window.cancelAnimationFrame(overlay.geometryFrame);
-      }
-      if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
-        window.clearTimeout(overlay.resizeTimer);
-      }
-      overlay.canvas.remove();
-      overlay.staticCanvas.remove();
-      pageEl.classList.remove("pdftion-page", "pdftion-hide-native-ink-layer");
-      this.overlays.delete(pageEl);
+      this.releaseOverlay(pageEl, overlay);
     }
+  }
+
+  private cleanupUnretainedOverlays(retained: Set<HTMLElement>): void {
+    for (const [pageEl, overlay] of this.overlays.entries()) {
+      if (!retained.has(pageEl)) {
+        this.releaseOverlay(pageEl, overlay);
+      }
+    }
+  }
+
+  private releaseOverlay(pageEl: HTMLElement, overlay: PageOverlay): void {
+    for (const [element, snapshot] of Array.from(this.hiddenNativeAnnotationStyles)) {
+      if (pageEl.contains(element)) {
+        if (element.isConnected) {
+          this.restoreHiddenNativeAnnotationElement(element, snapshot);
+        }
+        this.hiddenNativeAnnotationStyles.delete(element);
+      }
+    }
+    overlay.abort.abort();
+    overlay.resizeObserver?.disconnect();
+    if (overlay.redrawFrame !== null && overlay.redrawFrame !== undefined) {
+      window.cancelAnimationFrame(overlay.redrawFrame);
+    }
+    if (overlay.geometryFrame !== null && overlay.geometryFrame !== undefined) {
+      window.cancelAnimationFrame(overlay.geometryFrame);
+    }
+    if (overlay.resizeTimer !== null && overlay.resizeTimer !== undefined) {
+      window.clearTimeout(overlay.resizeTimer);
+    }
+    overlay.canvas.remove();
+    overlay.staticCanvas.remove();
+    pageEl.classList.remove("pdftion-page", "pdftion-hide-native-ink-layer");
+    this.overlays.delete(pageEl);
   }
 }
 
@@ -11614,6 +12001,24 @@ function buildNativeExportDocumentFromVisualPages(pages: VisualConversionPage[])
   }));
   const images: NoteDrawExportImage[] = pages.flatMap((page) => page.images
     .filter(isUsefulNativeExportImage)
+    .map((image) => ({
+      ...image,
+      assetMime: dataUrlMimeType(image.dataUrl),
+      assetName: `pdftion-image-${image.id}.${dataUrlImageExtension(image.dataUrl)}`,
+      pageIndex: page.pageIndex
+    })));
+  return buildNativeExportDocument(editablePages, images);
+}
+
+function buildHtmlExportDocumentFromVisualPages(pages: VisualConversionPage[]): NativeExportDocument {
+  const editablePages = pages.map((page) => ({
+    height: page.height,
+    lines: page.lines,
+    pageIndex: page.pageIndex,
+    width: page.width
+  }));
+  const images: NoteDrawExportImage[] = pages.flatMap((page) => page.images
+    .filter(isUsefulHtmlExportImage)
     .map((image) => ({
       ...image,
       assetMime: dataUrlMimeType(image.dataUrl),
@@ -12810,6 +13215,14 @@ function isUsefulNativeExportImage(image: VisualConversionImage): boolean {
   return estimatedBytes >= 16_000 || image.width * image.height >= 0.12;
 }
 
+function isUsefulHtmlExportImage(image: VisualConversionImage): boolean {
+  if (!image.id.startsWith("pdf-raster-page-")) {
+    return true;
+  }
+  const estimatedBytes = estimatedDataUrlBytes(image.dataUrl);
+  return estimatedBytes >= 2_500 || image.width * image.height >= 0.004;
+}
+
 function estimatedDataUrlBytes(dataUrl: string): number {
   const separator = dataUrl.indexOf(",");
   return separator >= 0 ? Math.floor((dataUrl.length - separator - 1) * 0.75) : 0;
@@ -13297,70 +13710,82 @@ function getNativeExportBlockPrefix(block: NativeExportBlock): string {
   return "";
 }
 
+function isHtmlAnnotationExportImage(image: VisualConversionImage): boolean {
+  return /^pdftion-(?:cover|stroke)-/.test(image.id);
+}
+
+function getHtmlVisualAlignment(image: VisualConversionImage): "center" | "left" | "right" {
+  const center = image.x + image.width / 2;
+  if (center < 0.38) return "left";
+  if (center > 0.62) return "right";
+  return "center";
+}
+
 function renderNativeExportHtmlBlock(
   block: NativeExportBlock,
-  page: NativeExportPage,
   document: NativeExportDocument
 ): string {
-  const position = `left:${(block.left * 100).toFixed(4)}%;top:${(block.top * 100).toFixed(4)}%;width:${(block.width * 100).toFixed(4)}%;min-height:${((block.height ?? 0.01) * 100).toFixed(4)}%`;
   if (block.kind === "image" && block.image) {
     const image = block.image;
-    const imageMarkup = `<img class="block-image" src="${htmlAttributeEscape(image.dataUrl)}" alt="${htmlAttributeEscape(image.assetName)}" style="${position};height:${(image.height * 100).toFixed(4)}%;opacity:${clamp(image.opacity, 0, 1).toFixed(3)};z-index:${image.zIndex ?? 0}">`;
-    return image.link
+    const annotation = isHtmlAnnotationExportImage(image);
+    const visualKind = annotation ? "annotation" : image.id.startsWith("pdf-raster-page-") ? "native" : "embedded";
+    const width = clamp(image.width * 100, annotation ? 12 : visualKind === "native" ? 24 : 10, 100);
+    const align = getHtmlVisualAlignment(image);
+    const imageMarkup = `<img class="block-image" src="${htmlAttributeEscape(image.dataUrl)}" alt="${htmlAttributeEscape(image.assetName)}">`;
+    const linkedImage = image.link
       ? `<a class="block-image-link" href="${htmlAttributeEscape(image.link)}">${imageMarkup}</a>`
       : imageMarkup;
+    return `<figure class="block block-visual block-visual-${visualKind} align-${align}" style="--visual-width:${width.toFixed(2)}%;--visual-opacity:${clamp(image.opacity, 0, 1).toFixed(3)}">${linkedImage}</figure>`;
   }
   if (block.kind === "separator") {
-    return `<hr class="block block-separator" style="${position}">`;
+    return `<hr class="block block-separator">`;
   }
   if (block.kind === "table" && block.table) {
     const rows = block.table.rows.map((row) => `<tr>${row.map((cell) => (
-      `<td>${renderNativeHtmlRuns(cell.runs, block, page, document)}</td>`
+      `<td>${renderNativeHtmlRuns(cell.runs, block, document)}</td>`
     )).join("")}</tr>`).join("");
-    return `<table class="block block-table" style="${position}"><tbody>${rows}</tbody></table>`;
+    return `<div class="block-table-wrap"><table class="block block-table"><tbody>${rows}</tbody></table></div>`;
   }
   const prefix = getNativeExportBlockPrefix(block);
-  const content = `${prefix ? `<span>${htmlEscape(prefix)}</span>` : ""}${renderNativeHtmlRuns(block.runs, block, page, document)}`;
-  const style = `${position};${block.listLevel ? `padding-left:${block.listLevel * 1.4}cqw;` : ""}`;
+  const content = `${prefix ? `<span>${htmlEscape(prefix)}</span>` : ""}${renderNativeHtmlRuns(block.runs, block, document)}`;
+  const style = block.listLevel ? ` style="--list-indent:${(1.5 + block.listLevel * 1.25).toFixed(2)}rem"` : "";
   if (block.kind === "heading") {
     const level = clamp(block.headingLevel ?? 1, 1, 6);
-    return `<h${level} class="block" style="${style}">${content}</h${level}>`;
+    return `<h${level} class="block">${content}</h${level}>`;
   }
   if (block.kind === "code") {
-    return `<pre class="block block-code" style="${style}"><code>${block.runs.map((run) => htmlEscape(run.text)).join("")}</code></pre>`;
+    return `<pre class="block block-code"><code>${renderNativeHtmlRuns(block.runs, block, document)}</code></pre>`;
   }
   if (block.kind === "quote") {
-    return `<blockquote class="block block-quote" style="${style}">${content}</blockquote>`;
+    return `<blockquote class="block block-quote"${style}>${content}</blockquote>`;
   }
   if (block.kind === "callout-title" || block.kind === "callout-body") {
-    return `<aside class="block block-callout" style="${style}">${content}</aside>`;
+    return `<aside class="block block-callout"${style}>${content}</aside>`;
   }
   if (block.kind === "unordered-list") {
-    return `<ul class="block block-list" style="${style}"><li>${renderNativeHtmlRuns(block.runs, block, page, document)}</li></ul>`;
+    return `<ul class="block block-list"${style}><li>${renderNativeHtmlRuns(block.runs, block, document)}</li></ul>`;
   }
   if (block.kind === "ordered-list") {
-    return `<ol class="block block-list" start="${block.ordinal ?? 1}" style="${style}"><li>${renderNativeHtmlRuns(block.runs, block, page, document)}</li></ol>`;
+    return `<ol class="block block-list" start="${block.ordinal ?? 1}"${style}><li>${renderNativeHtmlRuns(block.runs, block, document)}</li></ol>`;
   }
   if (block.kind === "task") {
-    return `<p class="block block-list" role="checkbox" aria-checked="${block.checked ? "true" : "false"}" style="${style}">${content}</p>`;
+    return `<p class="block block-list" role="checkbox" aria-checked="${block.checked ? "true" : "false"}"${style}>${content}</p>`;
   }
-  return `<p class="block" style="${style}">${content}</p>`;
+  return `<p class="block"${style}>${content}</p>`;
 }
 
 function renderNativeHtmlRuns(
   runs: EditableMarkdownTextRun[],
   block: NativeExportBlock,
-  page: NativeExportPage,
   document: NativeExportDocument
 ): string {
-  const maxRunSize = Math.max(document.baseFontSize, ...runs.map((run) => run.fontSize));
-  const baseSizeCqw = Math.max(0.6, (block.height ?? 0.014) * page.height / Math.max(1, page.width) * 100 * 0.84);
+  const baseFontSize = Math.max(1, document.baseFontSize);
   return runs.map((run) => {
     const decorations = [run.underline ? "underline" : "", run.strike ? "line-through" : ""].filter(Boolean).join(" ");
     const style = [
       `color:#${exportHexColor(run.color)}`,
       `font-family:${htmlAttributeEscape(run.code || block.kind === "code" ? "Consolas, monospace" : run.fontFamily || "system-ui")}`,
-      `font-size:${Math.max(0.5, baseSizeCqw * run.fontSize / maxRunSize).toFixed(3)}cqw`,
+      `font-size:${clamp(15 * run.fontSize / baseFontSize, 10, 36).toFixed(1)}px`,
       `font-style:${run.italic ? "italic" : "normal"}`,
       `font-weight:${run.bold || block.kind === "callout-title" ? "700" : "400"}`,
       `opacity:${clamp(run.opacity ?? 1, 0, 1).toFixed(3)}`,
@@ -13526,12 +13951,19 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
 }
 
 function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]): string {
-  const document = buildNativeExportDocumentFromVisualPages(pages);
-  const pageMarkup = document.pages.map((page) => {
-    const blocks = page.blocks.map((block) => renderNativeExportHtmlBlock(block, page, document)).join("");
-    return `<section class="page" aria-label="Page ${page.pageIndex + 1}" style="aspect-ratio:${page.width}/${page.height}">${blocks}</section>`;
-  }).join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>*{box-sizing:border-box}html{background:#e7e9ed;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:18px}main{margin:0 auto;max-width:1100px}.page{background:#fff;container-type:inline-size;margin:0 auto 18px;overflow:hidden;position:relative;width:100%;box-shadow:0 2px 10px #0002}.block{letter-spacing:0;margin:0;overflow:visible;position:absolute;white-space:pre-wrap}.block a{color:inherit;text-decoration:inherit}.block-code{background:#f3f4f6;font-family:Consolas,"Noto Sans Mono",monospace;padding:.35cqw;white-space:pre-wrap}.block-callout{background:#eef5ff;border-left:.35cqw solid #4b8fd8;padding:.3cqw}.block-quote{border-left:.3cqw solid #9aa0a6;padding-left:.7cqw}.block-list{padding-left:1.4cqw}.block-separator{border:0;border-top:.12cqw solid #888}.block-table{border-collapse:collapse;table-layout:fixed}.block-table td{border:.08cqw solid #b7bcc4;padding:.3cqw;vertical-align:top}.block-table tr:first-child td{font-weight:700;background:#f4f5f7}.block-image{height:auto;object-fit:contain;position:absolute}.block-image-link{position:static} @media(max-width:640px){body{padding:6px}.page{margin-bottom:8px;box-shadow:none}}@media print{html,body{background:#fff;padding:0}.page{box-shadow:none;margin:0;break-after:page}.page:last-child{break-after:auto}}</style></head><body><main>${pageMarkup}</main></body></html>`;
+  const document = buildHtmlExportDocumentFromVisualPages(pages);
+  const pageMarkup = document.pages
+    .filter((page) => page.blocks.length > 0)
+    .map((page) => {
+      const contentBlocks = page.blocks.filter((block) => !block.image || !isHtmlAnnotationExportImage(block.image));
+      const annotationBlocks = page.blocks.filter((block) => block.image && isHtmlAnnotationExportImage(block.image));
+      const content = contentBlocks.map((block) => renderNativeExportHtmlBlock(block, document)).join("");
+      const annotations = annotationBlocks.length > 0
+        ? `<aside class="page-annotations" aria-label="Page ${page.pageIndex + 1} annotations">${annotationBlocks.map((block) => renderNativeExportHtmlBlock(block, document)).join("")}</aside>`
+        : "";
+      return `<section class="page" aria-label="Page ${page.pageIndex + 1}">${content}${annotations}</section>`;
+    }).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>*{box-sizing:border-box}html{background:#e7e9ed;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:18px}main{margin:0 auto;max-width:900px}.page{background:#fff;margin:0 auto 18px;padding:32px 42px;width:100%;box-shadow:0 2px 10px #0002}.block{letter-spacing:0;line-height:1.55;margin:.55rem 0;overflow-wrap:anywhere;white-space:pre-wrap}.block a,a.block-image-link{color:#0b57d0;text-decoration:underline;text-underline-offset:2px}.page h1,.page h2,.page h3,.page h4,.page h5,.page h6{line-height:1.25;margin:1.15rem 0 .5rem}.page h1:first-child,.page h2:first-child,.page h3:first-child,.page p:first-child{margin-top:0}.block-code{background:#f3f4f6;border-radius:4px;font-family:Consolas,"Noto Sans Mono",monospace;overflow-x:auto;padding:.75rem;white-space:pre-wrap}.block-callout{background:#eef5ff;border-left:4px solid #4b8fd8;padding:.55rem .75rem}.block-callout+.block-callout{margin-top:-.55rem}.block-quote{border-left:3px solid #9aa0a6;margin-left:0;padding-left:.8rem}.block-list{margin:.3rem 0;padding-left:var(--list-indent,1.5rem)}.block-list+.block-list{margin-top:-.12rem}.block-separator{border:0;border-top:1px solid #888;margin:1rem 0}.block-table-wrap{margin:.8rem 0;overflow-x:auto}.block-table{border-collapse:collapse;table-layout:auto;width:100%}.block-table td{border:1px solid #b7bcc4;padding:.45rem .55rem;vertical-align:top}.block-table tr:first-child td{background:#f4f5f7;font-weight:700}.block-visual{display:block;margin:.8rem 0;max-width:100%;opacity:var(--visual-opacity);width:min(100%,var(--visual-width))}.block-visual.align-left{margin-right:auto}.block-visual.align-center{margin-left:auto;margin-right:auto}.block-visual.align-right{margin-left:auto}.block-image,.block-image-link{display:block;max-width:100%}.block-image{height:auto;max-height:760px;object-fit:contain;width:100%}.block-visual.align-center .block-image{margin-left:auto;margin-right:auto}.block-visual.align-right .block-image{margin-left:auto}.page-annotations{align-items:flex-start;border-top:1px solid #e1e4e8;display:flex;flex-wrap:wrap;gap:10px;margin-top:1rem;padding-top:.75rem}.page-annotations .block-visual{margin:0;max-width:220px}.block-visual-annotation .block-image{height:auto;max-height:280px;width:auto}.block-visual-native .block-image{max-height:720px}@media(max-width:640px){body{padding:0}.page{box-shadow:none;margin-bottom:8px;padding:18px 16px}.block{line-height:1.5}.block-visual{width:100%}.page-annotations .block-visual{max-width:42%}.block-visual-annotation .block-image{max-height:220px}}@media print{html,body{background:#fff;padding:0}.page{box-shadow:none;margin:0;padding:18mm;break-after:page}.page:last-child{break-after:auto}}</style></head><body><main>${pageMarkup}</main></body></html>`;
 }
 
 async function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Promise<Uint8Array> {
