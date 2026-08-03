@@ -14,9 +14,9 @@ const AUTO_SAVE_CLOSE_DELAY_MS = 200;
 const OVERLAY_HEALTH_CHECK_MS = 5000;
 const OVERLAY_MAX_DPR = 2;
 const PDF_ZOOM_SETTLE_DELAY_MS = 160;
+const PDF_SURFACE_MISSING_GRACE_MS = 2500;
 const INK_AUTO_GROUP_GAP_PX = 28;
 const INK_AUTO_GROUP_WINDOW_MS = 3500;
-const INK_LEGACY_GROUP_GAP_PX = 10;
 const NATIVE_POPUP_SUPPRESS_MS = 650;
 const STROKE_FAST_SAVE_DELAY_MS = 180;
 const STROKE_MIN_POINT_DISTANCE_PX = 0.35;
@@ -1542,6 +1542,7 @@ interface PdfInkEditTransactionRecord {
 export default class PdftionPlugin extends Plugin {
   private annotationFontBytes: Uint8Array | null = null;
   private inkCommitPromises = new Map<string, Promise<boolean>>();
+  private missingPdfSurfaces = new Map<HTMLElement, number>();
   private sessions = new Map<HTMLElement, InkSession>();
   private surfaceScanTimers: number[] = [];
   settings: PdftionSettings = { ...DEFAULT_SETTINGS };
@@ -1686,6 +1687,7 @@ export default class PdftionPlugin extends Plugin {
       session.destroy(false);
     }
     this.sessions.clear();
+    this.missingPdfSurfaces.clear();
     this.clearSurfaceScanTimers();
   }
 
@@ -1919,6 +1921,7 @@ export default class PdftionPlugin extends Plugin {
         liveRoots.add(surface.rootEl);
         const existing = this.sessions.get(surface.rootEl);
         if (existing) {
+          this.missingPdfSurfaces.delete(surface.rootEl);
           existing.updateFile(surface.file);
           existing.scheduleQuietScan();
           continue;
@@ -1939,6 +1942,7 @@ export default class PdftionPlugin extends Plugin {
         liveRoots.add(surface.rootEl);
         const existing = this.sessions.get(surface.rootEl);
         if (existing) {
+          this.missingPdfSurfaces.delete(surface.rootEl);
           existing.updateFile(surface.file);
           existing.scheduleQuietScan();
           continue;
@@ -1949,11 +1953,23 @@ export default class PdftionPlugin extends Plugin {
       }
     }
 
+    const now = Date.now();
     for (const [rootEl, session] of this.sessions.entries()) {
-      if (!activeDocument.body.contains(rootEl) || !liveRoots.has(rootEl)) {
-        session.destroy();
-        this.sessions.delete(rootEl);
+      if (activeDocument.body.contains(rootEl) && liveRoots.has(rootEl)) {
+        this.missingPdfSurfaces.delete(rootEl);
+        continue;
       }
+      const missingSince = this.missingPdfSurfaces.get(rootEl);
+      if (missingSince === undefined) {
+        this.missingPdfSurfaces.set(rootEl, now);
+        continue;
+      }
+      if (now - missingSince < PDF_SURFACE_MISSING_GRACE_MS) {
+        continue;
+      }
+      session.destroy();
+      this.sessions.delete(rootEl);
+      this.missingPdfSurfaces.delete(rootEl);
     }
     this.refreshGlobalEditingClass();
   }
@@ -2872,8 +2888,7 @@ class InkSession {
       if (this.shouldScanForMutations(mutations)) {
         if (this.enabled) {
           this.updateExternalInkLayerState();
-          this.scheduleEditableInkPrepare(80, true);
-          window.setTimeout(() => this.scheduleEditableInkPrepare(0, true), 360);
+          this.scheduleEditableInkPrepare(320, true);
         }
         this.scheduleQuietScan();
       }
@@ -5847,7 +5862,7 @@ class InkSession {
     const selected = this.findElementAt(overlay, point);
     if (selected) {
       if (!this.selectedStrokeIds.has(selected.id)) {
-        this.setSelectedElementForEditing(selected, overlay);
+        this.setSelectedElementForEditing(selected);
         this.selectionDrag = this.canDragSelectedElements(overlay.pageIndex)
           ? {
               current: point,
@@ -7369,7 +7384,7 @@ class InkSession {
     if (this.isStrictDrawingTap(stroke, overlay)) {
       const selected = this.findElementAt(overlay, stroke.points[0]);
       if (selected) {
-        this.setSelectedElementForEditing(selected, overlay);
+        this.setSelectedElementForEditing(selected);
         this.clearCurrentStroke();
         this.redrawAll();
         this.updateToolbarState();
@@ -9308,44 +9323,8 @@ class InkSession {
     this.selectionWasExplicitTap = false;
   }
 
-  private setSelectedElementForEditing(element: InkElement, overlay: PageOverlay): void {
-    if (element.kind !== "stroke") {
-      this.setSingleSelectedElement(element.id);
-      return;
-    }
-    const group = this.findStrokeEditGroup(element, overlay);
-    this.setSelectedElements(group);
-    this.selectionWasExplicitTap = true;
-  }
-
-  private findStrokeEditGroup(stroke: InkStroke, overlay: PageOverlay): InkStroke[] {
-    if (stroke.groupId) {
-      return this.strokeHistory.filter((candidate) => (
-        candidate.pageIndex === stroke.pageIndex && candidate.groupId === stroke.groupId
-      ));
-    }
-
-    const candidates = this.strokeHistory.filter((candidate) => (
-      candidate.pageIndex === stroke.pageIndex && !candidate.groupId
-    ));
-    const grouped = new Set<InkStroke>([stroke]);
-    const queue: InkStroke[] = [stroke];
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (!current) {
-        break;
-      }
-      for (const candidate of candidates) {
-        if (grouped.has(candidate)) {
-          continue;
-        }
-        if (strokesAreVisuallyConnected(current, candidate, overlay.cssWidth, overlay.cssHeight, INK_LEGACY_GROUP_GAP_PX)) {
-          grouped.add(candidate);
-          queue.push(candidate);
-        }
-      }
-    }
-    return Array.from(grouped);
+  private setSelectedElementForEditing(element: InkElement): void {
+    this.setSingleSelectedElement(element.id);
   }
 
   private setSingleSelectedElement(id: string): void {
@@ -11404,6 +11383,7 @@ function getEditableMarkdownBaseFontSize(lines: EditableMarkdownLine[]): number 
 
 function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLine[] {
   const overlayRect = overlay.pageEl.getBoundingClientRect();
+  const linkRegions = collectPdfTextLinkRegions(overlay.pageEl);
   const textSpans = Array.from(overlay.pageEl.querySelectorAll<HTMLElement>(".textLayer span"));
   const candidates = textSpans.length > 0
     ? textSpans
@@ -11439,7 +11419,8 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
         fontFamily: style.fontFamily || "",
         fontSize,
         italic: /italic|oblique/i.test(style.fontStyle),
-        link: span.closest("a")?.getAttribute("href") ?? undefined,
+        link: normalizeEditableExportLink(span.closest("a")?.getAttribute("href")) ??
+          findPdfTextLinkForRect(rect, linkRegions),
         strike: /line-through/i.test(decoration),
         text,
         underline: /underline/i.test(decoration)
@@ -11503,6 +11484,81 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
       };
     })
     .filter((line) => line.runs.some((run) => run.text.length > 0));
+}
+
+type PdfTextLinkRect = Pick<DOMRect, "bottom" | "height" | "left" | "right" | "top" | "width">;
+
+function collectPdfTextLinkRegions(pageEl: HTMLElement): Array<{ href: string; rect: PdfTextLinkRect }> {
+  const elements = Array.from(pageEl.querySelectorAll<HTMLElement>(
+    ".annotationLayer a, .annotationLayer [data-url], .annotationLayer [data-unsafe-url]"
+  ));
+  const regions: Array<{ href: string; rect: PdfTextLinkRect }> = [];
+  const pageRect = pageEl.getBoundingClientRect();
+  for (const element of new Set(elements)) {
+    const href = normalizeEditableExportLink(
+      element.getAttribute("href") ??
+      element.getAttribute("data-url") ??
+      element.getAttribute("data-unsafe-url")
+    );
+    if (!href) {
+      continue;
+    }
+    const annotation = element.closest<HTMLElement>("[data-annotation-id], section");
+    const ownRect = element.getBoundingClientRect();
+    const annotationRect = annotation?.getBoundingClientRect();
+    const rect = ownRect.width >= 1 && ownRect.height >= 1
+      ? ownRect
+      : annotationRect && annotationRect.width >= 1 && annotationRect.height >= 1
+        ? annotationRect
+        : annotation ? readHiddenPdfAnnotationRect(annotation, pageRect) : null;
+    if (rect && rect.width >= 1 && rect.height >= 1) {
+      regions.push({ href, rect });
+    }
+  }
+  return regions;
+}
+
+function readHiddenPdfAnnotationRect(element: HTMLElement, pageRect: DOMRect): PdfTextLinkRect | null {
+  const parseLength = (value: string, total: number): number | null => {
+    const match = value.trim().match(/^(-?\d+(?:\.\d+)?)(%|px)$/);
+    if (!match) {
+      return null;
+    }
+    const amount = Number.parseFloat(match[1]);
+    return match[2] === "%" ? amount * total / 100 : amount;
+  };
+  const leftOffset = parseLength(element.style.left, pageRect.width);
+  const topOffset = parseLength(element.style.top, pageRect.height);
+  const width = parseLength(element.style.width, pageRect.width);
+  const height = parseLength(element.style.height, pageRect.height);
+  if (leftOffset === null || topOffset === null || width === null || height === null || width < 1 || height < 1) {
+    return null;
+  }
+  const left = pageRect.left + leftOffset;
+  const top = pageRect.top + topOffset;
+  return { bottom: top + height, height, left, right: left + width, top, width };
+}
+
+function findPdfTextLinkForRect(rect: DOMRect, regions: Array<{ href: string; rect: PdfTextLinkRect }>): string | undefined {
+  const spanArea = Math.max(1, rect.width * rect.height);
+  let best: { href: string; score: number } | null = null;
+  for (const region of regions) {
+    const width = Math.max(0, Math.min(rect.right, region.rect.right) - Math.max(rect.left, region.rect.left));
+    const height = Math.max(0, Math.min(rect.bottom, region.rect.bottom) - Math.max(rect.top, region.rect.top));
+    const score = width * height / spanArea;
+    if (score >= 0.35 && (!best || score > best.score)) {
+      best = { href: region.href, score };
+    }
+  }
+  return best?.href;
+}
+
+function normalizeEditableExportLink(value: string | null | undefined): string | undefined {
+  const link = value?.trim();
+  if (!link || /^(?:javascript|data|vbscript):/i.test(link)) {
+    return undefined;
+  }
+  return /^(?:https?:|mailto:|obsidian:|#|\/|\.\.?(?:\/|$))/i.test(link) ? link : undefined;
 }
 
 function renderEditableMarkdownLine(
@@ -11698,7 +11754,7 @@ function getEditableMarkdownDocumentBaseFontSize(
 }
 
 function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16, suppressFontSize = false): string {
-  const validLink = run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link) ? run.link : undefined;
+  const validLink = normalizeEditableExportLink(run.link);
   let content = escapeMarkdownInline(run.text);
   if (run.bold && run.italic) {
     content = `***${content}***`;
@@ -13242,18 +13298,6 @@ function normalizedBoundsAreNear(
   const gapX = Math.max(0, Math.max(a.minX, b.minX) - Math.min(a.maxX, b.maxX)) * Math.max(1, cssWidth);
   const gapY = Math.max(0, Math.max(a.minY, b.minY) - Math.min(a.maxY, b.maxY)) * Math.max(1, cssHeight);
   return Math.hypot(gapX, gapY) <= gapPx;
-}
-
-function strokesAreVisuallyConnected(
-  a: InkStroke,
-  b: InkStroke,
-  cssWidth: number,
-  cssHeight: number,
-  gapPx: number
-): boolean {
-  const aBounds = normalizedStrokeBounds(a);
-  const bBounds = normalizedStrokeBounds(b);
-  return Boolean(aBounds && bBounds && normalizedBoundsAreNear(aBounds, bBounds, cssWidth, cssHeight, gapPx));
 }
 
 function normalizedTextBounds(text: InkText): NormalizedBounds {

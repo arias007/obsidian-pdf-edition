@@ -23,6 +23,10 @@ test("selection interiors move while only the four visible corner handles resize
   assert.doesNotMatch(source, /textOnly \? 12 : 0/);
   assert.match(source, /private canMoveFreshSelection\(\): boolean \{\s*return this\.selectionWasExplicitTap/);
   assert.match(source, /this\.selectionBoxContainsPoint\(overlay, point\)[\s\S]{0,400}?mode: "move"/);
+  assert.match(source, /private setSelectedElementForEditing\(element: InkElement\): void \{\s*this\.setSingleSelectedElement\(element\.id\);\s*\}/);
+  assert.doesNotMatch(source, /findStrokeEditGroup|strokesAreVisuallyConnected/);
+  assert.match(source, /const ordered = this\.getEditableElements\(\).*\.reverse\(\)/);
+  assert.match(source, /const selectedElements = this\.findElementsInSelection[\s\S]{0,160}?this\.setSelectedElements\(selectedElements\)/);
 });
 
 test("all requested visual formats share the page capture pipeline", async () => {
@@ -71,6 +75,24 @@ test("Markdown conversion keeps native image references and delegates ink to Not
   assert.match(source, /if \(!safePosition\) \{\s*inline\.push\(image\)/);
   assert.match(source, /const opened = await this\.openConvertedMarkdownFile\(targetFile\)/);
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
+});
+
+test("Markdown conversion maps PDF annotation links onto text runs", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const markdownSource = source.slice(
+    source.indexOf("function collectEditableMarkdownLines"),
+    source.indexOf("function getNoteDrawWriteApi")
+  );
+
+  assert.match(markdownSource, /collectPdfTextLinkRegions\(overlay\.pageEl\)/);
+  assert.match(markdownSource, /\.annotationLayer a, \.annotationLayer \[data-url\], \.annotationLayer \[data-unsafe-url\]/);
+  assert.match(markdownSource, /findPdfTextLinkForRect\(rect, linkRegions\)/);
+  assert.match(markdownSource, /width \* height \/ spanArea/);
+  assert.match(markdownSource, /readHiddenPdfAnnotationRect\(annotation, pageRect\)/);
+  assert.match(markdownSource, /match\(\/\^\(-\?\\d\+\(\?:\\\.\\d\+\)\?\)\(%\|px\)\$\//);
+  assert.match(markdownSource, /normalizeEditableExportLink\(run\.link\)/);
+  assert.match(markdownSource, /\^\(\?:javascript\|data\|vbscript\):/);
+  assert.ok(markdownSource.includes('content = `[${content}](${escapeMarkdownLinkDestination(validLink)})`;'));
 });
 
 test("Markdown conversion uses native Markdown without HTML presentation elements", async () => {
@@ -198,6 +220,25 @@ test("placeholder pages, precise stroke hits, and immediate drag redraw stay int
   assert.match(source, /this\.updateExternalInkLayerState\(\);\s*this\.redrawPageOverlays\(overlay\.pageIndex\)/);
   assert.equal((dragEndSource.match(/this\.scheduleAutoSave\(250\)/g) ?? []).length, 2);
   assert.doesNotMatch(dragEndSource, /saveIntoPdf|reloadNativePdfView|requestNativePdfPageRender|commitDetachedInkPages/);
+});
+
+test("PDF zoom debounces mutation work and preserves transient sessions", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const mutationSource = source.slice(
+    source.indexOf("this.mutationObserver = new MutationObserver"),
+    source.indexOf("this.mutationObserver.observe")
+  );
+  const surfaceScanSource = source.slice(
+    source.indexOf("private scanPdfSurfaces"),
+    source.indexOf("private findLeafForFile")
+  );
+
+  assert.match(mutationSource, /this\.scheduleEditableInkPrepare\(320, true\)/);
+  assert.doesNotMatch(mutationSource, /window\.setTimeout/);
+  assert.match(source, /const PDF_SURFACE_MISSING_GRACE_MS = 2500/);
+  assert.match(surfaceScanSource, /this\.missingPdfSurfaces\.set\(rootEl, now\)/);
+  assert.match(surfaceScanSource, /now - missingSince < PDF_SURFACE_MISSING_GRACE_MS/);
+  assert.ok(surfaceScanSource.indexOf("now - missingSince < PDF_SURFACE_MISSING_GRACE_MS") < surfaceScanSource.indexOf("session.destroy()"));
 });
 
 test("PDF ink editing is transactional and restores interrupted work", async () => {
