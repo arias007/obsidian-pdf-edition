@@ -1063,9 +1063,49 @@ interface NativePdfPageViewLike {
   canvas?: HTMLCanvasElement | null;
   div?: HTMLElement;
   draw?: () => Promise<unknown>;
+  pdfPage?: NativePdfPageLike;
   renderingState?: number;
   reset?: () => void;
   resume?: (() => void) | null;
+  viewport?: NativePdfViewportLike;
+}
+
+interface NativePdfTextContentItemLike {
+  fontName?: string;
+  hasEOL?: boolean;
+  height?: number;
+  str?: string;
+  transform?: number[];
+  width?: number;
+}
+
+interface NativePdfTextContentLike {
+  items?: NativePdfTextContentItemLike[];
+  styles?: Record<string, { fontFamily?: string }>;
+}
+
+interface NativePdfAnnotationLike {
+  rect?: number[];
+  unsafeUrl?: string;
+  url?: string;
+}
+
+interface NativePdfPageLike {
+  getAnnotations?: (options?: { intent?: string }) => Promise<NativePdfAnnotationLike[]>;
+  getTextContent?: () => Promise<NativePdfTextContentLike>;
+  render?: (options: {
+    canvas: HTMLCanvasElement;
+    canvasContext: CanvasRenderingContext2D;
+    transform?: number[];
+    viewport: NativePdfViewportLike;
+  }) => { promise?: Promise<unknown> } | Promise<unknown>;
+}
+
+interface NativePdfViewportLike {
+  height?: number;
+  scale?: number;
+  transform?: number[];
+  width?: number;
 }
 
 interface NativePdfRenderingQueueLike {
@@ -1315,6 +1355,7 @@ interface VisualConversionImage {
   dataUrl: string;
   height: number;
   id: string;
+  link?: string;
   opacity: number;
   width: number;
   x: number;
@@ -1324,12 +1365,14 @@ interface VisualConversionImage {
 
 interface EditableMarkdownTextRun {
   bold: boolean;
+  code?: boolean;
   color: string;
   fontFamily: string;
   fontSize: number;
   italic: boolean;
   left?: number;
   link?: string;
+  opacity?: number;
   strike: boolean;
   text: string;
   underline: boolean;
@@ -1373,8 +1416,50 @@ interface EditableMarkdownHeadingProfile {
 
 interface EditableMarkdownSemanticSection {
   baseLeft?: number;
-  kind: "emphasis" | "ordered" | "task" | "unordered";
+  kind: "callout" | "code" | "emphasis" | "ordered" | "quote" | "task" | "unordered";
   nextOrdinal: number;
+}
+
+type NativeExportBlockKind =
+  | "callout-body"
+  | "callout-title"
+  | "code"
+  | "heading"
+  | "image"
+  | "ordered-list"
+  | "paragraph"
+  | "quote"
+  | "separator"
+  | "table"
+  | "task"
+  | "unordered-list";
+
+interface NativeExportBlock {
+  checked?: boolean;
+  height?: number;
+  headingLevel?: number;
+  image?: NoteDrawExportImage;
+  kind: NativeExportBlockKind;
+  left: number;
+  listLevel?: number;
+  ordinal?: number;
+  runs: EditableMarkdownTextRun[];
+  table?: EditableMarkdownTable;
+  top: number;
+  width: number;
+}
+
+interface NativeExportPage {
+  blocks: NativeExportBlock[];
+  height: number;
+  pageIndex: number;
+  width: number;
+}
+
+interface NativeExportDocument {
+  baseFontSize: number;
+  headingProfile: EditableMarkdownHeadingProfile;
+  pages: NativeExportPage[];
 }
 
 interface VisualCaptureOptions {
@@ -3146,7 +3231,7 @@ class InkSession {
     if (loadToken !== this.annotationLoadToken || this.file.path !== filePath) {
       return;
     }
-    const pdfInkStrokes = await this.plugin.loadPdfInkAnnotations(this.file);
+    const pdfInkStrokes = state ? [] : await this.plugin.loadPdfInkAnnotations(this.file);
     if (loadToken !== this.annotationLoadToken || this.file.path !== filePath) {
       return;
     }
@@ -5887,6 +5972,42 @@ class InkSession {
       })[0] ?? candidates[0] ?? null;
   }
 
+  private async renderPdfPageCanvasForExport(overlay: PageOverlay): Promise<HTMLCanvasElement | null> {
+    const viewer = this.getNativePdfViewerApp()?.pdfViewer;
+    const pageView = viewer?.getPageView?.(overlay.pageIndex) ?? viewer?._pages?.[overlay.pageIndex] ?? null;
+    const pdfPage = pageView?.pdfPage;
+    const viewport = pageView?.viewport;
+    if (!pdfPage?.render || !viewport?.width || !viewport.height) {
+      return this.getPdfCanvas(overlay);
+    }
+    const maxSize = 1200;
+    const outputScale = Math.min(2, maxSize / Math.max(viewport.width, viewport.height));
+    const canvas = activeDocument.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(viewport.width * outputScale));
+    canvas.height = Math.max(1, Math.round(viewport.height * outputScale));
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return this.getPdfCanvas(overlay);
+    }
+    try {
+      const task = pdfPage.render({
+        canvas,
+        canvasContext: context,
+        transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
+        viewport
+      });
+      if (task && "promise" in task && task.promise) {
+        await task.promise;
+      } else {
+        await task;
+      }
+      return canvas;
+    } catch (error) {
+      console.warn("pdftion could not render an offscreen PDF page for conversion.", error);
+      return this.getPdfCanvas(overlay);
+    }
+  }
+
   private blockNativePdfAnnotationEvent(event: Event): void {
     if (!this.enabled) {
       return;
@@ -8299,13 +8420,10 @@ class InkSession {
         targetPath,
         collectNoteDrawExportImages(visualPages, this.getEditableElements()).filter(isUsefulMarkdownExportImage)
       );
-      const partitionedImages = partitionMarkdownExportImages(pages, images);
-      const inlineImages = noteDraw ? partitionedImages.inline : images;
-      const noteDrawImages = noteDraw ? partitionedImages.floating : [];
-      const markdown = buildEditableMarkdown(this.file, pages, inlineImages);
+      const markdown = buildEditableMarkdown(this.file, pages, images, targetPath);
       const targetFile = await this.plugin.app.vault.create(targetPath, markdown);
       if (noteDraw) {
-        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements(), noteDrawImages));
+        await noteDraw.writeDrawings(targetFile, buildNoteDrawExportData(targetPath, pages, this.getEditableElements()));
       }
       const opened = await this.openConvertedMarkdownFile(targetFile);
       if (options.notice !== false) {
@@ -8517,6 +8635,10 @@ class InkSession {
   private async ensurePdfPageRenderedForExport(pageIndex: number, pageEl: HTMLElement | null): Promise<void> {
     const app = this.getNativePdfViewerApp();
     const viewer = app?.pdfViewer;
+    const directPageView = viewer?.getPageView?.(pageIndex) ?? viewer?._pages?.[pageIndex] ?? null;
+    if (directPageView?.pdfPage?.render && directPageView.viewport?.width && directPageView.viewport.height) {
+      return;
+    }
     for (let attempt = 0; attempt < 180; attempt += 1) {
       this.scanPages();
       const overlay = this.findOverlayByPageIndex(pageIndex);
@@ -8561,14 +8683,14 @@ class InkSession {
   }
 
   private async captureVisualPageImage(overlay: PageOverlay, options: VisualCaptureOptions = {}): Promise<VisualConversionPage | null> {
-    const pdfCanvas = this.getPdfCanvas(overlay);
+    const pdfCanvas = await this.renderPdfPageCanvasForExport(overlay);
     if (!pdfCanvas || pdfCanvas.width <= 1 || pdfCanvas.height <= 1) {
       return null;
     }
 
     const sourceWidth = Math.max(1, pdfCanvas.width);
     const sourceHeight = Math.max(1, pdfCanvas.height);
-    const maxSize = 1800;
+    const maxSize = 1200;
     const scale = Math.min(1, maxSize / Math.max(sourceWidth, sourceHeight));
     const outputWidth = Math.max(1, Math.round(sourceWidth * scale));
     const outputHeight = Math.max(1, Math.round(sourceHeight * scale));
@@ -8581,12 +8703,38 @@ class InkSession {
     }
 
     ctx.drawImage(pdfCanvas, 0, 0, sourceWidth, sourceHeight, 0, 0, outputWidth, outputHeight);
-    const lines = collectEditableMarkdownLines(overlay);
-    const nativeVisuals = await extractHtmlDerivedVisualLayers(canvas, lines, overlay.pageIndex);
+    const pageView = this.getNativePdfViewerApp()?.pdfViewer?.getPageView?.(overlay.pageIndex) ??
+      this.getNativePdfViewerApp()?.pdfViewer?._pages?.[overlay.pageIndex] ??
+      null;
+    const renderedLines = collectEditableMarkdownLines(overlay);
+    const pdfLines = await collectPdfJsEditableLines(pageView, overlay);
+    const elements = this.getEditableElements();
+    const lines = mergeInkTextExportLines(
+      selectCompleteEditableLines(renderedLines, pdfLines),
+      collectInkTextExportLines(elements, overlay)
+    );
+    sampleEditableTextColors(pdfCanvas, lines);
+    const nativeVisuals = attachLinksToVisualConversionImages(
+      await extractHtmlDerivedVisualLayers(canvas, lines, overlay.pageIndex),
+      collectDomExportLinkRects(overlay.pageEl),
+      overlay
+    );
+    const annotationVisuals = await buildInkVisualExportImages(
+      elements.filter((element) => (
+        element.pageIndex === overlay.pageIndex && (
+          element.kind === "cover" || (
+            element.kind === "stroke" &&
+            (!element.saved || !this.savedInkIsBurnedIntoPdf || Array.isArray(element.pdfPoints))
+          )
+        )
+      )),
+      overlay,
+      outputWidth,
+      outputHeight
+    );
     ctx.save();
     ctx.scale(outputWidth / Math.max(1, overlay.cssWidth), outputHeight / Math.max(1, overlay.cssHeight));
-    const elements = this.getEditableElements();
-    const images: VisualConversionImage[] = [...nativeVisuals];
+    const images: VisualConversionImage[] = [...nativeVisuals, ...annotationVisuals];
     for (const image of elements.filter((element): element is InkImage => element.kind === "image" && element.pageIndex === overlay.pageIndex)) {
       images.push({
         dataUrl: await convertImageDataUrlToPng(image.dataUrl),
@@ -11269,57 +11417,284 @@ function fitImageToOverlay(
   };
 }
 
-function buildEditableMarkdown(file: TFile, pages: EditableMarkdownPage[], images: NoteDrawExportImage[] = []): string {
-  const output = [
-    `# ${escapeMarkdownInline(file.basename)}`,
-    "",
-    `> ${uiText("来源 PDF", "Source PDF")}：[[${escapeObsidianWikilink(file.path)}]]`,
-    ""
-  ];
+function buildNativeExportDocument(
+  pages: EditableMarkdownPage[],
+  images: NoteDrawExportImage[] = []
+): NativeExportDocument {
   const headingProfile = buildEditableMarkdownHeadingProfile(pages);
-
-  for (const [pagePosition, page] of pages.entries()) {
-    const baseFontSize = getEditableMarkdownBaseFontSize(page.lines);
-    let semanticSection: EditableMarkdownSemanticSection | null = null;
+  const baseFontSize = headingProfile.baseFontSize;
+  let semanticSection: EditableMarkdownSemanticSection | null = null;
+  let headingLevelOffset: number | null = null;
+  const nativePages = pages.map((page) => {
     const tables = detectEditableMarkdownTables(page.lines);
     const tableLines = new Set(tables.flatMap((table) => table.lines));
     const pageImages = images
-      .filter((image) => image.pageIndex === page.pageIndex && image.assetPath)
+      .filter((image) => image.pageIndex === page.pageIndex)
       .sort((a, b) => (a.y - b.y) || ((a.zIndex ?? 0) - (b.zIndex ?? 0)) || a.id.localeCompare(b.id));
-    const flowItems: Array<
+    const items: Array<
       | { kind: "image"; position: number; value: NoteDrawExportImage }
       | { kind: "line"; position: number; value: EditableMarkdownLine }
       | { kind: "table"; position: number; value: EditableMarkdownTable }
     > = [
-      ...page.lines.filter((line) => !tableLines.has(line)).map((line) => ({ kind: "line" as const, position: line.top, value: line })),
+      ...page.lines
+        .filter((line) => !tableLines.has(line))
+        .map((line) => ({ kind: "line" as const, position: line.top, value: line })),
       ...tables.map((table) => ({ kind: "table" as const, position: table.top, value: table })),
       ...pageImages.map((image) => ({ kind: "image" as const, position: image.y + image.height / 2, value: image }))
     ].sort((a, b) => (a.position - b.position) || (a.kind === "image" ? -1 : 1));
-    for (const item of flowItems) {
+    const blocks: NativeExportBlock[] = [];
+
+    for (const item of items) {
       if (item.kind === "image") {
-        output.push(`![[${escapeObsidianWikilink(item.value.assetPath ?? item.value.assetName)}]]`, "");
+        blocks.push({
+          height: item.value.height,
+          image: item.value,
+          kind: "image",
+          left: item.value.x,
+          runs: [],
+          top: item.value.y,
+          width: item.value.width
+        });
         continue;
       }
       if (item.kind === "table") {
-        output.push(...renderEditableMarkdownTable(item.value, baseFontSize), "");
+        blocks.push({
+          height: item.value.bottom - item.value.top,
+          kind: "table",
+          left: item.value.left,
+          runs: [],
+          table: item.value,
+          top: item.value.top,
+          width: item.value.right - item.value.left
+        });
         continue;
       }
-      const lineText = item.value.runs.map((run) => run.text).join("").trim();
-      if (getEditableMarkdownHeadingLevel(item.value, baseFontSize, lineText, headingProfile) !== null) {
-        semanticSection = getEditableMarkdownSemanticSection(lineText);
-      } else if (semanticSection && typeof semanticSection.baseLeft !== "number") {
-        semanticSection.baseLeft = item.value.left;
+
+      const line = item.value;
+      const text = line.runs.map((run) => run.text).join("").trim();
+      if (!text) {
+        continue;
       }
-      const rendered = renderEditableMarkdownLine(item.value, baseFontSize, headingProfile, semanticSection);
-      if (rendered) {
-        output.push(rendered, "");
+      const detectedHeadingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text, headingProfile);
+      if (detectedHeadingLevel !== null) {
+        headingLevelOffset ??= Math.max(0, detectedHeadingLevel - 1);
+        const headingLevel = Math.max(1, detectedHeadingLevel - headingLevelOffset);
+        semanticSection = getEditableMarkdownSemanticSection(text);
+        blocks.push({
+          height: line.height,
+          headingLevel,
+          kind: "heading",
+          left: line.left,
+          runs: line.runs,
+          top: line.top,
+          width: line.width
+        });
+        if (/^(?:分割线|水平线|horizontal\s+rule|separator)$/iu.test(text.replace(/\s+/g, " ").trim())) {
+          blocks.push({ height: 0.002, kind: "separator", left: line.left, runs: [], top: line.top + line.height, width: line.width });
+        }
+        continue;
+      }
+      if (
+        semanticSection?.kind === "task" &&
+        typeof semanticSection.baseLeft === "number" &&
+        line.left < semanticSection.baseLeft - 0.018
+      ) {
+        semanticSection = null;
+      }
+      if (semanticSection && typeof semanticSection.baseLeft !== "number") {
+        semanticSection.baseLeft = line.left;
+      }
+
+      const taskMarker = text.match(/^[☐□◻☑☒✅]\s*/u);
+      const inferredTask = semanticSection?.kind === "task" || /^(?:未完成任务|已完成任务)(?:\s|$)/u.test(text);
+      const bullet = text.match(/^[•●○▪]\s*/u);
+      const ordered = text.match(/^(\d+)[.、)]\s*/u);
+      const quote = text.match(/^>\s*/u);
+      const removePrefix = (prefix: string): EditableMarkdownTextRun[] => removeEditableRunPrefix(line.runs, prefix.length);
+      const listLevel = semanticSection && typeof semanticSection.baseLeft === "number" && line.left - semanticSection.baseLeft >= 0.035
+        ? 1
+        : 0;
+
+      if (taskMarker || inferredTask) {
+        blocks.push({
+          checked: /^(?:已完成任务|[☑☒✅])/u.test(text),
+          height: line.height,
+          kind: "task",
+          left: line.left,
+          listLevel,
+          runs: taskMarker ? removePrefix(taskMarker[0]) : line.runs,
+          top: line.top,
+          width: line.width
+        });
+      } else if (bullet || semanticSection?.kind === "unordered") {
+        blocks.push({
+          height: line.height,
+          kind: "unordered-list",
+          left: line.left,
+          listLevel,
+          runs: bullet ? removePrefix(bullet[0]) : line.runs,
+          top: line.top,
+          width: line.width
+        });
+      } else if (ordered || semanticSection?.kind === "ordered") {
+        const ordinal = ordered ? Number.parseInt(ordered[1], 10) : semanticSection?.nextOrdinal ?? 1;
+        if (semanticSection?.kind === "ordered") {
+          semanticSection.nextOrdinal = Math.max(semanticSection.nextOrdinal + 1, ordinal + 1);
+        }
+        blocks.push({
+          height: line.height,
+          kind: "ordered-list",
+          left: line.left,
+          listLevel,
+          ordinal,
+          runs: ordered ? removePrefix(ordered[0]) : line.runs,
+          top: line.top,
+          width: line.width
+        });
+      } else if (quote || semanticSection?.kind === "quote") {
+        blocks.push({
+          height: line.height,
+          kind: "quote",
+          left: line.left,
+          runs: quote ? removePrefix(quote[0]) : line.runs,
+          top: line.top,
+          width: line.width
+        });
+      } else if (semanticSection?.kind === "code") {
+        blocks.push({
+          height: line.height,
+          kind: "code",
+          left: line.left,
+          runs: line.runs.map((run) => ({ ...run, code: true })),
+          top: line.top,
+          width: line.width
+        });
+      } else if (semanticSection?.kind === "callout") {
+        const calloutTitle = blocks.every((block) => block.kind !== "callout-title" && block.kind !== "callout-body") ||
+          blocks[blocks.length - 1]?.kind === "heading";
+        blocks.push({
+          height: line.height,
+          kind: calloutTitle ? "callout-title" : "callout-body",
+          left: line.left,
+          runs: line.runs,
+          top: line.top,
+          width: line.width
+        });
+      } else {
+        const styledRuns = applyEditableMarkdownSemanticStyles(line.runs, text, semanticSection).map((run) => ({
+          ...run,
+          code: run.code || /(?:mono|consolas|courier|code)/i.test(run.fontFamily)
+        }));
+        blocks.push({ height: line.height, kind: "paragraph", left: line.left, runs: styledRuns, top: line.top, width: line.width });
       }
     }
-    if (pagePosition < pages.length - 1) {
-      output.push("---", "");
+
+    return { blocks, height: page.height, pageIndex: page.pageIndex, width: page.width };
+  });
+  return { baseFontSize, headingProfile, pages: nativePages };
+}
+
+function buildNativeExportDocumentFromVisualPages(pages: VisualConversionPage[]): NativeExportDocument {
+  const editablePages = pages.map((page) => ({
+    height: page.height,
+    lines: page.lines,
+    pageIndex: page.pageIndex,
+    width: page.width
+  }));
+  const images: NoteDrawExportImage[] = pages.flatMap((page) => page.images
+    .filter(isUsefulNativeExportImage)
+    .map((image) => ({
+      ...image,
+      assetMime: dataUrlMimeType(image.dataUrl),
+      assetName: `pdftion-image-${image.id}.${dataUrlImageExtension(image.dataUrl)}`,
+      pageIndex: page.pageIndex
+    })));
+  return buildNativeExportDocument(editablePages, images);
+}
+
+function removeEditableRunPrefix(runs: EditableMarkdownTextRun[], prefixLength: number): EditableMarkdownTextRun[] {
+  let remaining = prefixLength;
+  return runs
+    .map((run) => {
+      if (remaining <= 0) {
+        return { ...run };
+      }
+      const removed = Math.min(remaining, run.text.length);
+      remaining -= removed;
+      return { ...run, text: run.text.slice(removed) };
+    })
+    .filter((run) => run.text.length > 0);
+}
+
+function buildEditableMarkdown(
+  file: TFile,
+  pages: EditableMarkdownPage[],
+  images: NoteDrawExportImage[] = [],
+  targetPath = ""
+): string {
+  const document = buildNativeExportDocument(pages, images);
+  const output: string[] = [];
+  for (const page of document.pages) {
+    for (const block of page.blocks) {
+      const text = block.runs.map((run) => renderEditableMarkdownRun(run, document.baseFontSize)).join("").trim();
+      if (block.kind === "heading") {
+        output.push(`${"#".repeat(block.headingLevel ?? 1)} ${text}`, "");
+      } else if (block.kind === "paragraph") {
+        output.push(text, "");
+      } else if (block.kind === "unordered-list") {
+        output.push(`${"    ".repeat(block.listLevel ?? 0)}- ${text}`, "");
+      } else if (block.kind === "ordered-list") {
+        output.push(`${"    ".repeat(block.listLevel ?? 0)}${block.ordinal ?? 1}. ${text}`, "");
+      } else if (block.kind === "task") {
+        output.push(`${"    ".repeat(block.listLevel ?? 0)}- [${block.checked ? "x" : " "}] ${text}`, "");
+      } else if (block.kind === "quote") {
+        output.push(`> ${text}`, "");
+      } else if (block.kind === "callout-title") {
+        output.push(`> ${getCommonCalloutIcon(block.runs.map((run) => run.text).join(""))} **${text}**`, "");
+      } else if (block.kind === "callout-body") {
+        output.push(`> ${text}`, "");
+      } else if (block.kind === "code") {
+        const raw = block.runs.map((run) => run.text).join("");
+        const fence = raw.includes("```") ? "````" : "```";
+        output.push(fence, raw, fence, "");
+      } else if (block.kind === "separator") {
+        output.push("---", "");
+      } else if (block.kind === "table" && block.table) {
+        output.push(...renderEditableMarkdownTable(block.table, document.baseFontSize), "");
+      } else if (block.kind === "image" && block.image?.assetPath) {
+        const path = getRelativeMarkdownPath(targetPath, block.image.assetPath);
+        const alt = escapeMarkdownImageAlt(block.image.assetName || file.basename);
+        const imageMarkdown = `![${alt}](${escapeMarkdownLinkDestination(path)})`;
+        output.push(block.image.link
+          ? `[${imageMarkdown}](${escapeMarkdownLinkDestination(block.image.link)})`
+          : imageMarkdown, "");
+      }
     }
   }
   return `${output.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
+}
+
+function getCommonCalloutIcon(title: string): string {
+  const normalized = title.toLowerCase();
+  if (/warn|caution|danger|警告|危险/u.test(normalized)) return "⚠️";
+  if (/tip|success|技巧|提示/u.test(normalized)) return "💡";
+  if (/question|help|问题|帮助/u.test(normalized)) return "❓";
+  return "ℹ️";
+}
+
+function getRelativeMarkdownPath(fromFile: string, target: string): string {
+  const fromParts = fromFile.replace(/\\/g, "/").split("/").filter(Boolean);
+  const targetParts = target.replace(/\\/g, "/").split("/").filter(Boolean);
+  fromParts.pop();
+  while (fromParts.length > 0 && targetParts.length > 0 && fromParts[0] === targetParts[0]) {
+    fromParts.shift();
+    targetParts.shift();
+  }
+  return `${"../".repeat(fromParts.length)}${targetParts.join("/")}` || "./";
+}
+
+function escapeMarkdownImageAlt(value: string): string {
+  return value.replace(/[\[\]\\]/g, "\\$&").replace(/\r?\n/g, " ");
 }
 
 function detectEditableMarkdownTables(lines: EditableMarkdownLine[]): EditableMarkdownTable[] {
@@ -11554,23 +11929,34 @@ function getEditableMarkdownBaseFontSize(lines: EditableMarkdownLine[]): number 
   return sizes.length > 0 ? sizes[Math.floor(sizes.length / 2)] : 16;
 }
 
+interface EditableTextFragment {
+  bottom: number;
+  left: number;
+  right: number;
+  run: EditableMarkdownTextRun;
+  top: number;
+}
+
+interface ExportLinkRect {
+  bottom: number;
+  href: string;
+  left: number;
+  right: number;
+  top: number;
+}
+
 function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLine[] {
   const overlayRect = overlay.pageEl.getBoundingClientRect();
   const textSpans = Array.from(overlay.pageEl.querySelectorAll<HTMLElement>(".textLayer span"));
   const candidates = textSpans.length > 0
     ? textSpans
     : Array.from(overlay.pageEl.querySelectorAll<HTMLElement>("[data-canvas-width]"));
-  const fragments: Array<{
-    bottom: number;
-    left: number;
-    run: EditableMarkdownTextRun;
-    right: number;
-    top: number;
-  }> = [];
+  const linkRects = collectDomExportLinkRects(overlay.pageEl);
+  const fragments: EditableTextFragment[] = [];
 
   for (const span of candidates) {
-    const text = span.textContent?.replace(/\u00a0/g, " ").replace(/[\t\r\n ]+/g, " ").trim();
-    if (!text) {
+    const text = (span.textContent ?? "").replace(/\u00a0/g, " ").replace(/[\t\r\n ]+/g, " ");
+    if (!text.trim()) {
       continue;
     }
     const rect = span.getBoundingClientRect();
@@ -11581,6 +11967,7 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
     const fontSize = Number.parseFloat(style.fontSize || "") || Math.max(4, rect.height * 0.82);
     const fontWeight = Number.parseInt(style.fontWeight || "400", 10);
     const decoration = style.textDecorationLine || style.textDecoration || "";
+    const directLink = span.closest<HTMLAnchorElement>("a[href]")?.getAttribute("href") ?? undefined;
     fragments.push({
       bottom: rect.bottom,
       left: rect.left,
@@ -11591,7 +11978,8 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
         fontFamily: style.fontFamily || "",
         fontSize,
         italic: /italic|oblique/i.test(style.fontStyle),
-        link: span.closest("a")?.getAttribute("href") ?? undefined,
+        link: directLink ?? findOverlappingExportLink(rect, linkRects),
+        opacity: Number.parseFloat(style.opacity || "1") || 1,
         strike: /line-through/i.test(decoration),
         text,
         underline: /underline/i.test(decoration)
@@ -11600,8 +11988,149 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
     });
   }
 
+  return buildEditableLinesFromFragments(fragments, {
+    height: overlay.cssHeight,
+    left: overlayRect.left,
+    top: overlayRect.top,
+    width: overlay.cssWidth
+  });
+}
+
+function collectDomExportLinkRects(pageEl: HTMLElement): ExportLinkRect[] {
+  const links = Array.from(pageEl.querySelectorAll<HTMLAnchorElement>(
+    ".annotationLayer a[href], .linkAnnotation a[href], a[data-annotation-id][href]"
+  ));
+  return links.flatMap((link) => {
+    const href = link.getAttribute("href")?.trim();
+    const rect = link.getBoundingClientRect();
+    return href && rect.width > 0 && rect.height > 0
+      ? [{ bottom: rect.bottom, href, left: rect.left, right: rect.right, top: rect.top }]
+      : [];
+  });
+}
+
+function findOverlappingExportLink(
+  rect: Pick<DOMRect, "bottom" | "left" | "right" | "top">,
+  links: ExportLinkRect[]
+): string | undefined {
+  const width = Math.max(1, rect.right - rect.left);
+  const height = Math.max(1, rect.bottom - rect.top);
+  return links
+    .map((link) => {
+      const overlapWidth = Math.max(0, Math.min(rect.right, link.right) - Math.max(rect.left, link.left));
+      const overlapHeight = Math.max(0, Math.min(rect.bottom, link.bottom) - Math.max(rect.top, link.top));
+      return { href: link.href, ratio: overlapWidth * overlapHeight / (width * height) };
+    })
+    .filter((candidate) => candidate.ratio >= 0.18)
+    .sort((a, b) => b.ratio - a.ratio)[0]?.href;
+}
+
+async function collectPdfJsEditableLines(
+  pageView: NativePdfPageViewLike | null,
+  overlay: PageOverlay
+): Promise<EditableMarkdownLine[]> {
+  const pdfPage = pageView?.pdfPage;
+  const viewport = pageView?.viewport;
+  if (!pdfPage?.getTextContent || !viewport?.transform || viewport.transform.length < 6) {
+    return [];
+  }
+  try {
+    const content = await pdfPage.getTextContent();
+    const viewportWidth = Math.max(1, viewport.width ?? overlay.cssWidth);
+    const viewportHeight = Math.max(1, viewport.height ?? overlay.cssHeight);
+    const scaleX = overlay.cssWidth / viewportWidth;
+    const scaleY = overlay.cssHeight / viewportHeight;
+    const annotations = pdfPage.getAnnotations
+      ? await pdfPage.getAnnotations({ intent: "display" }).catch(() => [])
+      : [];
+    const links = annotations.flatMap((annotation) => {
+      const href = (annotation.url ?? annotation.unsafeUrl)?.trim();
+      const rect = annotation.rect;
+      if (!href || !rect || rect.length < 4) {
+        return [];
+      }
+      const first = applyPdfMatrix(viewport.transform ?? [], rect[0], rect[1]);
+      const second = applyPdfMatrix(viewport.transform ?? [], rect[2], rect[3]);
+      return [{
+        bottom: Math.max(first.y, second.y) * scaleY,
+        href,
+        left: Math.min(first.x, second.x) * scaleX,
+        right: Math.max(first.x, second.x) * scaleX,
+        top: Math.min(first.y, second.y) * scaleY
+      }];
+    });
+    const fragments: EditableTextFragment[] = [];
+    for (const item of content.items ?? []) {
+      const text = (item.str ?? "").replace(/\u00a0/g, " ").replace(/[\t\r\n ]+/g, " ");
+      if (!text.trim() || !item.transform || item.transform.length < 6) {
+        continue;
+      }
+      const transform = multiplyPdfMatrices(viewport.transform, item.transform);
+      const fontHeight = Math.max(
+        4,
+        Math.hypot(transform[2] ?? 0, transform[3] ?? 0),
+        (item.height ?? 0) * (viewport.scale ?? 1)
+      );
+      const left = (transform[4] ?? 0) * scaleX;
+      const top = ((transform[5] ?? 0) - fontHeight) * scaleY;
+      const width = Math.max(1, (item.width ?? text.length * fontHeight * 0.52) * (viewport.scale ?? 1) * scaleX);
+      const height = Math.max(1, fontHeight * scaleY);
+      const fontName = item.fontName ?? "";
+      const fontFamily = content.styles?.[fontName]?.fontFamily ?? fontName;
+      const rect = { bottom: top + height, left, right: left + width, top };
+      fragments.push({
+        ...rect,
+        run: {
+          bold: /bold|black|semibold|demi/i.test(fontName),
+          color: "#000000",
+          fontFamily,
+          fontSize: fontHeight * Math.min(scaleX, scaleY),
+          italic: /italic|oblique/i.test(fontName),
+          link: findOverlappingExportLink(rect, links),
+          opacity: 1,
+          strike: false,
+          text,
+          underline: false
+        }
+      });
+    }
+    return buildEditableLinesFromFragments(fragments, {
+      height: overlay.cssHeight,
+      left: 0,
+      top: 0,
+      width: overlay.cssWidth
+    });
+  } catch (error) {
+    console.debug("pdftion could not read the native PDF text model for conversion.", error);
+    return [];
+  }
+}
+
+function multiplyPdfMatrices(left: number[], right: number[]): number[] {
+  return [
+    left[0] * right[0] + left[2] * right[1],
+    left[1] * right[0] + left[3] * right[1],
+    left[0] * right[2] + left[2] * right[3],
+    left[1] * right[2] + left[3] * right[3],
+    left[0] * right[4] + left[2] * right[5] + left[4],
+    left[1] * right[4] + left[3] * right[5] + left[5]
+  ];
+}
+
+function applyPdfMatrix(matrix: number[], x: number, y: number): { x: number; y: number } {
+  return {
+    x: matrix[0] * x + matrix[2] * y + matrix[4],
+    y: matrix[1] * x + matrix[3] * y + matrix[5]
+  };
+}
+
+function buildEditableLinesFromFragments(
+  fragments: EditableTextFragment[],
+  bounds: { height: number; left: number; top: number; width: number }
+): EditableMarkdownLine[] {
+
   const sorted = fragments.sort((a, b) => (a.top - b.top) || (a.left - b.left));
-  const lines: Array<{ bottom: number; fragments: typeof fragments; left: number; right: number; top: number }> = [];
+  const lines: Array<{ bottom: number; fragments: EditableTextFragment[]; left: number; right: number; top: number }> = [];
   for (const fragment of sorted) {
     const fragmentHeight = Math.max(1, fragment.bottom - fragment.top);
     const existing = lines
@@ -11638,23 +12167,164 @@ function collectEditableMarkdownLines(overlay: PageOverlay): EditableMarkdownLin
         const previousText = previous?.run.text ?? "";
         const startsLatin = /^[A-Za-z0-9]/u.test(run.text);
         const endsLatin = /[A-Za-z0-9]$/u.test(previousText);
-        if (previous && gap > Math.max(3, run.fontSize * 0.72) && startsLatin && endsLatin) {
+        const visibleWordGap = gap > Math.max(0.18, run.fontSize * 0.035);
+        const joinsPunctuation = /^[,.;:!?，。；：！？、)\]}]/u.test(run.text) || /[(\[{]$/u.test(previousText);
+        if (previous && visibleWordGap && !joinsPunctuation && (startsLatin || endsLatin || gap > run.fontSize * 0.22)) {
           run.text = ` ${run.text}`;
         }
-        run.left = clamp((fragment.left - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1);
-        run.width = clamp(fragment.right - fragment.left, 0, overlay.cssWidth) / Math.max(1, overlay.cssWidth);
+        run.left = clamp((fragment.left - bounds.left) / Math.max(1, bounds.width), 0, 1);
+        run.width = clamp(fragment.right - fragment.left, 0, bounds.width) / Math.max(1, bounds.width);
         previous = fragment;
         return run;
       });
       return {
-        height: clamp((line.bottom - line.top) / Math.max(1, overlay.cssHeight), 0.001, 1),
-        left: clamp((line.left - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+        height: clamp((line.bottom - line.top) / Math.max(1, bounds.height), 0.001, 1),
+        left: clamp((line.left - bounds.left) / Math.max(1, bounds.width), 0, 1),
         runs,
-        top: clamp((line.top - overlayRect.top) / Math.max(1, overlay.cssHeight), 0, 1),
-        width: clamp((line.right - line.left) / Math.max(1, overlay.cssWidth), 0.001, 1)
+        top: clamp((line.top - bounds.top) / Math.max(1, bounds.height), 0, 1),
+        width: clamp((line.right - line.left) / Math.max(1, bounds.width), 0.001, 1)
       };
     })
     .filter((line) => line.runs.some((run) => run.text.length > 0));
+}
+
+function selectCompleteEditableLines(
+  renderedLines: EditableMarkdownLine[],
+  pdfLines: EditableMarkdownLine[]
+): EditableMarkdownLine[] {
+  const textLength = (lines: EditableMarkdownLine[]): number => lines.reduce(
+    (total, line) => total + line.runs.reduce((lineTotal, run) => lineTotal + run.text.replace(/\s+/g, "").length, 0),
+    0
+  );
+  const hasLinks = (lines: EditableMarkdownLine[]): boolean => lines.some((line) => line.runs.some((run) => Boolean(run.link)));
+  if (hasLinks(pdfLines) && !hasLinks(renderedLines)) {
+    return enrichEditableLineMetadata(pdfLines, renderedLines);
+  }
+  if (textLength(pdfLines) <= textLength(renderedLines) * 1.04) {
+    return enrichEditableLineMetadata(renderedLines, pdfLines);
+  }
+  return enrichEditableLineMetadata(pdfLines, renderedLines);
+}
+
+function enrichEditableLineMetadata(
+  primaryLines: EditableMarkdownLine[],
+  supplementalLines: EditableMarkdownLine[]
+): EditableMarkdownLine[] {
+  const supplementalRuns = supplementalLines.flatMap((line) => line.runs.map((run) => ({ line, run })));
+  return primaryLines.map((line) => ({
+    ...line,
+    runs: line.runs.map((run) => {
+      const runLeft = run.left ?? line.left;
+      const runRight = runLeft + (run.width ?? line.width);
+      const runWidth = Math.max(0.0001, runRight - runLeft);
+      const runHeight = Math.max(0.0001, line.height);
+      const normalizedText = run.text.replace(/\s+/gu, "").trim();
+      const matching = supplementalRuns
+        .map((candidate) => {
+          const candidateLeft = candidate.run.left ?? candidate.line.left;
+          const candidateRight = candidateLeft + (candidate.run.width ?? candidate.line.width);
+          const horizontal = Math.max(0, Math.min(runRight, candidateRight) - Math.max(runLeft, candidateLeft));
+          const vertical = Math.max(
+            0,
+            Math.min(line.top + line.height, candidate.line.top + candidate.line.height) - Math.max(line.top, candidate.line.top)
+          );
+          const candidateWidth = Math.max(0.0001, candidateRight - candidateLeft);
+          const candidateHeight = Math.max(0.0001, candidate.line.height);
+          const horizontalRatio = Math.max(horizontal / runWidth, horizontal / candidateWidth);
+          const verticalRatio = Math.max(vertical / runHeight, vertical / candidateHeight);
+          const candidateText = candidate.run.text.replace(/\s+/gu, "").trim();
+          const textMatches = normalizedText.length > 0 && normalizedText === candidateText;
+          const score = horizontalRatio * verticalRatio + (textMatches ? 2 : 0) + (candidate.run.link ? 0.05 : 0);
+          return { candidate, score };
+        })
+        .sort((a, b) => b.score - a.score)[0];
+      const supplemental = matching && matching.score >= 0.12 ? matching.candidate.run : null;
+      const link = run.link ?? supplemental?.link;
+      return supplemental
+        ? {
+            ...run,
+            bold: run.bold || supplemental.bold,
+            color: isNearDefaultTextColor(run.color) && !isNearDefaultTextColor(supplemental.color)
+              ? supplemental.color
+              : run.color,
+            fontFamily: run.fontFamily || supplemental.fontFamily,
+            italic: run.italic || supplemental.italic,
+            link,
+            opacity: run.opacity ?? supplemental.opacity,
+            strike: run.strike || supplemental.strike,
+            underline: run.underline || supplemental.underline || Boolean(link)
+          }
+        : run;
+    })
+  }));
+}
+
+function collectInkTextExportLines(elements: InkElement[], overlay: PageOverlay): EditableMarkdownLine[] {
+  const lines: EditableMarkdownLine[] = [];
+  for (const element of elements) {
+    if (element.kind !== "text" || element.pageIndex !== overlay.pageIndex || !element.text.trim()) {
+      continue;
+    }
+    const fontSize = Math.max(4, element.fontSize);
+    const sourceLines = element.text.split(/\r?\n/);
+    for (const [lineIndex, sourceLine] of sourceLines.entries()) {
+      const text = `${element.presentation === "comment" ? "💬 " : ""}${sourceLine}`.trimEnd();
+      if (!text.trim()) {
+        continue;
+      }
+      const width = clamp(Math.max(fontSize, text.length * fontSize * 0.58) / Math.max(1, overlay.cssWidth), 0.01, 1 - element.x);
+      const height = clamp(fontSize * 1.2 / Math.max(1, overlay.cssHeight), 0.002, 1);
+      const top = clamp(element.y + lineIndex * height, 0, 1 - height);
+      lines.push({
+        height,
+        left: element.x,
+        runs: [{
+          bold: false,
+          color: element.color,
+          fontFamily: element.fontFamily ?? "sans-serif",
+          fontSize,
+          italic: false,
+          left: element.x,
+          opacity: element.opacity,
+          strike: false,
+          text,
+          underline: false,
+          width
+        }],
+        top,
+        width
+      });
+    }
+  }
+  return lines;
+}
+
+function mergeInkTextExportLines(
+  lines: EditableMarkdownLine[],
+  inkLines: EditableMarkdownLine[]
+): EditableMarkdownLine[] {
+  const merged = [...lines];
+  for (const inkLine of inkLines) {
+    const text = inkLine.runs.map((run) => run.text).join("").trim();
+    const duplicate = merged.some((line) => {
+      const existingText = line.runs.map((run) => run.text).join("").trim();
+      return text === existingText && normalizedRectsOverlap(
+        inkLine.left,
+        inkLine.top,
+        inkLine.width,
+        inkLine.height,
+        line.left,
+        line.top,
+        line.width,
+        line.height,
+        0.012
+      );
+    });
+    if (!duplicate) {
+      merged.push(inkLine);
+    }
+  }
+  return merged.sort((a, b) => (a.top - b.top) || (a.left - b.left));
 }
 
 function renderEditableMarkdownLine(
@@ -11711,6 +12381,15 @@ function renderEditableMarkdownLine(
 
 function getEditableMarkdownSemanticSection(text: string): EditableMarkdownSemanticSection | null {
   const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+  if (/^(?:callout|标注框|提示框)$/.test(normalized)) {
+    return { kind: "callout", nextOrdinal: 1 };
+  }
+  if (/^(?:代码块|code\s+block)$/.test(normalized)) {
+    return { kind: "code", nextOrdinal: 1 };
+  }
+  if (/^(?:引用|blockquote|quote)$/.test(normalized)) {
+    return { kind: "quote", nextOrdinal: 1 };
+  }
   if (/无序列表|unordered\s+list/.test(normalized)) {
     return { kind: "unordered", nextOrdinal: 1 };
   }
@@ -11851,21 +12530,30 @@ function getEditableMarkdownDocumentBaseFontSize(
 
 function renderEditableMarkdownRun(run: EditableMarkdownTextRun, baseFontSize = 16, suppressFontSize = false): string {
   const validLink = run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link) ? run.link : undefined;
-  let content = escapeMarkdownInline(run.text);
-  if (run.bold && run.italic) {
+  const leadingSpace = run.text.match(/^\s*/u)?.[0] ?? "";
+  const trailingSpace = run.text.match(/\s*$/u)?.[0] ?? "";
+  const coreText = run.text.slice(leadingSpace.length, run.text.length - trailingSpace.length);
+  if (!coreText) {
+    return run.text;
+  }
+  const codeDelimiter = coreText.includes("``") ? "```" : coreText.includes("`") ? "``" : "`";
+  let content = run.code
+    ? `${codeDelimiter}${coreText}${codeDelimiter}`
+    : escapeMarkdownInline(coreText);
+  if (!run.code && run.bold && run.italic) {
     content = `***${content}***`;
-  } else if (run.bold) {
+  } else if (!run.code && run.bold) {
     content = `**${content}**`;
-  } else if (run.italic) {
+  } else if (!run.code && run.italic) {
     content = `*${content}*`;
   }
-  if (run.strike) {
+  if (!run.code && run.strike) {
     content = `~~${content}~~`;
   }
   if (validLink) {
     content = `[${content}](${escapeMarkdownLinkDestination(validLink)})`;
   }
-  return content;
+  return `${leadingSpace}${content}${trailingSpace}`;
 }
 
 function isNearDefaultTextColor(value: string): boolean {
@@ -11877,7 +12565,7 @@ function isNearDefaultTextColor(value: string): boolean {
 }
 
 function escapeMarkdownInline(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/([`*_[\]{}<>#+!|~-])/g, "\\$1");
+  return value.replace(/\\/g, "\\\\").replace(/([`*_[\]{}<>#+!|~])/g, "\\$1");
 }
 
 function escapeMarkdownLinkDestination(value: string): string {
@@ -12037,7 +12725,18 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
 }
 
 function isUsefulMarkdownExportImage(image: NoteDrawExportImage): boolean {
-  return !image.id.startsWith("html-visual-page-") && !image.id.startsWith("native-page-");
+  return !image.id.startsWith("html-visual-page-") &&
+    !image.id.startsWith("native-page-") &&
+    isUsefulNativeExportImage(image);
+}
+
+function isUsefulNativeExportImage(image: VisualConversionImage): boolean {
+  if (!image.id.startsWith("pdf-raster-page-")) {
+    return true;
+  }
+  const separator = image.dataUrl.indexOf(",");
+  const estimatedBytes = separator >= 0 ? Math.floor((image.dataUrl.length - separator - 1) * 0.75) : 0;
+  return estimatedBytes >= 16_000 || image.width * image.height >= 0.12;
 }
 
 function mergeVisualConversionPageImages(
@@ -12096,6 +12795,177 @@ async function flattenImageDataUrlOnWhite(dataUrl: string, opacity = 1): Promise
   return canvas.toDataURL("image/png");
 }
 
+function sampleEditableTextColors(canvas: HTMLCanvasElement, lines: EditableMarkdownLine[]): void {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    return;
+  }
+  let pixels: ImageData;
+  try {
+    pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  } catch {
+    return;
+  }
+  const readColor = (line: EditableMarkdownLine, run: EditableMarkdownTextRun): string | null => {
+    const left = Math.max(0, Math.floor((run.left ?? line.left) * canvas.width));
+    const right = Math.min(canvas.width, Math.ceil(((run.left ?? line.left) + (run.width ?? line.width)) * canvas.width));
+    const top = Math.max(0, Math.floor(line.top * canvas.height));
+    const bottom = Math.min(canvas.height, Math.ceil((line.top + line.height) * canvas.height));
+    if (right - left < 2 || bottom - top < 2) {
+      return null;
+    }
+    const stride = Math.max(1, Math.floor(Math.sqrt(((right - left) * (bottom - top)) / 12_000)));
+    const buckets = new Map<number, { blue: number; count: number; green: number; red: number }>();
+    for (let y = top; y < bottom; y += stride) {
+      for (let x = left; x < right; x += stride) {
+        const offset = (y * canvas.width + x) * 4;
+        if (pixels.data[offset + 3] < 96) {
+          continue;
+        }
+        const red = pixels.data[offset];
+        const green = pixels.data[offset + 1];
+        const blue = pixels.data[offset + 2];
+        const key = (red >> 4) << 8 | (green >> 4) << 4 | (blue >> 4);
+        const bucket = buckets.get(key) ?? { blue: 0, count: 0, green: 0, red: 0 };
+        bucket.count += 1;
+        bucket.red += red;
+        bucket.green += green;
+        bucket.blue += blue;
+        buckets.set(key, bucket);
+      }
+    }
+    const sorted = Array.from(buckets.values()).sort((a, b) => b.count - a.count);
+    const background = sorted[0];
+    if (!background || sorted.length < 2) {
+      return null;
+    }
+    const backgroundColor = {
+      b: background.blue / background.count,
+      g: background.green / background.count,
+      r: background.red / background.count
+    };
+    const candidate = sorted.slice(1)
+      .map((bucket) => {
+        const color = {
+          b: bucket.blue / bucket.count,
+          g: bucket.green / bucket.count,
+          r: bucket.red / bucket.count
+        };
+        const distance = Math.hypot(
+          color.r - backgroundColor.r,
+          color.g - backgroundColor.g,
+          color.b - backgroundColor.b
+        );
+        return { bucket, color, score: distance * Math.sqrt(bucket.count) };
+      })
+      .filter((entry) => entry.bucket.count >= 2 && entry.score >= 60)
+      .sort((a, b) => b.score - a.score)[0];
+    if (!candidate) {
+      return null;
+    }
+    return rgbToHex(candidate.color.r, candidate.color.g, candidate.color.b);
+  };
+
+  for (const line of lines) {
+    for (const run of line.runs) {
+      if (!isNearDefaultTextColor(run.color)) {
+        continue;
+      }
+      const sampled = readColor(line, run);
+      if (sampled) {
+        run.color = sampled;
+      }
+    }
+  }
+}
+
+function attachLinksToVisualConversionImages(
+  images: VisualConversionImage[],
+  links: ExportLinkRect[],
+  overlay: PageOverlay
+): VisualConversionImage[] {
+  const overlayRect = overlay.pageEl.getBoundingClientRect();
+  const normalizedLinks = links.map((link) => ({
+    bottom: clamp((link.bottom - overlayRect.top) / Math.max(1, overlay.cssHeight), 0, 1),
+    href: link.href,
+    left: clamp((link.left - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+    right: clamp((link.right - overlayRect.left) / Math.max(1, overlay.cssWidth), 0, 1),
+    top: clamp((link.top - overlayRect.top) / Math.max(1, overlay.cssHeight), 0, 1)
+  }));
+  return images.map((image) => {
+    const match = normalizedLinks
+      .map((link) => {
+        const overlapWidth = Math.max(0, Math.min(image.x + image.width, link.right) - Math.max(image.x, link.left));
+        const overlapHeight = Math.max(0, Math.min(image.y + image.height, link.bottom) - Math.max(image.y, link.top));
+        return { href: link.href, ratio: overlapWidth * overlapHeight / Math.max(0.0001, image.width * image.height) };
+      })
+      .filter((candidate) => candidate.ratio >= 0.08)
+      .sort((a, b) => b.ratio - a.ratio)[0];
+    return match ? { ...image, link: match.href } : image;
+  });
+}
+
+async function buildInkVisualExportImages(
+  elements: InkElement[],
+  overlay: PageOverlay,
+  outputWidth: number,
+  outputHeight: number
+): Promise<VisualConversionImage[]> {
+  const images: VisualConversionImage[] = [];
+  for (const element of elements) {
+    if (element.kind !== "stroke" && element.kind !== "cover") {
+      continue;
+    }
+    const bounds = normalizedElementBounds(element);
+    if (!bounds) {
+      continue;
+    }
+    const strokePadX = element.kind === "stroke"
+      ? Math.max(3, strokeDisplayWidth(element, overlay.cssWidth) * 2) / Math.max(1, overlay.cssWidth)
+      : 2 / Math.max(1, overlay.cssWidth);
+    const strokePadY = element.kind === "stroke"
+      ? Math.max(3, strokeDisplayWidth(element, overlay.cssWidth) * 2) / Math.max(1, overlay.cssHeight)
+      : 2 / Math.max(1, overlay.cssHeight);
+    const left = clamp(bounds.minX - strokePadX, 0, 1);
+    const top = clamp(bounds.minY - strokePadY, 0, 1);
+    const right = clamp(bounds.maxX + strokePadX, 0, 1);
+    const bottom = clamp(bounds.maxY + strokePadY, 0, 1);
+    const width = Math.max(0.001, right - left);
+    const height = Math.max(0.001, bottom - top);
+    const canvas = activeDocument.createElement("canvas");
+    canvas.width = Math.max(1, Math.ceil(width * outputWidth));
+    canvas.height = Math.max(1, Math.ceil(height * outputHeight));
+    const context = canvas.getContext("2d");
+    if (!context) {
+      continue;
+    }
+    context.setTransform(
+      outputWidth / Math.max(1, overlay.cssWidth),
+      0,
+      0,
+      outputHeight / Math.max(1, overlay.cssHeight),
+      -left * outputWidth,
+      -top * outputHeight
+    );
+    if (element.kind === "stroke") {
+      drawStroke(context, element, overlay.cssWidth, overlay.cssHeight, false);
+    } else {
+      drawCoverElement(context, element, overlay.cssWidth, overlay.cssHeight, false);
+    }
+    images.push({
+      dataUrl: canvas.toDataURL("image/png"),
+      height,
+      id: `pdftion-${element.kind}-${element.id}`,
+      opacity: 1,
+      width,
+      x: left,
+      y: top,
+      zIndex: element.zIndex
+    });
+  }
+  return images;
+}
+
 async function extractHtmlDerivedVisualLayers(
   pageCanvas: HTMLCanvasElement,
   lines: EditableMarkdownLine[],
@@ -12145,6 +13015,9 @@ async function extractHtmlDerivedVisualLayers(
   const rows = Math.ceil(layer.height / cellSize);
   const cellCounts = new Uint32Array(columns * rows);
   for (let y = 0; y < layer.height; y += 1) {
+    if (y > 0 && y % 160 === 0) {
+      await sleepMs(0);
+    }
     for (let x = 0; x < layer.width; x += 1) {
       const offset = (y * layer.width + x) * 4;
       const alpha = pixels.data[offset + 3];
@@ -12221,6 +13094,9 @@ async function extractHtmlDerivedVisualLayers(
     let visible = 0;
     const colors = new Set<number>();
     for (let y = scanTop; y <= scanBottom; y += 1) {
+      if (y > scanTop && (y - scanTop) % 160 === 0) {
+        await sleepMs(0);
+      }
       for (let x = scanLeft; x <= scanRight; x += 1) {
         const offset = (y * layer.width + x) * 4;
         if (pixels.data[offset + 3] <= 12) {
@@ -12337,6 +13213,88 @@ async function buildCombinedPagePng(pages: VisualConversionPage[]): Promise<Uint
   return dataUrlToBytes(canvas.toDataURL("image/png"));
 }
 
+function getNativeExportBlockPrefix(block: NativeExportBlock): string {
+  if (block.kind === "unordered-list") return "• ";
+  if (block.kind === "ordered-list") return `${block.ordinal ?? 1}. `;
+  if (block.kind === "task") return `${block.checked ? "☑" : "☐"} `;
+  if (block.kind === "callout-title") return `${getCommonCalloutIcon(block.runs.map((run) => run.text).join(""))} `;
+  return "";
+}
+
+function renderNativeExportHtmlBlock(
+  block: NativeExportBlock,
+  page: NativeExportPage,
+  document: NativeExportDocument
+): string {
+  const position = `left:${(block.left * 100).toFixed(4)}%;top:${(block.top * 100).toFixed(4)}%;width:${(block.width * 100).toFixed(4)}%;min-height:${((block.height ?? 0.01) * 100).toFixed(4)}%`;
+  if (block.kind === "image" && block.image) {
+    const image = block.image;
+    const imageMarkup = `<img class="block-image" src="${htmlAttributeEscape(image.dataUrl)}" alt="${htmlAttributeEscape(image.assetName)}" style="${position};height:${(image.height * 100).toFixed(4)}%;opacity:${clamp(image.opacity, 0, 1).toFixed(3)};z-index:${image.zIndex ?? 0}">`;
+    return image.link
+      ? `<a class="block-image-link" href="${htmlAttributeEscape(image.link)}">${imageMarkup}</a>`
+      : imageMarkup;
+  }
+  if (block.kind === "separator") {
+    return `<hr class="block block-separator" style="${position}">`;
+  }
+  if (block.kind === "table" && block.table) {
+    const rows = block.table.rows.map((row) => `<tr>${row.map((cell) => (
+      `<td>${renderNativeHtmlRuns(cell.runs, block, page, document)}</td>`
+    )).join("")}</tr>`).join("");
+    return `<table class="block block-table" style="${position}"><tbody>${rows}</tbody></table>`;
+  }
+  const prefix = getNativeExportBlockPrefix(block);
+  const content = `${prefix ? `<span>${htmlEscape(prefix)}</span>` : ""}${renderNativeHtmlRuns(block.runs, block, page, document)}`;
+  const style = `${position};${block.listLevel ? `padding-left:${block.listLevel * 1.4}cqw;` : ""}`;
+  if (block.kind === "heading") {
+    const level = clamp(block.headingLevel ?? 1, 1, 6);
+    return `<h${level} class="block" style="${style}">${content}</h${level}>`;
+  }
+  if (block.kind === "code") {
+    return `<pre class="block block-code" style="${style}"><code>${block.runs.map((run) => htmlEscape(run.text)).join("")}</code></pre>`;
+  }
+  if (block.kind === "quote") {
+    return `<blockquote class="block block-quote" style="${style}">${content}</blockquote>`;
+  }
+  if (block.kind === "callout-title" || block.kind === "callout-body") {
+    return `<aside class="block block-callout" style="${style}">${content}</aside>`;
+  }
+  if (block.kind === "unordered-list") {
+    return `<ul class="block block-list" style="${style}"><li>${renderNativeHtmlRuns(block.runs, block, page, document)}</li></ul>`;
+  }
+  if (block.kind === "ordered-list") {
+    return `<ol class="block block-list" start="${block.ordinal ?? 1}" style="${style}"><li>${renderNativeHtmlRuns(block.runs, block, page, document)}</li></ol>`;
+  }
+  if (block.kind === "task") {
+    return `<p class="block block-list" role="checkbox" aria-checked="${block.checked ? "true" : "false"}" style="${style}">${content}</p>`;
+  }
+  return `<p class="block" style="${style}">${content}</p>`;
+}
+
+function renderNativeHtmlRuns(
+  runs: EditableMarkdownTextRun[],
+  block: NativeExportBlock,
+  page: NativeExportPage,
+  document: NativeExportDocument
+): string {
+  const maxRunSize = Math.max(document.baseFontSize, ...runs.map((run) => run.fontSize));
+  const baseSizeCqw = Math.max(0.6, (block.height ?? 0.014) * page.height / Math.max(1, page.width) * 100 * 0.84);
+  return runs.map((run) => {
+    const decorations = [run.underline ? "underline" : "", run.strike ? "line-through" : ""].filter(Boolean).join(" ");
+    const style = [
+      `color:#${exportHexColor(run.color)}`,
+      `font-family:${htmlAttributeEscape(run.code || block.kind === "code" ? "Consolas, monospace" : run.fontFamily || "system-ui")}`,
+      `font-size:${Math.max(0.5, baseSizeCqw * run.fontSize / maxRunSize).toFixed(3)}cqw`,
+      `font-style:${run.italic ? "italic" : "normal"}`,
+      `font-weight:${run.bold || block.kind === "callout-title" ? "700" : "400"}`,
+      `opacity:${clamp(run.opacity ?? 1, 0, 1).toFixed(3)}`,
+      decorations ? `text-decoration:${decorations}` : ""
+    ].filter(Boolean).join(";");
+    const span = `<span style="${style}">${htmlEscape(run.text)}</span>`;
+    return run.link ? `<a href="${htmlAttributeEscape(run.link)}">${span}</a>` : span;
+  }).join("");
+}
+
 async function buildPptxFromPageImages(pages: VisualConversionPage[], title: string): Promise<Uint8Array> {
   const module = await import("pptxgenjs");
   const PptxGenJS = module.default;
@@ -12352,8 +13310,9 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
   pptx.author = "Murat";
   pptx.subject = title;
   pptx.title = title;
+  const document = buildNativeExportDocumentFromVisualPages(pages);
 
-  for (const page of [...pages].sort((a, b) => a.pageIndex - b.pageIndex)) {
+  for (const page of document.pages) {
     const slide = pptx.addSlide();
     slide.background = { color: "FFFFFF" };
     const pageRatio = page.width / Math.max(1, page.height);
@@ -12362,43 +13321,118 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
     const height = pageRatio >= slideRatio ? slideWidth / pageRatio : slideHeight;
     const imageX = (slideWidth - width) / 2;
     const imageY = (slideHeight - height) / 2;
-    slide.addImage({
-      data: uint8ArrayToDataUrl(page.bytes, "image/png"),
-      h: height,
-      w: width,
-      x: imageX,
-      y: imageY
-    });
-    for (const line of page.lines) {
-      const textRuns = line.runs.map((run) => ({
-        text: run.text,
-        options: {
-          bold: run.bold,
-          breakLine: false,
-          color: exportHexColor(run.color),
-          fontFace: exportFontFace(run.fontFamily),
-          fontSize: Math.max(1, line.height * height * 72 * 0.82),
-          hyperlink: run.link && /^(?:https?:|mailto:)/i.test(run.link) ? { url: run.link } : undefined,
-          italic: run.italic,
-          strike: run.strike ? ("sngStrike" as const) : undefined,
-          transparency: 100,
-          underline: run.underline ? { style: "sng" as const } : undefined
-        }
-      }));
+    const imageBlocks = page.blocks.filter((block) => block.kind === "image" && block.image);
+    const foregroundImages = imageBlocks.filter((block) => block.image?.id.startsWith("pdftion-") === true);
+    const backgroundImages = imageBlocks.filter((block) => !foregroundImages.includes(block));
+    const addImage = (block: NativeExportBlock): void => {
+      const image = block.image;
+      if (!image) return;
+      slide.addImage({
+        data: image.dataUrl,
+        h: Math.max(0.01, image.height * height),
+        hyperlink: image.link ? { url: image.link } : undefined,
+        transparency: Math.round((1 - clamp(image.opacity, 0, 1)) * 100),
+        w: Math.max(0.01, image.width * width),
+        x: imageX + image.x * width,
+        y: imageY + image.y * height
+      });
+    };
+    backgroundImages.forEach(addImage);
+
+    for (const block of page.blocks) {
+      if (block.kind === "image") {
+        continue;
+      }
+      const x = imageX + block.left * width;
+      const y = imageY + block.top * height;
+      const blockWidth = Math.max(0.02, Math.min(imageX + width - x, block.width * width + 0.12));
+      const blockHeight = Math.max(0.04, (block.height ?? 0.02) * height * 1.45);
+      if (block.kind === "separator") {
+        slide.addShape(pptx.ShapeType.line, {
+          h: 0,
+          line: { color: "8A8A8A", width: 1 },
+          w: blockWidth,
+          x,
+          y
+        });
+        continue;
+      }
+      if (block.kind === "table" && block.table) {
+        const rows = block.table.rows.map((row, rowIndex) => row.map((cell) => ({
+          options: {
+            bold: rowIndex === 0,
+            color: exportHexColor(cell.runs[0]?.color ?? "#000000"),
+            fontFace: exportFontFace(cell.runs[0]?.fontFamily ?? "Arial"),
+            fontSize: Math.max(7, (block.height ?? 0.04) * height * 72 / Math.max(1, block.table?.rows.length ?? 1) * 0.55),
+            margin: 0.04
+          },
+          text: cell.runs.map((run) => run.text).join("")
+        })));
+        slide.addTable(rows, {
+          border: { color: "B7BCC4", pt: 0.75 },
+          fill: { color: "FFFFFF" },
+          h: Math.max(0.25, (block.height ?? 0.06) * height),
+          margin: 0.04,
+          rowH: Math.max(0.18, (block.height ?? 0.06) * height / Math.max(1, rows.length)),
+          w: blockWidth,
+          x,
+          y
+        });
+        continue;
+      }
+      const prefix = getNativeExportBlockPrefix(block);
+      const maxRunSize = Math.max(document.baseFontSize, ...block.runs.map((run) => run.fontSize));
+      const targetMaxSize = Math.max(5, (block.height ?? 0.015) * height * 72 * 0.84);
+      const textRuns = [
+        ...(prefix ? [{
+          options: {
+            bold: block.kind === "callout-title",
+            breakLine: false,
+            color: "333333",
+            fontFace: "Segoe UI Symbol",
+            fontSize: targetMaxSize
+          },
+          text: prefix
+        }] : []),
+        ...block.runs.map((run) => ({
+          text: run.text,
+          options: {
+            bold: run.bold || block.kind === "callout-title",
+            breakLine: false,
+            color: exportHexColor(run.color),
+            fontFace: run.code || block.kind === "code" ? "Consolas" : exportFontFace(run.fontFamily),
+            fontSize: Math.max(4, targetMaxSize * run.fontSize / maxRunSize),
+            hyperlink: run.link ? { url: run.link } : undefined,
+            italic: run.italic,
+            strike: run.strike ? ("sngStrike" as const) : undefined,
+            transparency: Math.round((1 - clamp(run.opacity ?? 1, 0, 1)) * 100),
+            underline: run.underline ? { style: "sng" as const } : undefined
+          }
+        }))
+      ];
       if (textRuns.length === 0) {
         continue;
       }
-      const x = imageX + line.left * width;
       slide.addText(textRuns, {
-        h: Math.max(0.01, line.height * height),
-        margin: 0,
+        breakLine: false,
+        fill: block.kind === "code"
+          ? { color: "F3F4F6" }
+          : block.kind === "callout-title" || block.kind === "callout-body"
+            ? { color: "EEF5FF", transparency: 10 }
+            : undefined,
+        fit: "shrink",
+        h: blockHeight,
+        isTextBox: true,
+        margin: block.kind === "callout-title" || block.kind === "callout-body" ? 0.05 : 0,
         paraSpaceAfter: 0,
         valign: "top",
-        w: Math.max(0.01, Math.min(imageX + width - x, line.width * width)),
+        w: blockWidth,
+        wrap: false,
         x,
-        y: imageY + line.top * height
+        y
       });
     }
+    foregroundImages.forEach(addImage);
   }
 
   const output = await pptx.write({ outputType: "arraybuffer" });
@@ -12416,91 +13450,175 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
 }
 
 function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]): string {
-  const figures = [...pages]
-    .sort((a, b) => a.pageIndex - b.pageIndex)
-    .map((page) => {
-      const textLayer = page.lines.map((line) => {
-        const runs = line.runs.map((run) => {
-          const text = htmlEscape(run.text);
-          const x = ((run.left ?? line.left) * page.width).toFixed(2);
-          const width = Math.max(1, (run.width ?? line.width) * page.width).toFixed(2);
-          const attributes = `x="${x}" textLength="${width}" lengthAdjust="spacingAndGlyphs"`;
-          return run.link && /^(?:https?:|mailto:|obsidian:)/i.test(run.link)
-            ? `<a href="${htmlAttributeEscape(run.link)}"><tspan ${attributes}>${text}</tspan></a>`
-            : `<tspan ${attributes}>${text}</tspan>`;
-        }).join("");
-        const fontSize = Math.max(1, line.height * page.height * 0.82).toFixed(2);
-        const baseline = ((line.top + line.height * 0.82) * page.height).toFixed(2);
-        return `<text y="${baseline}" font-size="${fontSize}">${runs}</text>`;
-      }).join("");
-      return `<figure><div class="page-surface"><img src="${uint8ArrayToDataUrl(page.bytes, "image/png")}" alt="Page ${page.pageIndex + 1}"><svg class="text-layer" viewBox="0 0 ${page.width} ${page.height}" preserveAspectRatio="none" aria-label="Page ${page.pageIndex + 1} text">${textLayer}</svg></div><figcaption>Page ${page.pageIndex + 1}</figcaption></figure>`;
-    })
-    .join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>html{background:#dfe3e8;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:24px}main{margin:0 auto;max-width:1100px}figure{background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.16);margin:0 auto 24px;page-break-after:always}figure:last-child{page-break-after:auto}.page-surface{position:relative}.page-surface>img{display:block;height:auto;width:100%}.text-layer{fill:transparent;height:100%;inset:0;overflow:hidden;position:absolute;user-select:text;-webkit-user-select:text;width:100%}.text-layer text,.text-layer tspan{cursor:text;user-select:text;-webkit-user-select:text}figcaption{font-size:12px;padding:8px 12px;text-align:right;color:#5f6368}@media(max-width:640px){body{padding:8px}figure{margin-bottom:10px}}@media print{html,body{background:#fff}body{padding:0}figure{box-shadow:none;margin:0}.text-layer{display:none}figcaption{display:none}}</style></head><body><main>${figures}</main></body></html>`;
+  const document = buildNativeExportDocumentFromVisualPages(pages);
+  const pageMarkup = document.pages.map((page) => {
+    const blocks = page.blocks.map((block) => renderNativeExportHtmlBlock(block, page, document)).join("");
+    return `<section class="page" aria-label="Page ${page.pageIndex + 1}" style="aspect-ratio:${page.width}/${page.height}">${blocks}</section>`;
+  }).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>*{box-sizing:border-box}html{background:#e7e9ed;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:18px}main{margin:0 auto;max-width:1100px}.page{background:#fff;container-type:inline-size;margin:0 auto 18px;overflow:hidden;position:relative;width:100%;box-shadow:0 2px 10px #0002}.block{letter-spacing:0;margin:0;overflow:visible;position:absolute;white-space:pre-wrap}.block a{color:inherit;text-decoration:inherit}.block-code{background:#f3f4f6;font-family:Consolas,"Noto Sans Mono",monospace;padding:.35cqw;white-space:pre-wrap}.block-callout{background:#eef5ff;border-left:.35cqw solid #4b8fd8;padding:.3cqw}.block-quote{border-left:.3cqw solid #9aa0a6;padding-left:.7cqw}.block-list{padding-left:1.4cqw}.block-separator{border:0;border-top:.12cqw solid #888}.block-table{border-collapse:collapse;table-layout:fixed}.block-table td{border:.08cqw solid #b7bcc4;padding:.3cqw;vertical-align:top}.block-table tr:first-child td{font-weight:700;background:#f4f5f7}.block-image{height:auto;object-fit:contain;position:absolute}.block-image-link{position:static} @media(max-width:640px){body{padding:6px}.page{margin-bottom:8px;box-shadow:none}}@media print{html,body{background:#fff;padding:0}.page{box-shadow:none;margin:0;break-after:page}.page:last-child{break-after:auto}}</style></head><body><main>${pageMarkup}</main></body></html>`;
 }
 
 async function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Promise<Uint8Array> {
   const {
-    AlignmentType,
+    BorderStyle,
     Document,
+    ExternalHyperlink,
+    HeadingLevel,
+    HorizontalPositionRelativeFrom,
     ImageRun,
     Packer,
-    Paragraph
+    Paragraph,
+    Table,
+    TableCell,
+    TableRow,
+    TextRun,
+    TextWrappingType,
+    UnderlineType,
+    VerticalPositionRelativeFrom,
+    WidthType
   } = await import("docx");
+  const nativeDocument = buildNativeExportDocumentFromVisualPages(pages);
   const pageWidthTwips = 11906;
-  const pageHeightTwips = 16838;
-  const pageMarginTwips = 360;
-  const contentWidthTwips = pageWidthTwips - pageMarginTwips * 2;
-  const contentHeightTwips = pageHeightTwips - pageMarginTwips * 2;
-  const contentWidthPx = contentWidthTwips / 15;
-  const contentHeightPx = contentHeightTwips / 15;
-  const fitImage = (width: number, height: number): { height: number; width: number } => {
-    const sourceWidth = Math.max(1, width);
-    const sourceHeight = Math.max(1, height);
-    const scale = Math.min(1, contentWidthPx / sourceWidth, contentHeightPx / sourceHeight);
-    return {
-      height: Math.max(1, Math.round(sourceHeight * scale)),
-      width: Math.max(1, Math.round(sourceWidth * scale))
-    };
-  };
-
-  const sections = [...pages]
-    .sort((a, b) => a.pageIndex - b.pageIndex)
-    .map((page) => {
-      const fitted = fitImage(page.width, page.height);
-      const children = [new Paragraph({
-        alignment: AlignmentType.CENTER,
-        children: [new ImageRun({
-          data: page.bytes,
-          transformation: fitted,
-          type: "png"
-        })],
-        spacing: { after: 0, before: 0 }
-      })];
-
-      return {
-        children,
-        properties: {
-          page: {
-            margin: { bottom: pageMarginTwips, left: pageMarginTwips, right: pageMarginTwips, top: pageMarginTwips },
-            size: { height: pageHeightTwips, width: pageWidthTwips }
-          }
-        }
-      };
+  const pageMarginTwips = 540;
+  const headingLevels = [
+    HeadingLevel.HEADING_1,
+    HeadingLevel.HEADING_2,
+    HeadingLevel.HEADING_3,
+    HeadingLevel.HEADING_4,
+    HeadingLevel.HEADING_5,
+    HeadingLevel.HEADING_6
+  ];
+  const makeTextRun = (run: EditableMarkdownTextRun, block: NativeExportBlock): InstanceType<typeof TextRun> => {
+    const fontSizePt = clamp(11 * run.fontSize / Math.max(1, nativeDocument.baseFontSize), 7.5, 34);
+    return new TextRun({
+      bold: run.bold || block.kind === "callout-title",
+      color: exportHexColor(run.color),
+      font: run.code || block.kind === "code" ? "Consolas" : exportFontFace(run.fontFamily),
+      italics: run.italic,
+      size: Math.round(fontSizePt * 2),
+      strike: run.strike,
+      text: run.text,
+      underline: run.underline ? { type: UnderlineType.SINGLE } : undefined
     });
+  };
+  const makeRuns = (block: NativeExportBlock): Array<InstanceType<typeof TextRun> | InstanceType<typeof ExternalHyperlink>> => {
+    const prefix = getNativeExportBlockPrefix(block);
+    const children: Array<InstanceType<typeof TextRun> | InstanceType<typeof ExternalHyperlink>> = prefix
+      ? [new TextRun({ bold: block.kind === "callout-title", font: "Segoe UI Symbol", text: prefix })]
+      : [];
+    for (const run of block.runs) {
+      const textRun = makeTextRun(run, block);
+      children.push(run.link ? new ExternalHyperlink({ children: [textRun], link: run.link }) : textRun);
+    }
+    return children;
+  };
+  const sections = nativeDocument.pages.map((page) => {
+    const pageHeightTwips = Math.round(pageWidthTwips * page.height / Math.max(1, page.width));
+    const imageChildren: Array<InstanceType<typeof ImageRun> | InstanceType<typeof ExternalHyperlink>> = [];
+    for (const block of page.blocks) {
+      const image = block.image;
+      if (block.kind !== "image" || !image) continue;
+      const widthPx = Math.max(1, Math.round(pageWidthTwips / 1440 * 96 * image.width));
+      const heightPx = Math.max(1, Math.round(pageHeightTwips / 1440 * 96 * image.height));
+      const imageRun = new ImageRun({
+        data: dataUrlToBytes(image.dataUrl),
+        floating: {
+          behindDocument: image.id.startsWith("pdf-raster-page-"),
+          horizontalPosition: {
+            offset: Math.round(image.x * pageWidthTwips * 635),
+            relative: HorizontalPositionRelativeFrom.PAGE
+          },
+          lockAnchor: true,
+          verticalPosition: {
+            offset: Math.round(image.y * pageHeightTwips * 635),
+            relative: VerticalPositionRelativeFrom.PAGE
+          },
+          wrap: { type: TextWrappingType.NONE }
+        },
+        transformation: { height: heightPx, width: widthPx },
+        type: "png"
+      });
+      imageChildren.push(image.link ? new ExternalHyperlink({ children: [imageRun], link: image.link }) : imageRun);
+    }
+    const children: Array<InstanceType<typeof Paragraph> | InstanceType<typeof Table>> = [];
+    if (imageChildren.length > 0) {
+      children.push(new Paragraph({ children: imageChildren, spacing: { after: 0, before: 0, line: 1 } }));
+    }
+    for (const block of page.blocks) {
+      if (block.kind === "image") continue;
+      if (block.kind === "table" && block.table) {
+        children.push(new Table({
+          rows: block.table.rows.map((row, rowIndex) => new TableRow({
+            children: row.map((cell) => new TableCell({
+              children: [new Paragraph({
+                children: cell.runs.map((run) => makeTextRun(run, block)),
+                spacing: { after: 40, before: 40 }
+              })],
+              shading: rowIndex === 0 ? { fill: "F2F3F5" } : undefined,
+              width: { size: 100 / Math.max(1, row.length), type: WidthType.PERCENTAGE }
+            }))
+          })),
+          width: { size: 100, type: WidthType.PERCENTAGE }
+        }));
+        continue;
+      }
+      if (block.kind === "separator") {
+        children.push(new Paragraph({
+          border: { bottom: { color: "888888", size: 6, space: 1, style: BorderStyle.SINGLE } },
+          children: [],
+          spacing: { after: 120, before: 80 }
+        }));
+        continue;
+      }
+      const isCallout = block.kind === "callout-title" || block.kind === "callout-body";
+      children.push(new Paragraph({
+        border: block.kind === "quote" || isCallout
+          ? { left: { color: isCallout ? "4B8FD8" : "9AA0A6", size: 12, space: 8, style: BorderStyle.SINGLE } }
+          : undefined,
+        children: makeRuns(block),
+        heading: block.kind === "heading" ? headingLevels[clamp((block.headingLevel ?? 1) - 1, 0, 5)] : undefined,
+        indent: block.kind === "quote" || isCallout
+          ? { left: 360 }
+          : block.listLevel
+            ? { left: 720 }
+            : undefined,
+        shading: block.kind === "code"
+          ? { fill: "F3F4F6" }
+          : isCallout
+            ? { fill: "EEF5FF" }
+            : undefined,
+        spacing: { after: block.kind === "heading" ? 100 : 70, before: block.kind === "heading" ? 120 : 0 }
+      }));
+    }
+    if (children.length === 0) {
+      children.push(new Paragraph({ children: [] }));
+    }
+    return {
+      children,
+      properties: {
+        page: {
+          margin: { bottom: pageMarginTwips, left: pageMarginTwips, right: pageMarginTwips, top: pageMarginTwips },
+          size: { height: pageHeightTwips, width: pageWidthTwips }
+        }
+      }
+    };
+  });
 
   const document = new Document({
     creator: "Murat",
-    description: "Pdftion editable conversion with embedded source images.",
+    description: "Pdftion native editable conversion with text, tables, links, images, and drawings.",
     sections,
     title
   });
   const blob = await Packer.toBlob(document);
+  const previewPageHeightTwips = Math.round(
+    pageWidthTwips * (nativeDocument.pages[0]?.height ?? 1) / Math.max(1, nativeDocument.pages[0]?.width ?? 1)
+  );
   return injectOfficePreviewPages(
     new Uint8Array(await blob.arrayBuffer()),
     pages,
     pageWidthTwips / 20,
-    pageHeightTwips / 20
+    previewPageHeightTwips / 20
   );
 }
 

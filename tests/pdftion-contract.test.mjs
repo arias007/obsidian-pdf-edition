@@ -23,6 +23,7 @@ test("settings expose and persist every supported interface language", async () 
 test("saved PDF ink hides its original native layer as soon as editing begins", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
+  assert.match(source, /const pdfInkStrokes = state \? \[\] : await this\.plugin\.loadPdfInkAnnotations\(this\.file\)/);
   assert.match(source, /if \(element\.pdfSaved === true\) \{[\s\S]*?this\.pendingNativeInkHidePages\.add\(element\.pageIndex\);\s*this\.updateExternalInkLayerState\(\)/);
   assert.match(source, /translateElement\(element, dx, dy\)/);
 });
@@ -66,92 +67,88 @@ test("all requested visual formats share the page capture pipeline", async () =>
   assert.match(source, /const timeout = window\.setTimeout\(finish, 120\)/);
 });
 
-test("Markdown conversion keeps native image references and delegates ink to NoteDraw", async () => {
+test("Markdown conversion keeps common image references and optional NoteDraw ink", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /const noteDraw = getNoteDrawWriteApi\(\)/);
   assert.match(source, /const visualPages = await this\.captureVisualConversionPages\(\{/);
   assert.match(source, /collectNoteDrawExportImages\(visualPages, this\.getEditableElements\(\)\)/);
   assert.match(source, /\.filter\(isUsefulMarkdownExportImage\)/);
-  assert.match(source, /!image\.id\.startsWith\("html-visual-page-"\) && !image\.id\.startsWith\("native-page-"\)/);
-  assert.match(source, /partitionMarkdownExportImages\(pages, images\)/);
-  assert.match(source, /const inlineImages = noteDraw \? partitionedImages\.inline : images/);
-  assert.match(source, /const noteDrawImages = noteDraw \? partitionedImages\.floating : \[\]/);
-  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages, inlineImages\)/);
+  assert.match(source, /function isUsefulNativeExportImage\(image: VisualConversionImage\)/);
+  assert.match(source, /estimatedBytes >= 16_000 \|\| image\.width \* image\.height >= 0\.12/);
+  assert.match(source, /const markdown = buildEditableMarkdown\(this\.file, pages, images, targetPath\)/);
   assert.doesNotMatch(source, /writeVisualConversionImages\(pages\)/);
   assert.match(source, /persistNoteDrawExportImages/);
   assert.ok(source.includes('const assetDir = `${targetPath.replace(/\\.md$/i, "")}-assets`;'));
   assert.match(source, /assetPath: image\.assetPath/);
-  assert.ok(source.includes('output.push(`![[${escapeObsidianWikilink(item.value.assetPath ?? item.value.assetName)}]]`'));
-  assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData\(targetPath, pages, this\.getEditableElements\(\), noteDrawImages\)\)/);
-  assert.match(source, /findSafeMarkdownFloatingImagePosition\(page, image\)/);
-  assert.match(source, /if \(!safePosition\) \{\s*inline\.push\(image\)/);
+  assert.match(source, /const imageMarkdown = `!\[\$\{alt\}\]\(\$\{escapeMarkdownLinkDestination\(path\)\}\)`/);
+  assert.doesNotMatch(source.slice(source.indexOf("function buildEditableMarkdown"), source.indexOf("function getCommonCalloutIcon")), /!\[\[/);
+  assert.match(source, /noteDraw\.writeDrawings\(targetFile, buildNoteDrawExportData\(targetPath, pages, this\.getEditableElements\(\)\)\)/);
+  assert.match(source, /function getRelativeMarkdownPath/);
   assert.match(source, /const opened = await this\.openConvertedMarkdownFile\(targetFile\)/);
   assert.match(source, /brush: element\.tool === "highlight" \? "watercolor" : "pen"/);
 });
 
 test("Markdown conversion uses native Markdown without HTML presentation elements", async () => {
   const source = await readFile(sourceUrl, "utf8");
-  const markdownSource = source.slice(
-    source.indexOf("function buildEditableMarkdown"),
-    source.indexOf("function getNoteDrawWriteApi")
-  );
+  const markdownSource = source.slice(source.indexOf("function buildEditableMarkdown"), source.indexOf("function getCommonCalloutIcon"));
 
-  assert.match(source, /function buildEditableMarkdown\(file: TFile, pages: EditableMarkdownPage\[\], images: NoteDrawExportImage\[\] = \[\]\)/);
+  assert.match(source, /function buildEditableMarkdown\([\s\S]{0,220}?targetPath = ""/);
   assert.match(source, /function collectEditableMarkdownLines\(overlay: PageOverlay\)/);
-  assert.match(markdownSource, /function escapeMarkdownInline/);
-  assert.ok(markdownSource.includes('return `- [${checked ? "x" : " "}]'));
-  assert.ok(markdownSource.includes('content = `**${content}**`;'));
-  assert.match(markdownSource, /escapeMarkdownLinkDestination\(validLink\)/);
+  assert.match(markdownSource, /buildNativeExportDocument\(pages, images\)/);
+  assert.ok(markdownSource.includes('output.push(`${"    ".repeat(block.listLevel ?? 0)}- [${block.checked ? "x" : " "}] ${text}`'));
+  assert.match(markdownSource, /block\.kind === "code"/);
+  assert.match(markdownSource, /block\.kind === "table"/);
+  assert.match(markdownSource, /block\.kind === "callout-title"/);
+  assert.match(markdownSource, /escapeMarkdownLinkDestination\(path\)/);
   assert.doesNotMatch(markdownSource, /<\/?(?:a|div|font|label|section|span|style)\b/i);
-  assert.match(markdownSource, /const headingProfile = buildEditableMarkdownHeadingProfile\(pages\)/);
-  assert.match(markdownSource, /getEditableMarkdownHeadingLevel\(line, baseFontSize, text, headingProfile\)/);
-  assert.match(markdownSource, /renderEditableMarkdownRun\(run, baseFontSize, true\)/);
-  assert.match(markdownSource, /detectEditableMarkdownTables\(page\.lines\)/);
-  assert.match(markdownSource, /function splitEditableMarkdownTableRow/);
-  assert.match(markdownSource, /`\| \$\{rows\[0\]\.join\(" \| "\)\} \|`/);
-  assert.match(markdownSource, /const taskMarker = text\.match\(\/\^\[☐□◻☑☒✅\]/);
-  assert.match(markdownSource, /const runs = taskMarker \? removePrefix\(taskMarker\[0\]\) : line\.runs/);
-  assert.match(markdownSource, /getEditableMarkdownSemanticSection\(lineText\)/);
-  assert.match(markdownSource, /semanticSection\?\.kind === "unordered"/);
-  assert.match(markdownSource, /semanticSection\?\.kind === "ordered"/);
-  assert.match(markdownSource, /applyEditableMarkdownSemanticStyles/);
-  assert.match(markdownSource, /function buildEditableMarkdownHeadingProfile/);
-  assert.match(markdownSource, /\.sort\(\(a, b\) => b\.ratio - a\.ratio\)[\s\S]*?\.slice\(0, 6\)/);
-  assert.match(markdownSource, /if \(ratio >= 1\.46\)[\s\S]*?if \(ratio >= 1\.39\)[\s\S]*?if \(ratio >= 1\.26\)/);
-  assert.doesNotMatch(markdownSource, /output\.push\(`## \$\{uiText\(`第 \$\{page\.pageIndex \+ 1\} 页`/);
+  assert.match(source, /const headingProfile = buildEditableMarkdownHeadingProfile\(pages\)/);
+  assert.match(source, /getEditableMarkdownHeadingLevel\(line, baseFontSize, text, headingProfile\)/);
+  assert.match(markdownSource, /renderEditableMarkdownRun\(run, document\.baseFontSize\)/);
+  assert.match(source, /detectEditableMarkdownTables\(page\.lines\)/);
+  assert.match(source, /const taskMarker = text\.match\(\/\^\[☐□◻☑☒✅\]/);
+  assert.match(source, /getEditableMarkdownSemanticSection\(text\)/);
+  assert.match(source, /semanticSection\?\.kind === "unordered"/);
+  assert.match(source, /semanticSection\?\.kind === "ordered"/);
+  assert.match(source, /applyEditableMarkdownSemanticStyles/);
+  assert.doesNotMatch(markdownSource, /来源 PDF|Source PDF|pagePosition/);
   assert.doesNotMatch(markdownSource, /<section\b|<div\b|<input\b|<label\b/i);
 });
 
-test("visual exports use the 0.3.96 document generation logic", async () => {
+test("document exports use native editable text, tables, links, and image-only visual layers", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
-  assert.match(source, /const lines = collectEditableMarkdownLines\(overlay\)/);
+  assert.match(source, /const renderedLines = collectEditableMarkdownLines\(overlay\)/);
+  assert.match(source, /collectPdfJsEditableLines\(pageView, overlay\)/);
+  assert.match(source, /const text = \(item\.str \?\? ""\).*?if \(!text\.trim\(\)/s);
   assert.match(source, /lines,\s*pageIndex: overlay\.pageIndex/);
   assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\)/);
   assert.match(source, /exportConvertedDocx[\s\S]{0,220}?const pages = await this\.captureVisualConversionPages\(\)/);
   assert.match(source, /exportConvertedPptx[\s\S]{0,220}?const pages = await this\.captureVisualConversionPages\(\)/);
   assert.match(source, /slide\.addText\(textRuns/);
+  assert.match(source, /slide\.addTable\(rows/);
   assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
   assert.match(source, /await this\.drawImageElementForExport/);
-  assert.match(source, /<svg class="text-layer"/);
-  assert.match(source, /viewBox="0 0 \$\{page\.width\} \$\{page\.height\}"/);
-  assert.match(source, /textLength="\$\{width\}" lengthAdjust="spacingAndGlyphs"/);
+  assert.match(source, /renderNativeExportHtmlBlock/);
+  assert.match(source, /<span style=/);
+  assert.doesNotMatch(source, /<svg class="text-layer"|lengthAdjust="spacingAndGlyphs"/);
   assert.match(source, /await buildDocxFromPageImages\(pages, this\.file\.basename\)/);
   assert.match(source, /await import\("docx"\)/);
   assert.match(source, /new ImageRun\(\{/);
-  assert.match(source, /data: page\.bytes/);
+  assert.match(source, /new TextRun\(\{/);
+  assert.match(source, /new Table\(\{/);
+  assert.match(source, /new ExternalHyperlink\(\{/);
+  assert.match(source, /data: dataUrlToBytes\(image\.dataUrl\)/);
   assert.equal((source.match(/return injectOfficePreviewPages\(/g) ?? []).length, 2);
   assert.match(source, /zip\.file\("mpe\/preview\/manifest\.json"/);
   assert.match(source, /generator: "Obsidian Mobile PDF Exporter"/);
   assert.match(source, /producer: "Pdftion"/);
   assert.match(source, /mpe\/preview\/page-\$\{String\(pageIndex \+ 1\)\.padStart\(4, "0"\)\}\.png/);
   assert.match(source, /pageCount: sortedPages\.length/);
-  assert.match(source, /transparency: 100/);
-  assert.doesNotMatch(source.slice(source.indexOf("async function buildDocxFromPageImages"), source.indexOf("function exportHexColor")), /lineRule|<w:drawing>|<wp:inline/);
+  assert.match(source, /transparency: Math\.round\(\(1 - clamp\(run\.opacity \?\? 1, 0, 1\)\) \* 100\)/);
   assert.match(source, /const sorted = fragments\.sort\(\(a, b\) => \(a\.top - b\.top\) \|\| \(a\.left - b\.left\)\)/);
-  assert.doesNotMatch(source, /clusterEditableTextFragments|normalizeEditableExportLink|injectDocxSelectableTextTransparency/);
-  assert.match(source, /ctx\.fillStyle = "#ffffff";\s*ctx\.fillRect/);
+  assert.match(source, /function buildNativeExportDocument/);
+  assert.match(source, /function buildInkVisualExportImages/);
   assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
   assert.doesNotMatch(source, /w:right="\$\{rightTwips\}"/);
   assert.doesNotMatch(source, /<w:vanish\/>/);
@@ -181,11 +178,15 @@ test("comments and element layers are interactive, persistent, and shared by ren
   assert.match(source, /elements\.sort\(compareInkElements\)/);
 });
 
-test("visual export waits for rendered pages and includes the full annotation composite", async () => {
+test("visual capture recovers native PDF text and separates text from image and ink layers", async () => {
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /pageEl\?\.scrollIntoView\(\{ behavior: "auto", block: "center", inline: "nearest" \}\)/);
   assert.match(source, /ensurePdfPageRenderedForExport\(pageIndex, pageEl\)/);
+  assert.match(source, /renderPdfPageCanvasForExport\(overlay\)/);
+  assert.match(source, /pdfPage\.render\(\{/);
+  assert.match(source, /transform: outputScale === 1 \? undefined : \[outputScale, 0, 0, outputScale, 0, 0\]/);
+  assert.match(source, /directPageView\?\.pdfPage\?\.render/);
   assert.match(source, /canvasStillBlank = candidate\.sourceVisualRatio < 0\.00035 && candidate\.lines\.length > 0/);
   assert.match(source, /ctx\.drawImage\(pdfCanvas/);
   assert.match(source, /dataUrl: await convertImageDataUrlToPng\(image\.dataUrl\)/);
@@ -193,15 +194,25 @@ test("visual export waits for rendered pages and includes the full annotation co
   assert.match(source, /drawStroke\(ctx, element, overlay\.cssWidth, overlay\.cssHeight, false\)/);
   assert.match(source, /drawTextElement\(ctx, element, overlay\.cssWidth, overlay\.cssHeight, false\)/);
   assert.match(source, /extractHtmlDerivedVisualLayers\(canvas, lines, overlay\.pageIndex\)/);
+  assert.match(source, /selectCompleteEditableLines\(renderedLines, pdfLines\)/);
+  assert.match(source, /hasLinks\(pdfLines\) && !hasLinks\(renderedLines\)/);
+  assert.match(source, /enrichEditableLineMetadata\(renderedLines, pdfLines\)/);
+  assert.match(source, /const link = run\.link \?\? supplemental\?\.link/);
+  assert.match(source, /underline: run\.underline \|\| supplemental\.underline \|\| Boolean\(link\)/);
+  assert.match(source, /mergeInkTextExportLines/);
+  assert.match(source, /sampleEditableTextColors\(pdfCanvas, lines\)/);
+  assert.match(source, /buildInkVisualExportImages/);
+  assert.match(source, /findOverlappingExportLink/);
   assert.match(source, /id: `pdf-raster-page-\$\{pageIndex \+ 1\}-\$\{visuals\.length \+ 1\}`/);
+  assert.match(source, /page\.images\s*\.filter\(isUsefulNativeExportImage\)/);
+  assert.match(source, /return `\$\{leadingSpace\}\$\{content\}\$\{trailingSpace\}`/);
   assert.match(source, /colors\.size >= 8/);
   assert.match(source, /density >= 0\.055/);
   const pptSource = source.slice(source.indexOf("async function buildPptxFromPageImages"), source.indexOf("function buildSelfContainedVisualHtml"));
-  assert.match(pptSource, /slide\.addImage\(\{[\s\S]*?uint8ArrayToDataUrl\(page\.bytes/);
-  assert.ok(pptSource.indexOf("slide.addImage({") < pptSource.indexOf("for (const line of page.lines)"));
-  assert.doesNotMatch(pptSource, /fit: "shrink"/);
-  assert.match(pptSource, /transparency: 100/);
-  assert.doesNotMatch(source, /function buildDocxFloatingImageLayer\(/);
+  assert.match(pptSource, /data: image\.dataUrl/);
+  assert.doesNotMatch(pptSource, /uint8ArrayToDataUrl\(page\.bytes/);
+  assert.match(pptSource, /fit: "shrink"/);
+  assert.doesNotMatch(pptSource, /transparency: 100/);
 });
 
 test("placeholder pages, precise stroke hits, and immediate drag redraw stay interactive", async () => {
