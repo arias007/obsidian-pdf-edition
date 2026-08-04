@@ -2738,14 +2738,10 @@ export default class PdftionPlugin extends Plugin {
           continue;
         }
         const elements = await this.readPendingInkEditElements(file);
+        await this.restoreInkEditTransaction(file, record, true);
         if (elements) {
-          const committed = await this.finishInkEditTransaction(file, elements, new Set(record.pageIndexes));
-          if (committed) {
-            console.info(`pdftion completed interrupted PDF ink editing for ${file.path}.`);
-            continue;
-          }
-        } else {
-          await this.restoreInkEditTransaction(file, record, true);
+          const restoredBytes = await this.app.vault.readBinary(file);
+          await this.saveEditableAnnotationState(file, elements, restoredBytes);
         }
         console.info(`pdftion restored interrupted PDF ink editing for ${file.path}.`);
       } catch (error) {
@@ -4495,53 +4491,24 @@ class InkSession {
     }
 
     this.preparingPdfInkForEditing = true;
-    let transactionActive = false;
     try {
-      if (this.detachedInkEditPages.size > 0) {
-        const alreadyPrepared = Array.from(pageIndexes).every((pageIndex) => this.detachedInkEditPages.has(pageIndex));
-        if (alreadyPrepared) {
-          return;
-        }
-        if (!await this.commitDetachedInkPages(new Set(this.detachedInkEditPages))) {
-          return;
-        }
-      }
       for (const pageIndex of pageIndexes) {
         this.pendingNativeInkHidePages.add(pageIndex);
       }
       this.updateExternalInkLayerState();
-      await this.importPdfInkForPages();
-      const hasNativeInk = this.strokeHistory.some((stroke) => stroke.pdfSaved === true);
-      if (!hasNativeInk) {
-        for (const pageIndex of pageIndexes) {
+      await this.importPdfInkForPages(pageIndexes);
+      for (const pageIndex of pageIndexes) {
+        const hasNativeInk = this.strokeHistory.some((stroke) => (
+          stroke.pageIndex === pageIndex && Array.isArray(stroke.pdfPoints)
+        ));
+        if (!hasNativeInk) {
           this.pendingNativeInkHidePages.delete(pageIndex);
         }
-        this.updateExternalInkLayerState();
-        return;
-      }
-      const sourceBytes = await this.plugin.app.vault.readBinary(this.file);
-      await this.plugin.saveEditableAnnotationState(this.file, this.getEditableElements().map(cloneElement), sourceBytes);
-      await this.plugin.beginInkEditTransaction(this.file, pageIndexes);
-      transactionActive = true;
-      const detachedBytes = await this.plugin.app.vault.readBinary(this.file);
-      await this.plugin.saveEditableAnnotationState(this.file, this.getEditableElements().map(cloneElement), detachedBytes);
-      await this.reloadNativePdfView();
-      this.detachedInkEditPages = await this.plugin.getInkEditTransactionPages(this.file);
-      for (const pageIndex of this.detachedInkEditPages) {
-        this.pendingNativeInkHidePages.delete(pageIndex);
       }
       this.updateExternalInkLayerState();
       this.redrawAll();
     } catch (error) {
       console.warn("pdftion could not prepare PDF ink annotations for editing.", error);
-      if (transactionActive) {
-        try {
-          await this.plugin.rollbackInkEditTransaction(this.file);
-          await this.reloadEditableAnnotationsAfterInkRollback();
-        } catch (rollbackError) {
-          console.error("pdftion could not roll back the failed ink edit preparation.", rollbackError);
-        }
-      }
       for (const pageIndex of pageIndexes) {
         this.pendingNativeInkHidePages.delete(pageIndex);
       }
@@ -5442,7 +5409,8 @@ class InkSession {
       saved: false,
       text: "",
       x: point.x,
-      y: point.y
+      y: point.y,
+      zIndex: this.getNextLayerIndex(overlay.pageIndex)
     };
 
     this.rememberHistory();
@@ -6282,7 +6250,8 @@ class InkSession {
   }
 
   private replaceNativeSelectionWithText(selection: PdfNativeObject, overlay: PageOverlay, text: string, backgroundColor: string): void {
-    const cover = this.createNativeTextCover(selection, overlay, backgroundColor, false);
+    const coverLayer = this.getNextLayerIndex(selection.pageIndex);
+    const cover = this.createNativeTextCover(selection, overlay, backgroundColor, false, coverLayer);
     const textElement: InkText = {
       color: readableTextColor(backgroundColor),
       fontSize: Math.max(6, selection.height * overlay.cssHeight * 0.82),
@@ -6295,7 +6264,8 @@ class InkSession {
       saved: false,
       text,
       x: selection.x,
-      y: selection.y
+      y: selection.y,
+      zIndex: coverLayer + 1
     };
     this.rememberHistory();
     this.coverHistory.push(cover);
@@ -6307,7 +6277,13 @@ class InkSession {
     this.scheduleAutoSave();
   }
 
-  private createNativeTextCover(selection: PdfNativeObject, overlay: PageOverlay, backgroundColor: string, saved: boolean): InkCover {
+  private createNativeTextCover(
+    selection: PdfNativeObject,
+    overlay: PageOverlay,
+    backgroundColor: string,
+    saved: boolean,
+    zIndex = this.getNextLayerIndex(selection.pageIndex)
+  ): InkCover {
     return expandCoverToHideNativeText({
       color: cssColorToHex(backgroundColor) ?? "#ffffff",
       height: selection.height,
@@ -6321,7 +6297,8 @@ class InkSession {
       source: "native-text",
       width: selection.width,
       x: selection.x,
-      y: selection.y
+      y: selection.y,
+      zIndex
     }, overlay);
   }
 
@@ -8702,6 +8679,7 @@ class InkSession {
       let buffer = binary;
       if (hasInkPdfChange) {
         const pdf = await PDFDocument.load(binary, { ignoreEncryption: true, updateMetadata: false });
+        const sourcePageCount = pdf.getPageCount();
         await syncEditableInkAnnotationsOnPdf(pdf, elements, {
           deletedExternalInkIds,
           deletedPdftionInkIds,
@@ -8710,7 +8688,23 @@ class InkSession {
         const saved = await pdf.save({ addDefaultPage: false, useObjectStreams: false });
         buffer = new ArrayBuffer(saved.byteLength);
         new Uint8Array(buffer).set(saved);
-        await this.plugin.app.vault.modifyBinary(targetFile, buffer);
+        await validatePdfWriteCandidate(buffer, sourcePageCount);
+        await this.savePdfRewriteBackup();
+        let sourceModified = false;
+        try {
+          sourceModified = true;
+          await this.plugin.app.vault.modifyBinary(targetFile, buffer);
+          const written = await this.plugin.app.vault.readBinary(targetFile);
+          await validatePdfWriteCandidate(written, sourcePageCount);
+          if (await sha256Hex(written) !== await sha256Hex(buffer)) {
+            throw new Error("PDF write verification failed: saved bytes changed after writing.");
+          }
+        } catch (error) {
+          if (sourceModified) {
+            await this.plugin.app.vault.modifyBinary(targetFile, binary.slice(0));
+          }
+          throw error;
+        }
       }
 
       const markedElements = elements.map((element) => {
@@ -10037,6 +10031,7 @@ class InkSession {
     const blocks = this.collectNativeTextBlocks(overlay, region);
     let converted = 0;
     let skipped = 0;
+    let nextLayer = this.getNextLayerIndex(overlay.pageIndex);
     for (const block of blocks) {
       if (this.hasConvertedNativeBlock(block)) {
         skipped += 1;
@@ -10054,7 +10049,8 @@ class InkSession {
         saved: false,
         width: block.width,
         x: block.x,
-        y: block.y
+        y: block.y,
+        zIndex: nextLayer
       }, overlay);
       const text: InkText = {
         color: this.penColor,
@@ -10068,13 +10064,15 @@ class InkSession {
         saved: false,
         text: block.text,
         x: block.x,
-        y: block.y
+        y: block.y,
+        zIndex: nextLayer + 1
       };
       if (converted === 0) {
         this.rememberHistory();
       }
       this.coverHistory.push(cover);
       this.textHistory.push(text);
+      nextLayer += 2;
       converted += 1;
     }
 
@@ -10104,7 +10102,8 @@ class InkSession {
       source: "native-region",
       width: selection.width,
       x: selection.x,
-      y: selection.y
+      y: selection.y,
+      zIndex: this.getNextLayerIndex(selection.pageIndex)
     };
     this.rememberHistory();
     this.coverHistory.push(cover);
@@ -15920,6 +15919,37 @@ function focusTextEditor(editor: HTMLTextAreaElement): void {
     }
     editor.select();
   }, 0);
+}
+
+async function validatePdfWriteCandidate(buffer: ArrayBuffer, expectedPageCount: number): Promise<void> {
+  const bytes = new Uint8Array(buffer);
+  const headerLimit = Math.min(bytes.length - 4, 1024);
+  let hasPdfHeader = false;
+  for (let index = 0; index <= headerLimit; index += 1) {
+    if (
+      bytes[index] === 0x25 &&
+      bytes[index + 1] === 0x50 &&
+      bytes[index + 2] === 0x44 &&
+      bytes[index + 3] === 0x46 &&
+      bytes[index + 4] === 0x2d
+    ) {
+      hasPdfHeader = true;
+      break;
+    }
+  }
+  if (!hasPdfHeader) {
+    throw new Error("PDF write validation failed: missing PDF header.");
+  }
+  const pdf = await PDFDocument.load(buffer, { ignoreEncryption: true, updateMetadata: false });
+  if (expectedPageCount <= 0 || pdf.getPageCount() !== expectedPageCount) {
+    throw new Error(`PDF write validation failed: page count ${pdf.getPageCount()}/${expectedPageCount}.`);
+  }
+  for (const page of pdf.getPages()) {
+    const { height, width } = page.getSize();
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+      throw new Error("PDF write validation failed: invalid page dimensions.");
+    }
+  }
 }
 
 async function fingerprintPdfBytes(buffer: ArrayBuffer, mtime?: number): Promise<PdfFingerprint> {

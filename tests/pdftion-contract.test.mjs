@@ -428,11 +428,46 @@ test("text selection supports no highlight and frequent rendering work is frame-
   assert.doesNotMatch(source.slice(source.indexOf("private moveSelectionInteraction"), source.indexOf("private onPointerUp")), /updateExternalInkLayerState/);
 });
 
-test("PDF ink editing is transactional and restores interrupted work", async () => {
+test("native PDF text replacements always render above their covers", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const addTextSource = source.slice(
+    source.indexOf("private addTextAnnotation"),
+    source.indexOf("private async addCommentAnnotation")
+  );
+  const replaceSource = source.slice(
+    source.indexOf("private replaceNativeSelectionWithText"),
+    source.indexOf("private samplePdfBackgroundColor")
+  );
+  const batchSource = source.slice(
+    source.indexOf("private convertNativeTextBlocksToEditable"),
+    source.indexOf("private collectNativeTextBlocks")
+  );
+
+  assert.match(addTextSource, /zIndex: this\.getNextLayerIndex\(overlay\.pageIndex\)/);
+  assert.match(replaceSource, /const coverLayer = this\.getNextLayerIndex\(selection\.pageIndex\)/);
+  assert.match(replaceSource, /createNativeTextCover\(selection, overlay, backgroundColor, false, coverLayer\)/);
+  assert.match(replaceSource, /zIndex: coverLayer \+ 1/);
+  assert.match(replaceSource, /zIndex = this\.getNextLayerIndex\(selection\.pageIndex\)/);
+  assert.match(batchSource, /let nextLayer = this\.getNextLayerIndex\(overlay\.pageIndex\)/);
+  assert.match(batchSource, /zIndex: nextLayer/);
+  assert.match(batchSource, /zIndex: nextLayer \+ 1/);
+  assert.match(batchSource, /nextLayer \+= 2/);
+  assert.match(batchSource, /source: "native-region"[\s\S]{0,180}?zIndex: this\.getNextLayerIndex\(selection\.pageIndex\)/);
+});
+
+test("editing overlays does not detach the source PDF and guarded ink writes restore failures", async () => {
   const source = await readFile(sourceUrl, "utf8");
   const prepareSource = source.slice(
     source.indexOf("private async preparePdfInkOverlayForEditing"),
     source.indexOf("private async commitDetachedInkPages")
+  );
+  const recoverySource = source.slice(
+    source.indexOf("private async recoverPendingInkEditTransactions"),
+    source.indexOf("private async readPendingInkEditElements")
+  );
+  const saveSource = source.slice(
+    source.indexOf("private async saveIntoPdf"),
+    source.indexOf("private async saveEditableState")
   );
   const autoSaveSource = source.slice(
     source.indexOf("private scheduleAutoSave"),
@@ -450,17 +485,27 @@ test("PDF ink editing is transactional and restores interrupted work", async () 
   assert.match(source, /restoreInkEditTransaction\(file, record, true\)/);
   assert.match(source, /Ink verification failed/);
   assert.match(source, /recoverPendingInkEditTransactions\(\)/);
-  assert.match(source, /await this\.plugin\.rollbackInkEditTransaction\(this\.file\)/);
-  assert.match(source, /await this\.reloadNativePdfView\(\)/);
-  assert.match(prepareSource, /commitDetachedInkPages\(new Set\(this\.detachedInkEditPages\)\)/);
+  assert.match(prepareSource, /await this\.importPdfInkForPages\(pageIndexes\)/);
+  assert.match(prepareSource, /Array\.isArray\(stroke\.pdfPoints\)/);
+  assert.doesNotMatch(prepareSource, /beginInkEditTransaction|commitDetachedInkPages|modifyBinary|reloadNativePdfView|saveEditableAnnotationState/);
+  assert.match(recoverySource, /await this\.restoreInkEditTransaction\(file, record, true\)/);
+  assert.match(recoverySource, /await this\.saveEditableAnnotationState\(file, elements, restoredBytes\)/);
+  assert.doesNotMatch(recoverySource, /finishInkEditTransaction/);
   assert.match(autoSaveSource, /if \(this\.enabled\) \{[\s\S]*?checkpointEditableState\(\)/);
+  assert.match(saveSource, /if \(hasInkPdfChange\) \{/);
+  assert.match(saveSource, /await validatePdfWriteCandidate\(buffer, sourcePageCount\)/);
+  assert.match(saveSource, /await this\.savePdfRewriteBackup\(\)/);
+  assert.match(saveSource, /sourceModified = true;\s*await this\.plugin\.app\.vault\.modifyBinary\(targetFile, buffer\)/);
+  assert.match(saveSource, /const written = await this\.plugin\.app\.vault\.readBinary\(targetFile\)/);
+  assert.match(saveSource, /await this\.plugin\.app\.vault\.modifyBinary\(targetFile, binary\.slice\(0\)\)/);
+  assert.match(source, /async function validatePdfWriteCandidate\(buffer: ArrayBuffer, expectedPageCount: number\)/);
+  assert.match(source, /missing PDF header/);
+  assert.match(source, /pdf\.getPageCount\(\) !== expectedPageCount/);
   assert.doesNotMatch(source, /activeWindow, "blur", \(\) => this\.flushAllSessionsSoon\(\)/);
   assert.match(source, /this\.flushSessionsOutsideFile\(file\)/);
   assert.match(source, /checkpointAllSessionsSoon\(\)/);
   assert.match(source, /readPendingInkEditElements\(file\)/);
-  assert.match(source, /finishInkEditTransaction\(file, elements, new Set\(record\.pageIndexes\)\)/);
   assert.match(source, /private inkCommitPromises = new Map<string, Promise<boolean>>\(\)/);
-  assert.match(prepareSource, /const hasNativeInk = this\.strokeHistory\.some\(\(stroke\) => stroke\.pdfSaved === true\)/);
   assert.doesNotMatch(source, /this\.detachedInkEditPages\.clear\(\);\s*this\.scheduleEditableInkPrepare\(0, true\)/);
   assert.match(source, /flushSessionsOutsideLeaf\(leaf\)/);
   assert.match(source, /void this\.finishPdfInkEditing\(\)/);

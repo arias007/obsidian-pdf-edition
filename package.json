@@ -1,6 +1,6 @@
 {
   "name": "pdftion",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "AI-open PDF annotation, editing, export, and note integration tools.",
   "main": "main.js",
   "scripts": {
