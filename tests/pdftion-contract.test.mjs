@@ -133,7 +133,7 @@ test("Markdown conversion prioritizes links and keeps floating media in NoteDraw
   assert.match(source, /\.filter\(isUsefulMarkdownExportImage\)/);
   assert.match(source, /partitionMarkdownExportImages\(pages, persistedImages\)/);
   assert.match(source, /noteDraw \? inlineImages : \[\.\.\.inlineImages, \.\.\.floatingImages\]/);
-  assert.match(source, /function isUsefulNativeExportImage\(\s*image: VisualConversionImage,/);
+  assert.match(source, /function isUsefulNativeExportImage\(image: VisualConversionImage\)/);
   assert.match(source, /estimatedBytes >= 16_000 \|\| image\.width \* image\.height >= 0\.12/);
   assert.match(source, /placement\?: "floating" \| "flow" \| "ink-preview"/);
   assert.match(source, /placement: "floating" as const/);
@@ -277,9 +277,6 @@ test("document exports use native editable text, tables, links, and image-only v
   assert.match(source, /const sorted = fragments\.sort\(\(a, b\) => \(a\.top - b\.top\) \|\| \(a\.left - b\.left\)\)/);
   assert.match(source, /function buildNativeExportDocument/);
   assert.match(source, /function buildInkVisualExportImages/);
-  assert.match(source, /function isLikelyNativeTextRaster\([\s\S]*?image\.id\.startsWith\("pdf-raster-"\)/);
-  assert.match(source, /isLikelyNativeTextRaster\(image, lines\)/);
-  assert.match(source, /\.filter\(\(image\) => isUsefulNativeExportImage\(image, page\.lines\)\)/);
   assert.doesNotMatch(source, /buildDocxAbsoluteTextLayer|<v:textbox/);
   assert.doesNotMatch(source, /w:right="\$\{rightTwips\}"/);
   assert.doesNotMatch(source, /<w:vanish\/>/);
@@ -312,7 +309,7 @@ test("HTML conversion keeps flow text while floating drawings over their source 
   assert.match(htmlSource, /getPortableExportFontSizePt\(run, block, baseFontSize\)/);
   assert.match(source, /function isUsefulHtmlExportImage[\s\S]{0,180}?image\.id\.startsWith\("pdf-inline-"\)[\s\S]{0,80}?return false/);
   assert.doesNotMatch(htmlSource, /container-type:/);
-  assert.match(source, /function buildNativeExportDocumentFromVisualPages[\s\S]{0,700}?\.filter\(\(image\) => isUsefulNativeExportImage\(image, page\.lines\)\)/);
+  assert.match(source, /function buildNativeExportDocumentFromVisualPages[\s\S]{0,600}?\.filter\(isUsefulNativeExportImage\)/);
 });
 
 test("comments and element layers are interactive, persistent, and shared by rendering and export", async () => {
@@ -376,7 +373,7 @@ test("visual capture recovers native PDF text and separates text from image and 
   assert.match(source, /likelyCheckboxGlyph/);
   assert.match(source, /pdf-inline-checkbox-\$\{density >= 0\.45 \? "checked" : "unchecked"\}/);
   assert.match(source, /\? "pdf-inline-glyph"\s*:\s*"pdf-raster"/);
-  assert.match(source, /page\.images\s*\.filter\(\(image\) => isUsefulNativeExportImage\(image, page\.lines\)\)/);
+  assert.match(source, /page\.images\s*\.filter\(isUsefulNativeExportImage\)/);
   assert.match(source, /return `\$\{leadingSpace\}\$\{content\}\$\{trailingSpace\}`/);
   assert.match(source, /colors\.size >= 8/);
   assert.match(source, /density >= 0\.055/);
