@@ -12269,7 +12269,7 @@ function buildNativeExportDocumentFromVisualPages(pages: VisualConversionPage[])
     width: page.width
   }));
   const images: NoteDrawExportImage[] = pages.flatMap((page) => page.images
-    .filter(isUsefulNativeExportImage)
+    .filter((image) => isUsefulNativeExportImage(image, page.lines))
     .map((image) => ({
       ...image,
       assetMime: dataUrlMimeType(image.dataUrl),
@@ -13418,8 +13418,44 @@ function isUsefulMarkdownExportImage(image: NoteDrawExportImage): boolean {
     ));
 }
 
-function isUsefulNativeExportImage(image: VisualConversionImage): boolean {
+function isLikelyNativeTextRaster(
+  image: VisualConversionImage,
+  lines: EditableMarkdownLine[]
+): boolean {
+  if (!image.id.startsWith("pdf-raster-") || lines.length === 0) {
+    return false;
+  }
+  const imageArea = Math.max(0.0001, image.width * image.height);
+  return lines.some((line) => {
+    const overlapWidth = Math.max(
+      0,
+      Math.min(image.x + image.width, line.left + line.width) - Math.max(image.x, line.left)
+    );
+    const overlapHeight = Math.max(
+      0,
+      Math.min(image.y + image.height, line.top + line.height) - Math.max(image.y, line.top)
+    );
+    if (overlapWidth <= 0 || overlapHeight <= 0) {
+      return false;
+    }
+    const overlapArea = overlapWidth * overlapHeight;
+    const lineArea = Math.max(0.0001, line.width * line.height);
+    const imageHeightInLines = image.height / Math.max(0.0001, line.height);
+    return overlapArea / imageArea >= 0.18 &&
+      overlapArea / lineArea >= 0.22 &&
+      overlapWidth / Math.max(0.0001, line.width) >= 0.45 &&
+      imageHeightInLines <= 4.5;
+  });
+}
+
+function isUsefulNativeExportImage(
+  image: VisualConversionImage,
+  lines: EditableMarkdownLine[] = []
+): boolean {
   if (image.id.startsWith("pdf-inline-")) {
+    return false;
+  }
+  if (isLikelyNativeTextRaster(image, lines)) {
     return false;
   }
   if (!image.id.startsWith("pdf-raster-page-")) {
