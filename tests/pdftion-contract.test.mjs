@@ -204,10 +204,6 @@ test("document exports use native editable text, tables, links, and image-only v
 
   assert.match(source, /const renderedLines = collectEditableMarkdownLines\(overlay\)/);
   assert.match(source, /collectPdfJsEditableLines\(pageView, overlay\)/);
-  assert.match(source, /pdfPage\.getTextContent\(\),\s*sleepMs\(8_000\)\.then\(\(\) => null\)/);
-  assert.match(source, /timed out reading the native PDF text model/);
-  assert.match(source, /pdfPage\.getAnnotations\(\{ intent: "display" \}\)[\s\S]{0,120}?sleepMs\(4_000\)\.then\(\(\) => null\)/);
-  assert.match(source, /timed out reading native PDF links/);
   assert.match(source, /const text = \(item\.str \?\? ""\).*?if \(!text\.trim\(\)/s);
   assert.match(source, /lines,\s*pageIndex: overlay\.pageIndex/);
   assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\{\}, sourceSnapshot\)/);
@@ -249,26 +245,12 @@ test("document exports use native editable text, tables, links, and image-only v
   assert.match(docxSource, /compatabilityModeVersion: 15/);
   assert.match(docxSource, /const imageChild = image\.link/);
   assert.match(docxSource, /alignment: center < 0\.38 \? AlignmentType\.LEFT : center > 0\.62 \? AlignmentType\.RIGHT : AlignmentType\.CENTER/);
-  assert.match(docxSource, /const annotationChildren:/);
-  assert.match(docxSource, /!isAnnotationExportImage\(image\)/);
-  assert.match(docxSource, /floating:\s*\{[\s\S]*?HorizontalPositionRelativeFrom\.PAGE[\s\S]*?VerticalPositionRelativeFrom\.PAGE[\s\S]*?TextWrappingType\.NONE/);
-  assert.match(docxSource, /if \(block\.kind === "image" && block\.image && isAnnotationExportImage\(block\.image\)\) \{\s*continue;/);
-  assert.match(docxSource, /const contentHeightTwips = pageHeightTwips - pageMarginTwips \* 2/);
-  assert.match(docxSource, /previousBottom === 0 \? block\.top \* pageHeightTwips - pageMarginTwips : sourceGap \* pageHeightTwips/);
-  assert.match(docxSource, /requestedHeightPx = Math\.max\(1, image\.height \* pageHeightTwips/);
-  assert.match(docxSource, /sourceLeftTwips/);
-  assert.match(docxSource, /lineHeightTwips/);
-  assert.match(docxSource, /injectOfficePreviewPages\([\s\S]*?\{ persistDocxText: true, stripPreviewText: true \}/);
+  assert.doesNotMatch(docxSource, /floating:|HorizontalPositionRelativeFrom|VerticalPositionRelativeFrom|TextWrappingType/);
   assert.match(docxSource, /layout: TableLayoutType\.FIXED/);
   assert.match(docxSource, /lineRule: LineRuleType\.EXACT/);
   assert.doesNotMatch(docxSource, /font: .*sans-serif/);
   assert.equal((source.match(/return injectOfficePreviewPages\(/g) ?? []).length, 2);
   assert.match(source, /zip\.file\("mpe\/preview\/manifest\.json"/);
-  assert.match(source, /cancipEditedLocatorKeys\?: string\[\]/);
-  assert.match(source, /text:word\/document\.xml:p:\$\{paragraphIndex\}/);
-  assert.match(source, /async function buildTextFreeOfficePreviewPage/);
-  assert.match(source, /for \(const run of line\.runs\)[\s\S]{0,500}?ctx\.clearRect/);
-  assert.match(source, /options\.stripPreviewText \? await buildTextFreeOfficePreviewPage\(page\) : page\.bytes/);
   assert.match(source, /generator: "Obsidian Mobile PDF Exporter"/);
   assert.match(source, /producer: "Pdftion"/);
   assert.match(source, /mpe\/preview\/page-\$\{String\(pageIndex \+ 1\)\.padStart\(4, "0"\)\}\.png/);

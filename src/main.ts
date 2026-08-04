@@ -12708,28 +12708,15 @@ async function collectPdfJsEditableLines(
     return [];
   }
   try {
-    const content = await Promise.race([
-      pdfPage.getTextContent(),
-      sleepMs(8_000).then(() => null)
-    ]);
-    if (!content) {
-      console.debug("pdftion timed out reading the native PDF text model; using the rendered text layer.");
-      return [];
-    }
+    const content = await pdfPage.getTextContent();
     const viewportWidth = Math.max(1, viewport.width ?? overlay.cssWidth);
     const viewportHeight = Math.max(1, viewport.height ?? overlay.cssHeight);
     const scaleX = overlay.cssWidth / viewportWidth;
     const scaleY = overlay.cssHeight / viewportHeight;
     const annotations = pdfPage.getAnnotations
-      ? await Promise.race([
-        pdfPage.getAnnotations({ intent: "display" }).catch(() => []),
-        sleepMs(4_000).then(() => null)
-      ])
+      ? await pdfPage.getAnnotations({ intent: "display" }).catch(() => [])
       : [];
-    if (!annotations) {
-      console.debug("pdftion timed out reading native PDF links; continuing without link metadata.");
-    }
-    const links = (annotations ?? []).flatMap((annotation) => {
+    const links = annotations.flatMap((annotation) => {
       const href = getPdfAnnotationExportLink(annotation);
       const rect = annotation.rect;
       if (!href || !rect || rect.length < 4) {
@@ -14005,7 +13992,7 @@ function getPortableExportCssFontStack(run: EditableMarkdownTextRun, code = fals
     : 'Arial,"Liberation Sans",sans-serif';
 }
 
-function isAnnotationExportImage(image: VisualConversionImage): boolean {
+function isHtmlAnnotationExportImage(image: VisualConversionImage): boolean {
   return /^pdftion-(?:cover|stroke)-/.test(image.id);
 }
 
@@ -14022,7 +14009,7 @@ function renderNativeExportHtmlBlock(
 ): string {
   if (block.kind === "image" && block.image) {
     const image = block.image;
-    const annotation = isAnnotationExportImage(image);
+    const annotation = isHtmlAnnotationExportImage(image);
     const visualKind = annotation ? "annotation" : image.id.startsWith("pdf-raster-page-") ? "native" : "embedded";
     const width = clamp(image.width * 100, visualKind === "native" ? 24 : 10, 100);
     const align = getHtmlVisualAlignment(image);
@@ -14255,8 +14242,8 @@ function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]
   const pageMarkup = document.pages
     .filter((page) => page.blocks.length > 0)
     .map((page) => {
-      const contentBlocks = page.blocks.filter((block) => !block.image || !isAnnotationExportImage(block.image));
-      const annotationBlocks = page.blocks.filter((block) => block.image && isAnnotationExportImage(block.image));
+      const contentBlocks = page.blocks.filter((block) => !block.image || !isHtmlAnnotationExportImage(block.image));
+      const annotationBlocks = page.blocks.filter((block) => block.image && isHtmlAnnotationExportImage(block.image));
       const content = contentBlocks.map((block) => renderNativeExportHtmlBlock(block, document)).join("");
       const annotations = annotationBlocks.length > 0
         ? `<aside class="page-annotations" aria-label="Page ${page.pageIndex + 1} annotations">${annotationBlocks.map((block) => renderNativeExportHtmlBlock(block, document)).join("")}</aside>`
@@ -14285,7 +14272,6 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
     Document,
     ExternalHyperlink,
     HeadingLevel,
-    HorizontalPositionRelativeFrom,
     ImageRun,
     LineRuleType,
     Packer,
@@ -14295,9 +14281,7 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
     TableLayoutType,
     TableRow,
     TextRun,
-    TextWrappingType,
     UnderlineType,
-    VerticalPositionRelativeFrom,
     WidthType
   } = await import("docx");
   const nativeDocument = buildNativeExportDocumentFromVisualPages(pages);
@@ -14338,65 +14322,18 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
   };
   const sections = nativeDocument.pages.map((page) => {
     const pageHeightTwips = Math.round(pageWidthTwips * page.height / Math.max(1, page.width));
-    const contentHeightTwips = pageHeightTwips - pageMarginTwips * 2;
     const children: Array<InstanceType<typeof Paragraph> | InstanceType<typeof Table>> = [];
-    const annotationChildren: Array<InstanceType<typeof ImageRun> | InstanceType<typeof ExternalHyperlink>> = [];
-    for (const block of page.blocks) {
-      const image = block.image;
-      if (block.kind !== "image" || !image || !isAnnotationExportImage(image)) {
-        continue;
-      }
-      const annotationRun = new ImageRun({
-        data: dataUrlToBytes(image.dataUrl),
-        floating: {
-          allowOverlap: true,
-          behindDocument: false,
-          horizontalPosition: {
-            offset: Math.round(image.x * pageWidthTwips * 635),
-            relative: HorizontalPositionRelativeFrom.PAGE
-          },
-          lockAnchor: true,
-          verticalPosition: {
-            offset: Math.round(image.y * pageHeightTwips * 635),
-            relative: VerticalPositionRelativeFrom.PAGE
-          },
-          wrap: { type: TextWrappingType.NONE }
-        },
-        transformation: {
-          height: Math.max(1, Math.round(image.height * pageHeightTwips / 1440 * 96)),
-          width: Math.max(1, Math.round(image.width * pageWidthTwips / 1440 * 96))
-        },
-        type: "png"
-      });
-      annotationChildren.push(image.link
-        ? new ExternalHyperlink({ children: [annotationRun], link: image.link })
-        : annotationRun);
-    }
-    if (annotationChildren.length > 0) {
-      children.push(new Paragraph({
-        children: annotationChildren,
-        spacing: { after: 0, before: 0, line: 1, lineRule: LineRuleType.EXACT },
-        widowControl: false
-      }));
-    }
     let previousBottom = 0;
     for (const block of page.blocks) {
-      if (block.kind === "image" && block.image && isAnnotationExportImage(block.image)) {
-        continue;
-      }
       const sourceGap = Math.max(0, block.top - previousBottom);
-      const gapBefore = Math.round(clamp(
-        (previousBottom === 0 ? block.top * pageHeightTwips - pageMarginTwips : sourceGap * pageHeightTwips),
-        0,
-        contentHeightTwips
-      ));
+      const gapBefore = Math.round(clamp(sourceGap * pageHeightTwips, 0, 240));
       previousBottom = Math.max(previousBottom, block.top + (block.height ?? 0));
       if (block.kind === "image" && block.image) {
         const image = block.image;
         const contentWidthPx = contentWidthTwips / 1440 * 96;
-        const contentHeightPx = Math.max(1, contentHeightTwips / 1440 * 96);
-        const requestedWidthPx = Math.max(1, image.width * pageWidthTwips / 1440 * 96);
-        const requestedHeightPx = Math.max(1, image.height * pageHeightTwips / 1440 * 96);
+        const contentHeightPx = Math.max(1, (pageHeightTwips - pageMarginTwips * 2) / 1440 * 96);
+        const requestedWidthPx = Math.max(1, image.width * contentWidthPx);
+        const requestedHeightPx = Math.max(1, image.height * contentHeightPx);
         const scale = Math.min(1, contentWidthPx / requestedWidthPx, contentHeightPx * 0.9 / requestedHeightPx);
         const imageRun = new ImageRun({
           data: dataUrlToBytes(image.dataUrl),
@@ -14414,7 +14351,7 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
           alignment: center < 0.38 ? AlignmentType.LEFT : center > 0.62 ? AlignmentType.RIGHT : AlignmentType.CENTER,
           children: [imageChild],
           keepLines: true,
-          spacing: { after: 0, before: gapBefore },
+          spacing: { after: 40, before: gapBefore },
           widowControl: false
         }));
         continue;
@@ -14452,32 +14389,17 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
       }
       const isCallout = block.kind === "callout-title" || block.kind === "callout-body";
       const maxFontSizePt = Math.max(9, ...block.runs.map((run) => getPortableExportFontSizePt(run, block, nativeDocument.baseFontSize)));
-      const sourceLeftTwips = Math.round(clamp(block.left * pageWidthTwips - pageMarginTwips, 0, contentWidthTwips - 1));
-      const sourceRightTwips = Math.round(clamp(
-        (1 - block.left - block.width) * pageWidthTwips - pageMarginTwips - 120,
-        0,
-        contentWidthTwips - sourceLeftTwips - 1
-      ));
-      const semanticLeftTwips = block.kind === "quote" || isCallout
-        ? 360
-        : block.kind === "task" || block.kind === "unordered-list" || block.kind === "ordered-list"
-          ? 360 + (block.listLevel ?? 0) * 360
-          : 0;
-      const lineHeightTwips = Math.round(Math.max(
-        maxFontSizePt * 1.1 * 20,
-        (block.height ?? 0) * pageHeightTwips
-      ));
       children.push(new Paragraph({
         border: block.kind === "quote" || isCallout
           ? { left: { color: isCallout ? "4B8FD8" : "9AA0A6", size: 12, space: 8, style: BorderStyle.SINGLE } }
           : undefined,
         children: makeRuns(block),
         heading: block.kind === "heading" ? headingLevels[clamp((block.headingLevel ?? 1) - 1, 0, 5)] : undefined,
-        indent: {
-          hanging: block.kind === "task" || block.kind === "unordered-list" || block.kind === "ordered-list" ? 180 : undefined,
-          left: Math.max(sourceLeftTwips, semanticLeftTwips),
-          right: sourceRightTwips
-        },
+        indent: block.kind === "quote" || isCallout
+          ? { left: 360 }
+          : block.kind === "task" || block.kind === "unordered-list" || block.kind === "ordered-list"
+            ? { hanging: 180, left: 360 + (block.listLevel ?? 0) * 360 }
+            : undefined,
         keepLines: true,
         keepNext: block.kind === "heading",
         shading: block.kind === "code"
@@ -14486,9 +14408,9 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
             ? { fill: "EEF5FF" }
             : undefined,
         spacing: {
-          after: 0,
-          before: gapBefore,
-          line: lineHeightTwips,
+          after: block.kind === "heading" ? 60 : 20,
+          before: Math.max(gapBefore, block.kind === "heading" ? 80 : 0),
+          line: Math.round(maxFontSizePt * 1.28 * 20),
           lineRule: LineRuleType.EXACT
         },
         widowControl: false
@@ -14531,86 +14453,30 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
     new Uint8Array(await blob.arrayBuffer()),
     pages,
     pageWidthTwips / 20,
-    previewPageHeightTwips / 20,
-    { persistDocxText: true, stripPreviewText: true }
+    previewPageHeightTwips / 20
   );
-}
-
-async function buildTextFreeOfficePreviewPage(page: VisualConversionPage): Promise<Uint8Array> {
-  if (page.lines.length === 0) {
-    return page.bytes;
-  }
-  const image = await loadDataUrlImage(uint8ArrayToDataUrl(page.bytes, "image/png"));
-  const canvas = activeDocument.createElement("canvas");
-  canvas.width = Math.max(1, image.naturalWidth || page.width);
-  canvas.height = Math.max(1, image.naturalHeight || page.height);
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    return page.bytes;
-  }
-  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-  for (const line of page.lines) {
-    const lineHeight = line.height * canvas.height;
-    const padX = Math.max(3, canvas.width * 0.003);
-    const padY = Math.max(2, lineHeight * 0.45);
-    for (const run of line.runs) {
-      const left = (run.left ?? line.left) * canvas.width;
-      const width = (run.width ?? line.width) * canvas.width;
-      ctx.clearRect(
-        Math.max(0, left - padX),
-        Math.max(0, line.top * canvas.height - padY),
-        Math.min(canvas.width - Math.max(0, left - padX), width + padX * 2),
-        Math.min(canvas.height, lineHeight + padY * 2)
-      );
-    }
-  }
-  return dataUrlToBytes(canvas.toDataURL("image/png"));
 }
 
 async function injectOfficePreviewPages(
   officeBytes: Uint8Array,
   pages: VisualConversionPage[],
   pageWidthPt: number,
-  pageHeightPt: number,
-  options: { persistDocxText?: boolean; stripPreviewText?: boolean } = {}
+  pageHeightPt: number
 ): Promise<Uint8Array> {
   const { default: JSZip } = await import("jszip");
   const zip = await JSZip.loadAsync(officeBytes);
   const sortedPages = [...pages].sort((a, b) => a.pageIndex - b.pageIndex);
-  const manifest: {
-    cancipEditedLocatorKeys?: string[];
-    generator: string;
-    pageCount: number;
-    pageHeightPt: number;
-    pageWidthPt: number;
-    producer: string;
-    schemaVersion: number;
-  } = {
+  zip.file("mpe/preview/manifest.json", JSON.stringify({
     generator: "Obsidian Mobile PDF Exporter",
     pageCount: sortedPages.length,
     pageHeightPt,
     pageWidthPt,
     producer: "Pdftion",
     schemaVersion: 1
-  };
-  if (options.persistDocxText) {
-    const documentXml = await zip.file("word/document.xml")?.async("text");
-    if (documentXml) {
-      const wordNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-      const parsed = new DOMParser().parseFromString(documentXml, "application/xml");
-      manifest.cancipEditedLocatorKeys = Array.from(parsed.getElementsByTagNameNS(wordNamespace, "p"))
-        .flatMap((paragraph, paragraphIndex) => (
-          paragraph.getElementsByTagNameNS(wordNamespace, "t").length > 0
-            ? [`text:word/document.xml:p:${paragraphIndex}`]
-            : []
-        ));
-    }
-  }
-  zip.file("mpe/preview/manifest.json", JSON.stringify(manifest));
-  for (const [pageIndex, page] of sortedPages.entries()) {
-    const previewBytes = options.stripPreviewText ? await buildTextFreeOfficePreviewPage(page) : page.bytes;
-    zip.file(`mpe/preview/page-${String(pageIndex + 1).padStart(4, "0")}.png`, previewBytes);
-  }
+  }));
+  sortedPages.forEach((page, pageIndex) => {
+    zip.file(`mpe/preview/page-${String(pageIndex + 1).padStart(4, "0")}.png`, page.bytes);
+  });
   return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 }
 
