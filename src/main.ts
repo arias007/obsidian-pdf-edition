@@ -1099,9 +1099,10 @@ interface NativePdfPageLike {
   render?: (options: {
     canvas: HTMLCanvasElement;
     canvasContext: CanvasRenderingContext2D;
+    intent?: "display" | "print";
     transform?: number[];
     viewport: NativePdfViewportLike;
-  }) => { promise?: Promise<unknown> } | Promise<unknown>;
+  }) => { cancel?: () => void; promise?: Promise<unknown> } | Promise<unknown>;
 }
 
 interface NativePdfViewportLike {
@@ -1417,12 +1418,6 @@ interface EditableMarkdownHeadingProfile {
   ratios: number[];
 }
 
-interface EditableMarkdownSemanticSection {
-  baseLeft?: number;
-  kind: "callout" | "code" | "emphasis" | "ordered" | "quote" | "task" | "unordered";
-  nextOrdinal: number;
-}
-
 type NativeExportBlockKind =
   | "callout-body"
   | "callout-title"
@@ -1443,8 +1438,10 @@ interface NativeExportBlock {
   headingLevel?: number;
   image?: NoteDrawExportImage;
   kind: NativeExportBlockKind;
+  leadingImages?: NoteDrawExportImage[];
   left: number;
   listLevel?: number;
+  marker?: string;
   ordinal?: number;
   runs: EditableMarkdownTextRun[];
   table?: EditableMarkdownTable;
@@ -2453,7 +2450,10 @@ export default class PdftionPlugin extends Plugin {
     const transactionPath = `${dir}/${safeKey}.json`;
     const currentBytes = await this.app.vault.readBinary(file);
     const pdf = await PDFDocument.load(currentBytes, { ignoreEncryption: true, updateMetadata: false });
-    const transactionPages = Array.from({ length: pdf.getPageCount() }, (_, pageIndex) => pageIndex);
+    const transactionPages = normalizedPages.filter((pageIndex) => pageIndex < pdf.getPageCount());
+    if (transactionPages.length === 0) {
+      return;
+    }
     await this.ensureAdapterFolder(dir);
     await this.app.vault.adapter.writeBinary(backupPdfPath, currentBytes);
     const annotationStatePath = this.getAnnotationStatePath(file);
@@ -2502,6 +2502,43 @@ export default class PdftionPlugin extends Plugin {
       if (this.inkCommitPromises.get(file.path) === commit) {
         this.inkCommitPromises.delete(file.path);
       }
+    }
+  }
+
+  async finishInkEditTransaction(file: TFile, elements: InkElement[], pageIndexes: Set<number>): Promise<boolean> {
+    const record = await this.readInkEditTransaction(file);
+    if (!record) {
+      return true;
+    }
+    const pages = new Set(record.pageIndexes.filter((pageIndex) => pageIndexes.has(pageIndex)));
+    if (pages.size === 0) {
+      return true;
+    }
+    const backupElements = await this.readInkEditBackupElements(record);
+    if (!backupElements || !inkStrokeSetsEquivalent(elements, backupElements, pages)) {
+      return this.completeInkEditTransaction(file, elements, pages);
+    }
+
+    try {
+      await this.restoreInkEditTransaction(file, record, true);
+      const restoredBytes = await this.app.vault.readBinary(file);
+      const preserved = elements.map((element): InkElement => {
+        if (element.kind !== "stroke" || !pages.has(element.pageIndex)) {
+          return markElementSaved(cloneElement(element));
+        }
+        return {
+          ...cloneStroke(element),
+          externalDirty: false,
+          pdfPoints: element.points.map((point) => ({ ...point })),
+          pdfSaved: true,
+          saved: true
+        };
+      });
+      await this.saveEditableAnnotationState(file, preserved, restoredBytes);
+      return true;
+    } catch (error) {
+      console.error("pdftion could not restore an unchanged PDF ink edit transaction.", error);
+      return false;
     }
   }
 
@@ -2625,6 +2662,19 @@ export default class PdftionPlugin extends Plugin {
     }
   }
 
+  private async readInkEditBackupElements(record: PdfInkEditTransactionRecord): Promise<InkElement[] | null> {
+    if (!record.backupAnnotationStatePath) {
+      return null;
+    }
+    try {
+      const raw = await this.app.vault.adapter.read(record.backupAnnotationStatePath);
+      const parsed = JSON.parse(raw) as { elements?: unknown };
+      return Array.isArray(parsed.elements) ? parsed.elements.filter(isInkElement) : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async writeInkEditTransaction(file: TFile, record: PdfInkEditTransactionRecord): Promise<void> {
     await this.ensureAdapterFolder(`${this.manifest.dir}/data/ink-edit-transactions`);
     await this.app.vault.adapter.write(this.getInkEditTransactionPath(file.path), JSON.stringify(record, null, 2));
@@ -2683,7 +2733,7 @@ export default class PdftionPlugin extends Plugin {
         }
         const elements = await this.readPendingInkEditElements(file);
         if (elements) {
-          const committed = await this.completeInkEditTransaction(file, elements, new Set(record.pageIndexes));
+          const committed = await this.finishInkEditTransaction(file, elements, new Set(record.pageIndexes));
           if (committed) {
             console.info(`pdftion completed interrupted PDF ink editing for ${file.path}.`);
             continue;
@@ -3253,6 +3303,8 @@ class InkSession {
   private annotationLoadPromise: Promise<void> | null = null;
   private checkpointPending = false;
   private checkpointing = false;
+  private conversionInProgress = false;
+  private exportRenderFallbackPages = new Set<number>();
   private preparingPdfInkForEditing = false;
   private pendingEditableInkPrepareAfterSave = false;
   private pendingSaveAfterCurrentSave = false;
@@ -3396,7 +3448,7 @@ class InkSession {
       const file = this.file;
       const elements = this.getEditableElements().map(cloneElement);
       const pages = new Set(this.detachedInkEditPages);
-      void this.plugin.completeInkEditTransaction(file, elements, pages);
+      void this.plugin.finishInkEditTransaction(file, elements, pages);
     } else if (this.detachedInkEditPages.size === 0) {
       this.flushSoon();
     }
@@ -3478,7 +3530,7 @@ class InkSession {
     const previousPages = new Set(this.detachedInkEditPages);
     const previousElements = this.getEditableElements().map(cloneElement);
     if (previousPages.size > 0) {
-      void this.plugin.completeInkEditTransaction(previousFile, previousElements, previousPages);
+      void this.plugin.finishInkEditTransaction(previousFile, previousElements, previousPages);
     } else {
       this.flushSoon();
     }
@@ -4359,6 +4411,9 @@ class InkSession {
 
   private async prepareEditableInkForCurrentPage(force = false): Promise<void> {
     try {
+      if (this.conversionInProgress) {
+        return;
+      }
       await this.loadEditableAnnotations();
       if (!this.enabled) {
         return;
@@ -4378,7 +4433,7 @@ class InkSession {
   }
 
   private scheduleEditableInkPrepare(delay = 160, force = false): void {
-    if (!this.enabled) {
+    if (!this.enabled || this.conversionInProgress) {
       return;
     }
     const shouldForce = force || this.inkPrepareTimerForce;
@@ -4441,6 +4496,9 @@ class InkSession {
         if (alreadyPrepared) {
           return;
         }
+        if (!await this.commitDetachedInkPages(new Set(this.detachedInkEditPages))) {
+          return;
+        }
       }
       for (const pageIndex of pageIndexes) {
         this.pendingNativeInkHidePages.add(pageIndex);
@@ -4498,7 +4556,7 @@ class InkSession {
     const targetPath = targetFile.path;
     const elements = this.getEditableElements().map(cloneElement);
     this.clearAutoSaveTimer();
-    this.finishingPdfInkEditing = this.plugin.completeInkEditTransaction(targetFile, elements, pageIndexes)
+    this.finishingPdfInkEditing = this.plugin.finishInkEditTransaction(targetFile, elements, pageIndexes)
       .then(async (committed) => {
         if (this.file.path !== targetPath) {
           return committed;
@@ -6329,6 +6387,9 @@ class InkSession {
   }
 
   private async renderPdfPageCanvasForExport(overlay: PageOverlay): Promise<HTMLCanvasElement | null> {
+    if (this.exportRenderFallbackPages.has(overlay.pageIndex)) {
+      return this.getPdfCanvas(overlay);
+    }
     const viewer = this.getNativePdfViewerApp()?.pdfViewer;
     const pageView = viewer?.getPageView?.(overlay.pageIndex) ?? viewer?._pages?.[overlay.pageIndex] ?? null;
     const pdfPage = pageView?.pdfPage;
@@ -6349,16 +6410,29 @@ class InkSession {
       const task = pdfPage.render({
         canvas,
         canvasContext: context,
+        intent: "print",
         transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
         viewport
       });
-      if (task && "promise" in task && task.promise) {
-        await task.promise;
-      } else {
-        await task;
+      const renderPromise = task && "promise" in task && task.promise
+        ? task.promise
+        : Promise.resolve(task);
+      const completed = await Promise.race([
+        renderPromise.then(() => true),
+        sleepMs(8_000).then(() => false)
+      ]);
+      if (!completed) {
+        this.exportRenderFallbackPages.add(overlay.pageIndex);
+        if (task && "cancel" in task && typeof task.cancel === "function") {
+          task.cancel();
+        }
+        await Promise.race([renderPromise.catch(() => undefined), sleepMs(250)]);
+        console.warn("pdftion timed out rendering an offscreen PDF page; using the displayed canvas.", overlay.pageIndex + 1);
+        return this.getPdfCanvas(overlay);
       }
       return canvas;
     } catch (error) {
+      this.exportRenderFallbackPages.add(overlay.pageIndex);
       console.warn("pdftion could not render an offscreen PDF page for conversion.", error);
       return this.getPdfCanvas(overlay);
     }
@@ -8762,11 +8836,28 @@ class InkSession {
   }
 
   private async prepareExportSnapshot(): Promise<void> {
-    await this.loadEditableAnnotations();
-    this.commitNativeTextEditor();
-    await sleepMs(0);
-    this.redrawAll();
-    await waitForNextFrame();
+    this.conversionInProgress = true;
+    this.clearAutoSaveTimer();
+    this.clearEditableInkPrepareTimer();
+    try {
+      for (let attempt = 0; attempt < 200 && (this.saving || this.preparingPdfInkForEditing); attempt += 1) {
+        await sleepMs(50);
+      }
+      if (this.saving || this.preparingPdfInkForEditing) {
+        throw new Error("PDF editing state is still being prepared; conversion did not start.");
+      }
+      await this.loadEditableAnnotations();
+      this.commitNativeTextEditor();
+      if (!await this.finishPdfInkEditing()) {
+        throw new Error("Could not finish the PDF ink edit transaction before conversion.");
+      }
+      await sleepMs(0);
+      this.redrawAll();
+      await waitForNextFrame();
+    } catch (error) {
+      this.conversionInProgress = false;
+      throw error;
+    }
   }
 
   async exportConvertedMarkdown(options: { notice?: boolean } = {}): Promise<string | null> {
@@ -8928,6 +9019,19 @@ class InkSession {
   }
 
   private async captureVisualConversionPages(options: VisualCaptureOptions = {}): Promise<VisualConversionPage[]> {
+    this.conversionInProgress = true;
+    this.clearAutoSaveTimer();
+    this.clearEditableInkPrepareTimer();
+    this.exportRenderFallbackPages.clear();
+    if (this.finishingPdfInkEditing) {
+      await Promise.race([this.finishingPdfInkEditing, sleepMs(10_000)]);
+    }
+    for (let attempt = 0; attempt < 200 && (this.saving || this.preparingPdfInkForEditing); attempt += 1) {
+      await sleepMs(50);
+    }
+    if (this.saving || this.preparingPdfInkForEditing || this.finishingPdfInkEditing) {
+      throw new Error("PDF editing state is still being saved; conversion did not start.");
+    }
     const pageElements = this.findPageElements();
     const screenOnlySurface = pageElements.length === 1 && !pageElements[0].matches(
       ".pdfViewer .page, .pdf-viewer .page, .pdf-container .page, .page[data-page-number]"
@@ -8938,7 +9042,8 @@ class InkSession {
     const scrollEl = findScrollableAncestor(firstPage);
     const originalScrollLeft = scrollEl.scrollLeft;
     const originalScrollTop = scrollEl.scrollTop;
-
+    const sourcePath = this.file.path;
+    const sourceFingerprint = await sha256Hex(await this.plugin.app.vault.readBinary(this.file));
     try {
       for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
         const pageEl = this.findPdfPageElementForExport(pageIndex);
@@ -8973,6 +9078,20 @@ class InkSession {
       scrollEl.scrollTop = originalScrollTop;
       scrollEl.dispatchEvent(new Event("scroll"));
       this.scanPages();
+      this.conversionInProgress = false;
+      try {
+        if (this.file.path === sourcePath) {
+          const finalFingerprint = await sha256Hex(await this.plugin.app.vault.readBinary(this.file));
+          if (finalFingerprint !== sourceFingerprint) {
+            console.error("pdftion detected a source PDF change during read-only conversion.", sourcePath);
+          }
+        }
+      } catch (error) {
+        console.warn("pdftion could not verify the source PDF after conversion.", error);
+      }
+      if (this.hasPendingPdfWrite()) {
+        this.scheduleAutoSave(AUTO_SAVE_IDLE_DELAY_MS);
+      }
     }
 
     if (pages.length !== pageCount) {
@@ -9016,6 +9135,10 @@ class InkSession {
     const viewer = app?.pdfViewer;
     const directPageView = viewer?.getPageView?.(pageIndex) ?? viewer?._pages?.[pageIndex] ?? null;
     if (directPageView?.pdfPage?.render && directPageView.viewport?.width && directPageView.viewport.height) {
+      return;
+    }
+    const directCanvas = directPageView?.canvas ?? pageEl?.querySelector<HTMLCanvasElement>(".canvasWrapper canvas, canvas");
+    if (directCanvas && directCanvas.width > 1 && directCanvas.height > 1 && measureCanvasVisualRatio(directCanvas) > 0.00035) {
       return;
     }
     for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -9062,7 +9185,10 @@ class InkSession {
   }
 
   private async captureVisualPageImage(overlay: PageOverlay, options: VisualCaptureOptions = {}): Promise<VisualConversionPage | null> {
-    const pdfCanvas = await this.renderPdfPageCanvasForExport(overlay);
+    const displayedCanvas = this.getPdfCanvas(overlay);
+    const pdfCanvas = displayedCanvas && measureCanvasVisualRatio(displayedCanvas) > 0.00035
+      ? displayedCanvas
+      : await this.renderPdfPageCanvasForExport(overlay);
     if (!pdfCanvas || pdfCanvas.width <= 1 || pdfCanvas.height <= 1) {
       return null;
     }
@@ -10950,7 +11076,7 @@ class InkSession {
   }
 
   private scheduleAutoSave(delay = AUTO_SAVE_IDLE_DELAY_MS): void {
-    if (this.destroyed || !this.hasPendingPdfWrite()) {
+    if (this.destroyed || this.conversionInProgress || !this.hasPendingPdfWrite()) {
       return;
     }
     this.clearAutoSaveTimer();
@@ -11815,27 +11941,123 @@ function fitImageToOverlay(
   };
 }
 
+function matchEditableTaskMarker(text: string): { checked: boolean; length: number; marker: string } | null {
+  const markdown = text.match(/^(?:[-*+]\s*)?\[([ xX✓✔])\]\s*/u);
+  if (markdown) {
+    const checked = !/^\s*$/u.test(markdown[1]);
+    return { checked, length: markdown[0].length, marker: checked ? "☑" : "☐" };
+  }
+  const unicode = text.match(/^(☐|□|◻|⬜|🔲|☑|☒|✅|✓️?|✔️?)\s*/u);
+  if (!unicode) {
+    return null;
+  }
+  return {
+    checked: /^(?:☑|☒|✅|✓|✔)/u.test(unicode[1]),
+    length: unicode[0].length,
+    marker: unicode[1]
+  };
+}
+
+function matchEditableUnorderedListMarker(text: string): { length: number; marker: string } | null {
+  const match = text.match(/^([*+\-•‣⁃◦●○▪▫■◆◇▶▸])\s+/u);
+  return match ? { length: match[0].length, marker: match[1] } : null;
+}
+
+function matchEditableOrderedListMarker(text: string): { length: number; ordinal: number } | null {
+  const match = text.match(/^(?:\(\s*)?(\d{1,4})(?:\s*\)|[.、．）])\s+/u);
+  if (!match) {
+    return null;
+  }
+  const ordinal = Number.parseInt(match[1], 10);
+  return Number.isFinite(ordinal) ? { length: match[0].length, ordinal } : null;
+}
+
+function buildEditableListLefts(lines: EditableMarkdownLine[]): number[] {
+  const lefts: number[] = [];
+  for (const line of lines) {
+    const text = line.runs.map((run) => run.text).join("").trim();
+    if (!matchEditableTaskMarker(text) && !matchEditableUnorderedListMarker(text) && !matchEditableOrderedListMarker(text)) {
+      continue;
+    }
+    const existing = lefts.findIndex((left) => Math.abs(left - line.left) <= 0.022);
+    if (existing >= 0) {
+      lefts[existing] = (lefts[existing] + line.left) / 2;
+    } else {
+      lefts.push(line.left);
+    }
+  }
+  return lefts.sort((a, b) => a - b).slice(0, 7);
+}
+
+function getEditableListLevel(line: EditableMarkdownLine, lefts: number[]): number {
+  return lefts
+    .map((left, index) => ({ distance: Math.abs(left - line.left), index }))
+    .sort((a, b) => a.distance - b.distance)[0]?.index ?? 0;
+}
+
+function isEditableCodeLine(line: EditableMarkdownLine, text: string): boolean {
+  if (/^`{3,}|`{3,}$/u.test(text)) {
+    return true;
+  }
+  const visibleLength = Math.max(1, text.replace(/\s+/gu, "").length);
+  const monospaceLength = line.runs.reduce((total, run) => (
+    /(?:mono|consolas|courier|code)/iu.test(run.fontFamily) ? total + run.text.replace(/\s+/gu, "").length : total
+  ), 0);
+  return visibleLength >= 3 && monospaceLength / visibleLength >= 0.78;
+}
+
+function isEditableCalloutTitle(text: string): boolean {
+  return /^(?:ℹ️?|💡|⚠️?|❓)?\s*(?:note|tip|info|important|warning|caution|danger|注意|提示|信息|重要|警告|危险)(?:\s*[:：]|$)/iu.test(text);
+}
+
 function buildNativeExportDocument(
   pages: EditableMarkdownPage[],
   images: NoteDrawExportImage[] = []
 ): NativeExportDocument {
   const headingProfile = buildEditableMarkdownHeadingProfile(pages);
   const baseFontSize = headingProfile.baseFontSize;
-  let semanticSection: EditableMarkdownSemanticSection | null = null;
-  let headingLevelOffset: number | null = null;
   const nativePages = pages.map((page) => {
     const tables = detectEditableMarkdownTables(page.lines);
     const tableLines = new Set(tables.flatMap((table) => table.lines));
-    const pageImages = images
+    const contentLines = page.lines.filter((line) => !tableLines.has(line));
+    const listLefts = buildEditableListLefts(contentLines);
+    const inlineGlyphsByLine = new Map<EditableMarkdownLine, NoteDrawExportImage[]>();
+    const pageImages: NoteDrawExportImage[] = [];
+    for (const image of images
       .filter((image) => image.pageIndex === page.pageIndex)
-      .sort((a, b) => (a.y - b.y) || ((a.zIndex ?? 0) - (b.zIndex ?? 0)) || a.id.localeCompare(b.id));
+      .sort((a, b) => (a.y - b.y) || ((a.zIndex ?? 0) - (b.zIndex ?? 0)) || a.id.localeCompare(b.id))) {
+      if (image.id.startsWith("pdf-inline-")) {
+        const line = contentLines
+          .map((candidate) => ({
+            candidate,
+            gap: candidate.left - (image.x + image.width),
+            verticalDistance: Math.abs(
+              image.y + image.height / 2 - (candidate.top + candidate.height / 2)
+            )
+          }))
+          .filter(({ candidate, gap, verticalDistance }) => (
+            gap >= -0.01 && gap <= 0.09 &&
+            verticalDistance <= Math.max(0.012, candidate.height * 1.15)
+          ))
+          .sort((a, b) => (a.verticalDistance - b.verticalDistance) || (a.gap - b.gap))[0]?.candidate;
+        if (line) {
+          const glyphs = inlineGlyphsByLine.get(line) ?? [];
+          glyphs.push(image);
+          inlineGlyphsByLine.set(line, glyphs);
+          if (!image.id.startsWith("pdf-inline-checkbox-")) {
+            pageImages.push(image);
+          }
+          continue;
+        }
+      }
+      pageImages.push(image);
+    }
     const items: Array<
       | { kind: "image"; position: number; value: NoteDrawExportImage }
       | { kind: "line"; position: number; value: EditableMarkdownLine }
       | { kind: "table"; position: number; value: EditableMarkdownTable }
     > = [
-      ...page.lines
-        .filter((line) => !tableLines.has(line))
+      ...contentLines
         .map((line) => ({ kind: "line" as const, position: line.top, value: line })),
       ...tables.map((table) => ({ kind: "table" as const, position: table.top, value: table })),
       ...pageImages.map((image) => ({ kind: "image" as const, position: image.y + image.height / 2, value: image }))
@@ -11869,21 +12091,21 @@ function buildNativeExportDocument(
       }
 
       const line = item.value;
+      const leadingImages = inlineGlyphsByLine.get(line);
       const text = line.runs.map((run) => run.text).join("").trim();
       if (!text) {
         continue;
       }
+      const explicitHeading = text.match(/^(#{1,6})\s+/u);
       const detectedHeadingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text, headingProfile);
       if (detectedHeadingLevel !== null) {
-        headingLevelOffset ??= Math.max(0, detectedHeadingLevel - 1);
-        const headingLevel = Math.max(1, detectedHeadingLevel - headingLevelOffset);
-        semanticSection = getEditableMarkdownSemanticSection(text);
         blocks.push({
           height: line.height,
-          headingLevel,
+          headingLevel: detectedHeadingLevel,
           kind: "heading",
+          leadingImages,
           left: line.left,
-          runs: line.runs,
+          runs: explicitHeading ? removeEditableRunPrefix(line.runs, explicitHeading[0].length) : line.runs,
           top: line.top,
           width: line.width
         });
@@ -11892,98 +12114,88 @@ function buildNativeExportDocument(
         }
         continue;
       }
-      if (
-        semanticSection?.kind === "task" &&
-        typeof semanticSection.baseLeft === "number" &&
-        line.left < semanticSection.baseLeft - 0.018
-      ) {
-        semanticSection = null;
-      }
-      if (semanticSection && typeof semanticSection.baseLeft !== "number") {
-        semanticSection.baseLeft = line.left;
-      }
-
-      const taskMarker = text.match(/^[☐□◻☑☒✅]\s*/u);
-      const inferredTask = semanticSection?.kind === "task" || /^(?:未完成任务|已完成任务)(?:\s|$)/u.test(text);
-      const bullet = text.match(/^[•●○▪]\s*/u);
-      const ordered = text.match(/^(\d+)[.、)]\s*/u);
+      const taskMarker = matchEditableTaskMarker(text);
+      const bullet = matchEditableUnorderedListMarker(text);
+      const ordered = matchEditableOrderedListMarker(text);
       const quote = text.match(/^>\s*/u);
       const removePrefix = (prefix: string): EditableMarkdownTextRun[] => removeEditableRunPrefix(line.runs, prefix.length);
-      const listLevel = semanticSection && typeof semanticSection.baseLeft === "number" && line.left - semanticSection.baseLeft >= 0.035
-        ? 1
-        : 0;
+      const listLevel = getEditableListLevel(line, listLefts);
+      const visualTaskImage = leadingImages?.find((image) => image.id.startsWith("pdf-inline-checkbox-"));
+      const remainingLeadingImages = leadingImages?.filter((image) => image !== visualTaskImage);
 
-      if (taskMarker || inferredTask) {
+      if (taskMarker || visualTaskImage) {
         blocks.push({
-          checked: /^(?:已完成任务|[☑☒✅])/u.test(text),
+          checked: taskMarker?.checked ?? visualTaskImage?.id.startsWith("pdf-inline-checkbox-checked-") ?? false,
           height: line.height,
           kind: "task",
+          leadingImages: remainingLeadingImages,
           left: line.left,
           listLevel,
-          runs: taskMarker ? removePrefix(taskMarker[0]) : line.runs,
+          marker: taskMarker?.marker,
+          runs: taskMarker ? removeEditableRunPrefix(line.runs, taskMarker.length) : line.runs,
           top: line.top,
           width: line.width
         });
-      } else if (bullet || semanticSection?.kind === "unordered") {
+      } else if (bullet) {
         blocks.push({
           height: line.height,
           kind: "unordered-list",
+          leadingImages,
           left: line.left,
           listLevel,
-          runs: bullet ? removePrefix(bullet[0]) : line.runs,
+          marker: bullet.marker,
+          runs: removeEditableRunPrefix(line.runs, bullet.length),
           top: line.top,
           width: line.width
         });
-      } else if (ordered || semanticSection?.kind === "ordered") {
-        const ordinal = ordered ? Number.parseInt(ordered[1], 10) : semanticSection?.nextOrdinal ?? 1;
-        if (semanticSection?.kind === "ordered") {
-          semanticSection.nextOrdinal = Math.max(semanticSection.nextOrdinal + 1, ordinal + 1);
-        }
+      } else if (ordered) {
         blocks.push({
           height: line.height,
           kind: "ordered-list",
+          leadingImages,
           left: line.left,
           listLevel,
-          ordinal,
-          runs: ordered ? removePrefix(ordered[0]) : line.runs,
+          ordinal: ordered.ordinal,
+          runs: removeEditableRunPrefix(line.runs, ordered.length),
           top: line.top,
           width: line.width
         });
-      } else if (quote || semanticSection?.kind === "quote") {
+      } else if (quote) {
         blocks.push({
           height: line.height,
           kind: "quote",
+          leadingImages,
           left: line.left,
           runs: quote ? removePrefix(quote[0]) : line.runs,
           top: line.top,
           width: line.width
         });
-      } else if (semanticSection?.kind === "code") {
+      } else if (isEditableCodeLine(line, text)) {
         blocks.push({
           height: line.height,
           kind: "code",
+          leadingImages,
           left: line.left,
           runs: line.runs.map((run) => ({ ...run, code: true })),
           top: line.top,
           width: line.width
         });
-      } else if (semanticSection?.kind === "callout") {
-        const calloutTitle = blocks.every((block) => block.kind !== "callout-title" && block.kind !== "callout-body") ||
-          blocks[blocks.length - 1]?.kind === "heading";
+      } else if (isEditableCalloutTitle(text)) {
         blocks.push({
           height: line.height,
-          kind: calloutTitle ? "callout-title" : "callout-body",
+          kind: "callout-title",
+          leadingImages,
           left: line.left,
           runs: line.runs,
           top: line.top,
           width: line.width
         });
       } else {
-        const styledRuns = applyEditableMarkdownSemanticStyles(line.runs, text, semanticSection).map((run) => ({
+        const styledRuns = line.runs.map((run) => ({
           ...run,
           code: run.code || /(?:mono|consolas|courier|code)/i.test(run.fontFamily)
         }));
-        blocks.push({ height: line.height, kind: "paragraph", left: line.left, runs: styledRuns, top: line.top, width: line.width });
+        blocks.push({ height: line.height, kind: "paragraph", leadingImages, left: line.left, runs: styledRuns, top: line.top, width: line.width });
       }
     }
 
@@ -12053,31 +12265,42 @@ function buildEditableMarkdown(
   for (const page of document.pages) {
     for (const block of page.blocks) {
       const text = block.runs.map((run) => renderEditableMarkdownRun(run, document.baseFontSize, false, file)).join("").trim();
+      const leadingVisuals = (block.leadingImages ?? [])
+        .map((image) => renderMarkdownExportImage(file, image, targetPath))
+        .filter(Boolean)
+        .join(" ");
+      const content = [leadingVisuals, text].filter(Boolean).join(" ");
       if (block.kind === "heading") {
-        output.push(`${"#".repeat(block.headingLevel ?? 1)} ${text}`, "");
+        output.push(`${"#".repeat(block.headingLevel ?? 1)} ${content}`, "");
       } else if (block.kind === "paragraph") {
-        output.push(text, "");
+        output.push(content, "");
       } else if (block.kind === "unordered-list") {
-        output.push(`${"    ".repeat(block.listLevel ?? 0)}- ${text}`, "");
+        output.push(`${"    ".repeat(block.listLevel ?? 0)}- ${content}`, "");
       } else if (block.kind === "ordered-list") {
-        output.push(`${"    ".repeat(block.listLevel ?? 0)}${block.ordinal ?? 1}. ${text}`, "");
+        output.push(`${"    ".repeat(block.listLevel ?? 0)}${block.ordinal ?? 1}. ${content}`, "");
       } else if (block.kind === "task") {
-        output.push(`${"    ".repeat(block.listLevel ?? 0)}- [${block.checked ? "x" : " "}] ${text}`, "");
+        output.push(`${"    ".repeat(block.listLevel ?? 0)}- [${block.checked ? "x" : " "}] ${content}`, "");
       } else if (block.kind === "quote") {
-        output.push(`> ${text}`, "");
+        output.push(`> ${content}`, "");
       } else if (block.kind === "callout-title") {
-        output.push(`> ${getCommonCalloutIcon(block.runs.map((run) => run.text).join(""))} **${text}**`, "");
+        output.push(`> ${getCommonCalloutIcon(block.runs.map((run) => run.text).join(""))} **${content}**`, "");
       } else if (block.kind === "callout-body") {
         output.push(`> ${text}`, "");
       } else if (block.kind === "code") {
         const raw = block.runs.map((run) => run.text).join("");
         const fence = raw.includes("```") ? "````" : "```";
+        if (leadingVisuals) {
+          output.push(leadingVisuals, "");
+        }
         output.push(fence, raw, fence, "");
       } else if (block.kind === "separator") {
         output.push("---", "");
       } else if (block.kind === "table" && block.table) {
         output.push(...renderEditableMarkdownTable(block.table, document.baseFontSize, file), "");
-      } else if (block.kind === "image" && block.image?.assetPath) {
+      } else if (
+        block.kind === "image" && block.image?.assetPath &&
+        !block.image.id.startsWith("pdf-inline-")
+      ) {
         output.push(renderMarkdownExportImage(file, block.image, targetPath), "");
       }
     }
@@ -12304,14 +12527,6 @@ function normalizedRectsOverlap(
 ): boolean {
   return normalizedRangesOverlap(xA, xA + widthA, xB, xB + widthB, padding) &&
     normalizedRangesOverlap(yA, yA + heightA, yB, yB + heightB, padding);
-}
-
-function getEditableMarkdownBaseFontSize(lines: EditableMarkdownLine[]): number {
-  const sizes = lines
-    .flatMap((line) => line.runs.map((run) => run.fontSize))
-    .filter((size) => Number.isFinite(size) && size > 0)
-    .sort((a, b) => a - b);
-  return sizes.length > 0 ? sizes[Math.floor(sizes.length / 2)] : 16;
 }
 
 interface EditableTextFragment {
@@ -12745,130 +12960,50 @@ function mergeInkTextExportLines(
   return merged.sort((a, b) => (a.top - b.top) || (a.left - b.left));
 }
 
-function renderEditableMarkdownLine(
-  line: EditableMarkdownLine,
-  baseFontSize: number,
-  headingProfile: EditableMarkdownHeadingProfile,
-  semanticSection: EditableMarkdownSemanticSection | null = null
-): string {
-  const text = line.runs.map((run) => run.text).join("").trim();
-  const taskMarker = text.match(/^[☐□◻☑☒✅]\s*/);
-  const inferredTask = /^(?:未完成任务|已完成任务)(?:\s|$)/.test(text) || semanticSection?.kind === "task";
-  const bullet = text.match(/^[•●○▪]\s*/);
-  const ordered = text.match(/^(\d+)[.、)]\s*/);
-  const removePrefix = (prefix: string): EditableMarkdownTextRun[] => {
-    let remaining = prefix.length;
-    return line.runs
-      .map((run) => {
-        if (remaining <= 0) {
-          return { ...run };
-        }
-        const removed = Math.min(remaining, run.text.length);
-        remaining -= removed;
-        return { ...run, text: run.text.slice(removed) };
-      })
-      .filter((run) => run.text.length > 0);
-  };
-  const headingLevel = getEditableMarkdownHeadingLevel(line, baseFontSize, text, headingProfile);
-  if (headingLevel !== null && !taskMarker && !bullet && !ordered) {
-    const heading = line.runs.map((run) => renderEditableMarkdownRun(run, baseFontSize, true)).join("").trim();
-    return `${"#".repeat(headingLevel)} ${heading || escapeMarkdownInline(text)}`;
-  }
-  if (taskMarker || inferredTask) {
-    const checked = /^(?:已完成任务|[☑☒✅])/.test(text);
-    const runs = taskMarker ? removePrefix(taskMarker[0]) : line.runs;
-    return `- [${checked ? "x" : " "}] ${runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
-  }
-  if (bullet || semanticSection?.kind === "unordered") {
-    const runs = bullet ? removePrefix(bullet[0]) : line.runs;
-    const indent = getEditableMarkdownListIndent(line, semanticSection);
-    return `${indent}- ${runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
-  }
-  if (ordered || semanticSection?.kind === "ordered") {
-    const number = ordered ? Number.parseInt(ordered[1], 10) : semanticSection?.nextOrdinal ?? 1;
-    if (semanticSection?.kind === "ordered") {
-      semanticSection.nextOrdinal = Math.max(semanticSection.nextOrdinal + 1, number + 1);
-    }
-    const runs = ordered ? removePrefix(ordered[0]) : line.runs;
-    const indent = getEditableMarkdownListIndent(line, semanticSection);
-    return `${indent}${number}. ${runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("").trim()}`;
-  }
-  const runs = applyEditableMarkdownSemanticStyles(line.runs, text, semanticSection);
-  return runs.map((run) => renderEditableMarkdownRun(run, baseFontSize)).join("") || escapeMarkdownInline(text);
-}
-
-function getEditableMarkdownSemanticSection(text: string): EditableMarkdownSemanticSection | null {
-  const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
-  if (/^(?:callout|标注框|提示框)$/.test(normalized)) {
-    return { kind: "callout", nextOrdinal: 1 };
-  }
-  if (/^(?:代码块|code\s+block)$/.test(normalized)) {
-    return { kind: "code", nextOrdinal: 1 };
-  }
-  if (/^(?:引用|blockquote|quote)$/.test(normalized)) {
-    return { kind: "quote", nextOrdinal: 1 };
-  }
-  if (/无序列表|unordered\s+list/.test(normalized)) {
-    return { kind: "unordered", nextOrdinal: 1 };
-  }
-  if (/有序列表|ordered\s+list/.test(normalized)) {
-    return { kind: "ordered", nextOrdinal: 1 };
-  }
-  if (/任务列表|task\s+list/.test(normalized)) {
-    return { kind: "task", nextOrdinal: 1 };
-  }
-  if (/强调|emphasis/.test(normalized)) {
-    return { kind: "emphasis", nextOrdinal: 1 };
-  }
-  return null;
-}
-
-function getEditableMarkdownListIndent(
-  line: EditableMarkdownLine,
-  semanticSection: EditableMarkdownSemanticSection | null
-): string {
-  if (!semanticSection || typeof semanticSection.baseLeft !== "number") {
-    return "";
-  }
-  return line.left - semanticSection.baseLeft >= 0.035 ? "    " : "";
-}
-
-function applyEditableMarkdownSemanticStyles(
-  runs: EditableMarkdownTextRun[],
-  text: string,
-  semanticSection: EditableMarkdownSemanticSection | null
-): EditableMarkdownTextRun[] {
-  if (semanticSection?.kind !== "emphasis" || runs.some((run) => run.bold || run.italic || run.strike)) {
-    return runs;
-  }
-  const normalized = text.replace(/\s+/g, " ").trim();
-  const style = /粗斜体|bold\s+italic/i.test(normalized)
-    ? { bold: true, italic: true, strike: false }
-    : /删除线|strikethrough|strike\s*through/i.test(normalized)
-      ? { bold: false, italic: false, strike: true }
-      : /粗体|\bbold\b/i.test(normalized)
-        ? { bold: true, italic: false, strike: false }
-        : /斜体|\bitalic\b/i.test(normalized)
-          ? { bold: false, italic: true, strike: false }
-          : null;
-  return style ? runs.map((run) => ({ ...run, ...style })) : runs;
-}
-
 function getEditableMarkdownHeadingLevel(
   line: EditableMarkdownLine,
   baseFontSize: number,
   text: string,
   headingProfile?: EditableMarkdownHeadingProfile
 ): number | null {
+  const explicit = text.match(/^(#{1,6})\s+/u);
+  if (explicit) {
+    return explicit[1].length;
+  }
   if (!text || text.length > 120 || baseFontSize <= 0) {
     return null;
   }
   const effectiveBaseFontSize = headingProfile?.baseFontSize ?? baseFontSize;
   const largestFontSize = Math.max(...line.runs.map((run) => run.fontSize), effectiveBaseFontSize);
   const ratio = largestFontSize / effectiveBaseFontSize;
-  if (ratio < 1.16) {
+  const visibleLength = Math.max(1, text.replace(/\s+/gu, "").length);
+  const boldLength = line.runs.reduce((total, run) => (
+    run.bold ? total + run.text.replace(/\s+/gu, "").length : total
+  ), 0);
+  const compactBoldHeading = boldLength / visibleLength >= 0.72 && text.length <= 72 && line.width <= 0.82;
+  const hasListMarker = Boolean(
+    matchEditableTaskMarker(text) ||
+    matchEditableUnorderedListMarker(text) ||
+    matchEditableOrderedListMarker(text) ||
+    /^>\s*/u.test(text)
+  );
+  if (ratio < 1.12 && !compactBoldHeading) {
     return null;
   }
+  if (hasListMarker && ratio < 1.34) {
+    return null;
+  }
+  const absoluteLevel = ratio >= 1.85
+    ? 1
+    : ratio >= 1.58
+      ? 2
+      : ratio >= 1.36
+        ? 3
+        : ratio >= 1.22
+          ? 4
+          : ratio >= 1.12
+            ? 5
+            : 6;
   if (headingProfile && headingProfile.ratios.length > 0) {
     const nearest = headingProfile.ratios
       .map((profileRatio, index) => ({ distance: Math.abs(profileRatio - ratio), index, profileRatio }))
@@ -12877,16 +13012,7 @@ function getEditableMarkdownHeadingLevel(
       return Math.min(6, nearest.index + 1);
     }
   }
-  if (ratio >= 1.46) {
-    return 1;
-  }
-  if (ratio >= 1.39) {
-    return 2;
-  }
-  if (ratio >= 1.26) {
-    return 3;
-  }
-  return 4;
+  return absoluteLevel;
 }
 
 function buildEditableMarkdownHeadingProfile(
@@ -12900,7 +13026,20 @@ function buildEditableMarkdownHeadingProfile(
         return [];
       }
       const ratio = Math.max(...line.runs.map((run) => run.fontSize), baseFontSize) / baseFontSize;
-      return ratio >= 1.16 ? [ratio] : [];
+      const visibleLength = Math.max(1, text.replace(/\s+/gu, "").length);
+      const boldLength = line.runs.reduce((total, run) => (
+        run.bold ? total + run.text.replace(/\s+/gu, "").length : total
+      ), 0);
+      const plausibleShape = line.width <= 0.92 && (
+        ratio >= 1.12 || (boldLength / visibleLength >= 0.72 && text.length <= 72)
+      );
+      const listLike = Boolean(
+        matchEditableTaskMarker(text) ||
+        matchEditableUnorderedListMarker(text) ||
+        matchEditableOrderedListMarker(text) ||
+        /^>\s*/u.test(text)
+      );
+      return plausibleShape && (!listLike || ratio >= 1.34) ? [ratio] : [];
     });
   }).sort((a, b) => b - a);
   const clusters: Array<{ count: number; ratio: number }> = [];
@@ -13202,9 +13341,11 @@ function collectNoteDrawExportImages(pages: VisualConversionPage[], elements: In
 function isUsefulMarkdownExportImage(image: NoteDrawExportImage): boolean {
   return !image.id.startsWith("html-visual-page-") &&
     image.placement !== "ink-preview" &&
-    (image.id.startsWith("pdf-raster-page-")
-      ? estimatedDataUrlBytes(image.dataUrl) >= 2_500 || image.width * image.height >= 0.004
-      : true);
+    (image.id.startsWith("pdf-inline-") || (
+      image.id.startsWith("pdf-raster-page-")
+        ? estimatedDataUrlBytes(image.dataUrl) >= 2_500 || image.width * image.height >= 0.004
+        : true
+    ));
 }
 
 function isUsefulNativeExportImage(image: VisualConversionImage): boolean {
@@ -13470,6 +13611,7 @@ async function extractHtmlDerivedVisualLayers(
   if (!ctx) {
     return [];
   }
+  const bodyFontSize = getEditableMarkdownDocumentBaseFontSize([{ lines }]);
   ctx.drawImage(pageCanvas, 0, 0);
 
   for (const line of lines) {
@@ -13552,7 +13694,7 @@ async function extractHtmlDerivedVisualLayers(
       maxCellX = Math.max(maxCellX, currentX);
       minCellY = Math.min(minCellY, currentY);
       maxCellY = Math.max(maxCellY, currentY);
-      for (let dy = -2; dy <= 2; dy += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
         for (let dx = -2; dx <= 2; dx += 1) {
           const nextX = currentX + dx;
           const nextY = currentY + dy;
@@ -13610,9 +13752,33 @@ async function extractHtmlDerivedVisualLayers(
     const normalizedHeight = height / layer.height;
     const normalizedArea = normalizedWidth * normalizedHeight;
     const density = visible / Math.max(1, width * height);
+    const normalizedLeft = minX / layer.width;
+    const normalizedTop = minY / layer.height;
+    const inlineLine = lines
+      .map((line) => ({
+        gap: line.left - (normalizedLeft + normalizedWidth),
+        line,
+        verticalDistance: Math.abs(
+          normalizedTop + normalizedHeight / 2 - (line.top + line.height / 2)
+        )
+      }))
+      .filter(({ gap, line, verticalDistance }) => (
+        Math.max(...line.runs.map((run) => run.fontSize), bodyFontSize) <= bodyFontSize * 1.1 &&
+        gap >= -0.01 && gap <= 0.09 &&
+        verticalDistance <= Math.max(0.012, line.height * 1.15)
+      ))
+      .sort((a, b) => (a.verticalDistance - b.verticalDistance) || (a.gap - b.gap))[0]?.line;
+    const likelyInlineGlyph = Boolean(inlineLine) &&
+      visible >= 3 && density >= 0.005 &&
+      normalizedWidth >= 0.001 && normalizedWidth <= 0.09 &&
+      normalizedHeight >= 0.002 && normalizedHeight <= 0.05 &&
+      normalizedArea <= 0.005;
+    const likelyCheckboxGlyph = Boolean(inlineLine) && likelyInlineGlyph &&
+      normalizedWidth >= Math.max(0.018, (inlineLine?.height ?? 0) * 1.8) &&
+      normalizedHeight >= (inlineLine?.height ?? 0) * 0.85;
     const likelyRasterImage = normalizedWidth >= 0.08 && normalizedHeight >= 0.04 && normalizedArea >= 0.004 &&
       colors.size >= 8 && density >= 0.055;
-    if (!likelyRasterImage) {
+    if (!likelyRasterImage && !likelyInlineGlyph) {
       continue;
     }
     const padding = 2;
@@ -13633,7 +13799,11 @@ async function extractHtmlDerivedVisualLayers(
     visuals.push({
       dataUrl: cropped.toDataURL("image/png"),
       height: cropHeight / layer.height,
-      id: `pdf-raster-page-${pageIndex + 1}-${visuals.length + 1}`,
+      id: `${likelyCheckboxGlyph
+        ? `pdf-inline-checkbox-${density >= 0.45 ? "checked" : "unchecked"}`
+        : likelyInlineGlyph
+          ? "pdf-inline-glyph"
+          : "pdf-raster"}-page-${pageIndex + 1}-${visuals.length + 1}`,
       opacity: 1,
       width: cropWidth / layer.width,
       x: cropLeft / layer.width,
@@ -13703,11 +13873,25 @@ async function buildCombinedPagePng(pages: VisualConversionPage[]): Promise<Uint
 }
 
 function getNativeExportBlockPrefix(block: NativeExportBlock): string {
-  if (block.kind === "unordered-list") return "• ";
+  if (block.kind === "unordered-list") return `${block.marker ?? "•"} `;
   if (block.kind === "ordered-list") return `${block.ordinal ?? 1}. `;
-  if (block.kind === "task") return `${block.checked ? "☑" : "☐"} `;
+  if (block.kind === "task") return `${block.marker ?? (block.checked ? "☑" : "☐")} `;
   if (block.kind === "callout-title") return `${getCommonCalloutIcon(block.runs.map((run) => run.text).join(""))} `;
   return "";
+}
+
+function containsEmojiPresentation(value: string): boolean {
+  return /[\p{Extended_Pictographic}\u2600-\u27bf]/u.test(value);
+}
+
+function exportFontFaceForRun(run: EditableMarkdownTextRun, code = false): string {
+  if (code || run.code) {
+    return "Consolas";
+  }
+  if (containsEmojiPresentation(run.text)) {
+    return "Segoe UI Emoji";
+  }
+  return exportFontFace(run.fontFamily);
 }
 
 function isHtmlAnnotationExportImage(image: VisualConversionImage): boolean {
@@ -13901,7 +14085,7 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
             bold: run.bold || block.kind === "callout-title",
             breakLine: false,
             color: exportHexColor(run.color),
-            fontFace: run.code || block.kind === "code" ? "Consolas" : exportFontFace(run.fontFamily),
+            fontFace: exportFontFaceForRun(run, block.kind === "code"),
             fontSize: Math.max(4, targetMaxSize * run.fontSize / maxRunSize),
             hyperlink: run.link ? { url: run.link } : undefined,
             italic: run.italic,
@@ -14884,6 +15068,24 @@ function cloneStroke(stroke: InkStroke): InkStroke {
 
 function cloneElement(element: InkElement): InkElement {
   return element.kind === "stroke" ? cloneStroke(element) : { ...element };
+}
+
+function inkStrokeSetsEquivalent(a: InkElement[], b: InkElement[], pageIndexes: Set<number>): boolean {
+  const signature = (elements: InkElement[]): string[] => elements
+    .filter((element): element is InkStroke => element.kind === "stroke" && pageIndexes.has(element.pageIndex))
+    .map((stroke) => JSON.stringify({
+      color: stroke.color,
+      id: stroke.id,
+      opacity: Number(stroke.opacity.toFixed(4)),
+      pageIndex: stroke.pageIndex,
+      points: stroke.points.map((point) => [Number(point.x.toFixed(6)), Number(point.y.toFixed(6))]),
+      tool: stroke.tool,
+      width: Number(stroke.width.toFixed(4))
+    }))
+    .sort();
+  const left = signature(a);
+  const right = signature(b);
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function legacyInkLayerRank(element: InkElement): number {
