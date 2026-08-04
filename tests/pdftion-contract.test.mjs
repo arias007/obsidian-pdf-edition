@@ -101,7 +101,27 @@ test("all requested visual formats share the page capture pipeline", async () =>
   assert.match(source, /return visiblePdf \?\? visibleOther \?\? matchedPdf \?\? matchedOther/);
   assert.equal((source.match(/await this\.openConvertedFile\((?:targetFile|exportedFile)\)/g) ?? []).length, 5);
   assert.match(source, /await this\.openConvertedMarkdownFile\(targetFile\)/);
+  assert.equal((source.match(/workspace\.getLeaf\("tab"\)/g) ?? []).length, 2);
   assert.match(source, /const timeout = window\.setTimeout\(finish, 120\)/);
+});
+
+test("read-only conversion restores a deleted or modified source PDF before returning", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const captureSource = source.slice(
+    source.indexOf("private async captureSourcePdfSnapshot"),
+    source.indexOf("private getNativePdfViewerApp")
+  );
+
+  assert.match(captureSource, /const bytes = await this\.plugin\.app\.vault\.readBinary\(this\.file\)/);
+  assert.match(captureSource, /fingerprint: await sha256Hex\(bytes\)/);
+  assert.match(captureSource, /getAbstractFileByPath\(sourcePath\)/);
+  assert.match(captureSource, /createBinary\(sourcePath, sourceBytes\.slice\(0\)\)/);
+  assert.match(captureSource, /modifyBinary\(source, sourceBytes\.slice\(0\)\)/);
+  assert.match(captureSource, /sourceIntegrityError = await this\.verifySourcePdfAfterConversion/);
+  assert.match(captureSource, /if \(sourceIntegrityError\) \{\s*throw sourceIntegrityError/);
+  assert.doesNotMatch(captureSource, /scheduleAutoSave\(AUTO_SAVE_IDLE_DELAY_MS\)/);
+  assert.equal((source.match(/await this\.assertSourcePdfSnapshot\(sourceSnapshot\)/g) ?? []).length, 5);
+  assert.doesNotMatch(captureSource, /could not verify the source PDF after conversion[\s\S]{0,120}?console\.warn/);
 });
 
 test("Markdown conversion prioritizes links and keeps floating media in NoteDraw", async () => {
@@ -186,9 +206,9 @@ test("document exports use native editable text, tables, links, and image-only v
   assert.match(source, /collectPdfJsEditableLines\(pageView, overlay\)/);
   assert.match(source, /const text = \(item\.str \?\? ""\).*?if \(!text\.trim\(\)/s);
   assert.match(source, /lines,\s*pageIndex: overlay\.pageIndex/);
-  assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\)/);
-  assert.match(source, /exportConvertedDocx[\s\S]{0,220}?const pages = await this\.captureVisualConversionPages\(\)/);
-  assert.match(source, /exportConvertedPptx[\s\S]{0,220}?const pages = await this\.captureVisualConversionPages\(\)/);
+  assert.match(source, /exportConvertedPptx[\s\S]{0,300}?captureVisualConversionPages\(\{\}, sourceSnapshot\)/);
+  assert.match(source, /exportConvertedDocx[\s\S]{0,260}?const pages = await this\.captureVisualConversionPages\(\{\}, sourceSnapshot\)/);
+  assert.match(source, /exportConvertedPptx[\s\S]{0,260}?const pages = await this\.captureVisualConversionPages\(\{\}, sourceSnapshot\)/);
   assert.match(source, /slide\.addText\(textRuns/);
   assert.match(source, /slide\.addTable\(rows/);
   assert.match(source, /element\.kind === "image" && options\.includeImages !== false/);
@@ -204,10 +224,31 @@ test("document exports use native editable text, tables, links, and image-only v
   assert.match(source, /new ExternalHyperlink\(\{/);
   assert.match(source, /data: dataUrlToBytes\(image\.dataUrl\)/);
   assert.match(source, /private conversionInProgress = false/);
-  assert.match(source, /private async prepareExportSnapshot\(\): Promise<void> \{[\s\S]{0,900}?await this\.finishPdfInkEditing\(\)/);
+  const exportPreparationSource = source.slice(
+    source.indexOf("private async prepareExportSnapshot"),
+    source.indexOf("private async verifySourcePdfAfterConversion")
+  );
+  assert.match(exportPreparationSource, /await this\.loadEditableAnnotations\(\)/);
+  assert.match(exportPreparationSource, /this\.commitNativeTextEditor\(\)/);
+  assert.doesNotMatch(exportPreparationSource, /finishPdfInkEditing|saveIntoPdf|modifyBinary|createBinary/);
   assert.match(source, /private async captureVisualConversionPages[\s\S]{0,220}?this\.conversionInProgress = true/);
-  assert.match(source, /sourceFingerprint = await sha256Hex/);
-  assert.match(source, /finalFingerprint !== sourceFingerprint/);
+  assert.match(source, /const sourceSnapshot = await this\.captureSourcePdfSnapshot\(\)/);
+  assert.match(source, /verifySourcePdfAfterConversion/);
+  assert.match(source, /getPortableExportFontSizePt/);
+  assert.match(source, /return "Arial"/);
+  assert.match(source, /function isUsefulNativeExportImage[\s\S]{0,180}?image\.id\.startsWith\("pdf-inline-"\)[\s\S]{0,80}?return false/);
+  const pptSource = source.slice(source.indexOf("async function buildPptxFromPageImages"), source.indexOf("function buildSelfContainedVisualHtml"));
+  assert.match(pptSource, /pptx\.theme = \{ bodyFontFace: "Arial", headFontFace: "Arial" \}/);
+  assert.match(pptSource, /fit: "none"/);
+  assert.doesNotMatch(pptSource, /fit: "shrink"/);
+  const docxSource = source.slice(source.indexOf("async function buildDocxFromPageImages"), source.indexOf("async function injectOfficePreviewPages"));
+  assert.match(docxSource, /compatabilityModeVersion: 15/);
+  assert.match(docxSource, /const imageChild = image\.link/);
+  assert.match(docxSource, /alignment: center < 0\.38 \? AlignmentType\.LEFT : center > 0\.62 \? AlignmentType\.RIGHT : AlignmentType\.CENTER/);
+  assert.doesNotMatch(docxSource, /floating:|HorizontalPositionRelativeFrom|VerticalPositionRelativeFrom|TextWrappingType/);
+  assert.match(docxSource, /layout: TableLayoutType\.FIXED/);
+  assert.match(docxSource, /lineRule: LineRuleType\.EXACT/);
+  assert.doesNotMatch(docxSource, /font: .*sans-serif/);
   assert.equal((source.match(/return injectOfficePreviewPages\(/g) ?? []).length, 2);
   assert.match(source, /zip\.file\("mpe\/preview\/manifest\.json"/);
   assert.match(source, /generator: "Obsidian Mobile PDF Exporter"/);
@@ -223,7 +264,7 @@ test("document exports use native editable text, tables, links, and image-only v
   assert.doesNotMatch(source, /<w:vanish\/>/);
 });
 
-test("HTML conversion uses compact flow layout with responsive real images", async () => {
+test("HTML conversion keeps flow text while floating drawings over their source position", async () => {
   const source = await readFile(sourceUrl, "utf8");
   const htmlSource = source.slice(
     source.indexOf("function buildHtmlExportDocumentFromVisualPages"),
@@ -235,11 +276,20 @@ test("HTML conversion uses compact flow layout with responsive real images", asy
   assert.match(htmlSource, /estimatedBytes >= 2_500 \|\| image\.width \* image\.height >= 0\.004/);
   assert.match(htmlSource, /<figure class="block block-visual/);
   assert.match(htmlSource, /class="page-annotations"/);
+  assert.match(htmlSource, /class="page-content"/);
+  assert.match(htmlSource, /const visualStyle = annotation/);
+  assert.match(htmlSource, /--visual-left:/);
+  assert.match(htmlSource, /--page-aspect:\$\{Math\.max\(1, page\.width\)\.toFixed\(2\)\} \/ \$\{Math\.max\(1, page\.height\)\.toFixed\(2\)\}/);
+  assert.match(htmlSource, /const pageClass = annotations \? "page page-has-annotations" : "page"/);
+  assert.match(htmlSource, /<div class="page-content">\$\{content\}<\/div>\$\{annotations\}<\/section>/);
+  assert.doesNotMatch(htmlSource, /<div class="page-content">\$\{content\}\$\{annotations\}/);
+  assert.match(htmlSource, /\.page-annotations\{aspect-ratio:var\(--page-aspect\);left:0;pointer-events:none;position:absolute;top:0;width:100%;z-index:3\}/);
+  assert.match(htmlSource, /\.page-has-annotations::before\{aspect-ratio:var\(--page-aspect\);content:"";display:block;width:100%\}/);
+  assert.match(htmlSource, /\.page-annotations \.block-visual\{[^}]*position:absolute/);
   assert.match(htmlSource, /\.filter\(\(page\) => page\.blocks\.length > 0\)/);
   assert.match(htmlSource, /\.block-image\{height:auto;max-height:760px;object-fit:contain;width:100%\}/);
-  assert.match(htmlSource, /font-size:\$\{clamp\(15 \* run\.fontSize \/ baseFontSize, 10, 36\)/);
-  assert.doesNotMatch(htmlSource, /aspect-ratio:/);
-  assert.doesNotMatch(htmlSource, /position:absolute/);
+  assert.match(htmlSource, /getPortableExportFontSizePt\(run, block, baseFontSize\)/);
+  assert.match(source, /function isUsefulHtmlExportImage[\s\S]{0,180}?image\.id\.startsWith\("pdf-inline-"\)[\s\S]{0,80}?return false/);
   assert.doesNotMatch(htmlSource, /container-type:/);
   assert.match(source, /function buildNativeExportDocumentFromVisualPages[\s\S]{0,600}?\.filter\(isUsefulNativeExportImage\)/);
 });
@@ -312,7 +362,7 @@ test("visual capture recovers native PDF text and separates text from image and 
   const pptSource = source.slice(source.indexOf("async function buildPptxFromPageImages"), source.indexOf("function buildSelfContainedVisualHtml"));
   assert.match(pptSource, /data: image\.dataUrl/);
   assert.doesNotMatch(pptSource, /uint8ArrayToDataUrl\(page\.bytes/);
-  assert.match(pptSource, /fit: "shrink"/);
+  assert.match(pptSource, /fit: "none"/);
   assert.doesNotMatch(pptSource, /transparency: 100/);
 });
 

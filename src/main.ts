@@ -1469,6 +1469,12 @@ interface VisualCaptureOptions {
   includeText?: boolean;
 }
 
+interface SourcePdfSnapshot {
+  bytes: ArrayBuffer;
+  fingerprint: string;
+  path: string;
+}
+
 interface NoteDrawExportPoint {
   t: number;
   x: number;
@@ -8835,41 +8841,89 @@ class InkSession {
     return mdPath ?? docxPath;
   }
 
-  private async prepareExportSnapshot(): Promise<void> {
+  private async prepareExportSnapshot(): Promise<SourcePdfSnapshot> {
     this.conversionInProgress = true;
     this.clearAutoSaveTimer();
     this.clearEditableInkPrepareTimer();
     try {
-      for (let attempt = 0; attempt < 200 && (this.saving || this.preparingPdfInkForEditing); attempt += 1) {
+      if (this.finishingPdfInkEditing) {
+        await Promise.race([this.finishingPdfInkEditing, sleepMs(10_000)]);
+      }
+      for (let attempt = 0; attempt < 200 && (this.saving || this.preparingPdfInkForEditing || this.finishingPdfInkEditing); attempt += 1) {
         await sleepMs(50);
       }
-      if (this.saving || this.preparingPdfInkForEditing) {
+      if (this.saving || this.preparingPdfInkForEditing || this.finishingPdfInkEditing) {
         throw new Error("PDF editing state is still being prepared; conversion did not start.");
       }
+      const sourceSnapshot = await this.captureSourcePdfSnapshot();
       await this.loadEditableAnnotations();
       this.commitNativeTextEditor();
-      if (!await this.finishPdfInkEditing()) {
-        throw new Error("Could not finish the PDF ink edit transaction before conversion.");
-      }
       await sleepMs(0);
       this.redrawAll();
       await waitForNextFrame();
+      return sourceSnapshot;
     } catch (error) {
       this.conversionInProgress = false;
       throw error;
     }
   }
 
+  private async captureSourcePdfSnapshot(): Promise<SourcePdfSnapshot> {
+    const bytes = await this.plugin.app.vault.readBinary(this.file);
+    return {
+      bytes,
+      fingerprint: await sha256Hex(bytes),
+      path: this.file.path
+    };
+  }
+
+  private async assertSourcePdfSnapshot(snapshot: SourcePdfSnapshot): Promise<void> {
+    const sourceIntegrityError = await this.verifySourcePdfAfterConversion(
+      snapshot.path,
+      snapshot.bytes,
+      snapshot.fingerprint
+    );
+    if (sourceIntegrityError) {
+      throw sourceIntegrityError;
+    }
+  }
+
+  private async verifySourcePdfAfterConversion(
+    sourcePath: string,
+    sourceBytes: ArrayBuffer,
+    sourceFingerprint: string
+  ): Promise<Error | null> {
+    try {
+      const source = this.plugin.app.vault.getAbstractFileByPath(sourcePath);
+      if (!(source instanceof TFile)) {
+        const restored = await this.plugin.app.vault.createBinary(sourcePath, sourceBytes.slice(0));
+        this.file = restored;
+        return new Error(`The source PDF disappeared during conversion and was restored: ${sourcePath}`);
+      }
+      const finalBytes = await this.plugin.app.vault.readBinary(source);
+      if (await sha256Hex(finalBytes) === sourceFingerprint) {
+        this.file = source;
+        return null;
+      }
+      await this.plugin.app.vault.modifyBinary(source, sourceBytes.slice(0));
+      this.file = source;
+      return new Error(`The source PDF changed during conversion and was restored: ${sourcePath}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return new Error(`Could not verify or restore the source PDF after conversion: ${sourcePath}. ${message}`);
+    }
+  }
+
   async exportConvertedMarkdown(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
-      await this.prepareExportSnapshot();
+      const sourceSnapshot = await this.prepareExportSnapshot();
       const noteDraw = getNoteDrawWriteApi();
       const visualPages = await this.captureVisualConversionPages({
         includeCovers: false,
         includeImages: false,
         includeStrokes: false,
         includeText: false
-      });
+      }, sourceSnapshot);
       const pages: EditableMarkdownPage[] = visualPages.map((page) => ({
         height: page.height,
         lines: page.lines,
@@ -8896,6 +8950,7 @@ class InkSession {
         );
       }
       const opened = await this.openConvertedMarkdownFile(targetFile);
+      await this.assertSourcePdfSnapshot(sourceSnapshot);
       if (options.notice !== false) {
         new Notice(noteDraw
           ? uiText(`已转换${opened ? "并打开" : ""} MD，文字与插图可直接编辑，涂鸦已转为 NoteDraw：${targetPath}`, `Converted${opened ? " and opened" : ""} editable MD with native images and NoteDraw ink: ${targetPath}`)
@@ -8911,13 +8966,14 @@ class InkSession {
 
   async exportConvertedDocx(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
-      await this.prepareExportSnapshot();
-      const pages = await this.captureVisualConversionPages();
+      const sourceSnapshot = await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages({}, sourceSnapshot);
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "docx");
       const docx = await buildDocxFromPageImages(pages, this.file.basename);
       const buffer = toArrayBufferCopy(docx);
       const targetFile = await this.plugin.app.vault.createBinary(targetPath, buffer);
       const opened = await this.openConvertedFile(targetFile);
+      await this.assertSourcePdfSnapshot(sourceSnapshot);
       if (options.notice !== false) {
         new Notice(uiText(`已转换${opened ? "并打开" : ""} DOCX：${targetPath}`, `Converted${opened ? " and opened" : ""} DOCX: ${targetPath}`));
       }
@@ -8934,7 +8990,7 @@ class InkSession {
       return false;
     }
     try {
-      await this.plugin.app.workspace.getLeaf(false).openFile(file);
+      await this.plugin.app.workspace.getLeaf("tab").openFile(file);
       return true;
     } catch (error) {
       console.warn("pdftion could not open the converted file.", error);
@@ -8947,7 +9003,7 @@ class InkSession {
       return false;
     }
     try {
-      const leaf = this.plugin.app.workspace.getLeaf(false);
+      const leaf = this.plugin.app.workspace.getLeaf("tab");
       await leaf.openFile(file);
       await leaf.setViewState({
         active: true,
@@ -8963,12 +9019,13 @@ class InkSession {
 
   async exportConvertedPng(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
-      await this.prepareExportSnapshot();
-      const pages = await this.captureVisualConversionPages();
+      const sourceSnapshot = await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages({}, sourceSnapshot);
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "png");
       const png = await buildCombinedPagePng(pages);
       const targetFile = await this.plugin.app.vault.createBinary(targetPath, toArrayBufferCopy(png));
       const opened = await this.openConvertedFile(targetFile);
+      await this.assertSourcePdfSnapshot(sourceSnapshot);
       if (options.notice !== false) {
         new Notice(uiText(`已转换${opened ? "并打开" : ""} PNG：${targetPath}`, `Converted${opened ? " and opened" : ""} PNG: ${targetPath}`));
       }
@@ -8982,12 +9039,13 @@ class InkSession {
 
   async exportConvertedPptx(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
-      await this.prepareExportSnapshot();
-      const pages = await this.captureVisualConversionPages();
+      const sourceSnapshot = await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages({}, sourceSnapshot);
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "pptx");
       const pptx = await buildPptxFromPageImages(pages, this.file.basename);
       const targetFile = await this.plugin.app.vault.createBinary(targetPath, toArrayBufferCopy(pptx));
       const opened = await this.openConvertedFile(targetFile);
+      await this.assertSourcePdfSnapshot(sourceSnapshot);
       if (options.notice !== false) {
         new Notice(uiText(`已转换${opened ? "并打开" : ""} PPTX：${targetPath}`, `Converted${opened ? " and opened" : ""} PPTX: ${targetPath}`));
       }
@@ -9002,11 +9060,12 @@ class InkSession {
 
   async exportConvertedHtml(options: { notice?: boolean } = {}): Promise<string | null> {
     try {
-      await this.prepareExportSnapshot();
-      const pages = await this.captureVisualConversionPages();
+      const sourceSnapshot = await this.prepareExportSnapshot();
+      const pages = await this.captureVisualConversionPages({}, sourceSnapshot);
       const targetPath = await this.getUniqueConvertedPath("pdftion-converted", "html");
       const targetFile = await this.plugin.app.vault.create(targetPath, buildSelfContainedVisualHtml(this.file, pages));
       const opened = await this.openConvertedFile(targetFile);
+      await this.assertSourcePdfSnapshot(sourceSnapshot);
       if (options.notice !== false) {
         new Notice(uiText(`已转换${opened ? "并打开" : ""} HTML：${targetPath}`, `Converted${opened ? " and opened" : ""} HTML: ${targetPath}`));
       }
@@ -9018,7 +9077,10 @@ class InkSession {
     }
   }
 
-  private async captureVisualConversionPages(options: VisualCaptureOptions = {}): Promise<VisualConversionPage[]> {
+  private async captureVisualConversionPages(
+    options: VisualCaptureOptions = {},
+    sourceSnapshot?: SourcePdfSnapshot
+  ): Promise<VisualConversionPage[]> {
     this.conversionInProgress = true;
     this.clearAutoSaveTimer();
     this.clearEditableInkPrepareTimer();
@@ -9042,8 +9104,8 @@ class InkSession {
     const scrollEl = findScrollableAncestor(firstPage);
     const originalScrollLeft = scrollEl.scrollLeft;
     const originalScrollTop = scrollEl.scrollTop;
-    const sourcePath = this.file.path;
-    const sourceFingerprint = await sha256Hex(await this.plugin.app.vault.readBinary(this.file));
+    const snapshot = sourceSnapshot ?? await this.captureSourcePdfSnapshot();
+    let sourceIntegrityError: Error | null = null;
     try {
       for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
         const pageEl = this.findPdfPageElementForExport(pageIndex);
@@ -9079,21 +9141,16 @@ class InkSession {
       scrollEl.dispatchEvent(new Event("scroll"));
       this.scanPages();
       this.conversionInProgress = false;
-      try {
-        if (this.file.path === sourcePath) {
-          const finalFingerprint = await sha256Hex(await this.plugin.app.vault.readBinary(this.file));
-          if (finalFingerprint !== sourceFingerprint) {
-            console.error("pdftion detected a source PDF change during read-only conversion.", sourcePath);
-          }
-        }
-      } catch (error) {
-        console.warn("pdftion could not verify the source PDF after conversion.", error);
-      }
-      if (this.hasPendingPdfWrite()) {
-        this.scheduleAutoSave(AUTO_SAVE_IDLE_DELAY_MS);
-      }
+      sourceIntegrityError = await this.verifySourcePdfAfterConversion(
+        snapshot.path,
+        snapshot.bytes,
+        snapshot.fingerprint
+      );
     }
 
+    if (sourceIntegrityError) {
+      throw sourceIntegrityError;
+    }
     if (pages.length !== pageCount) {
       throw new Error(`Only ${pages.length}/${pageCount} PDF pages rendered for conversion.`);
     }
@@ -13349,6 +13406,9 @@ function isUsefulMarkdownExportImage(image: NoteDrawExportImage): boolean {
 }
 
 function isUsefulNativeExportImage(image: VisualConversionImage): boolean {
+  if (image.id.startsWith("pdf-inline-")) {
+    return false;
+  }
   if (!image.id.startsWith("pdf-raster-page-")) {
     return true;
   }
@@ -13357,6 +13417,9 @@ function isUsefulNativeExportImage(image: VisualConversionImage): boolean {
 }
 
 function isUsefulHtmlExportImage(image: VisualConversionImage): boolean {
+  if (image.id.startsWith("pdf-inline-")) {
+    return false;
+  }
   if (!image.id.startsWith("pdf-raster-page-")) {
     return true;
   }
@@ -13884,6 +13947,10 @@ function containsEmojiPresentation(value: string): boolean {
   return /[\p{Extended_Pictographic}\u2600-\u27bf]/u.test(value);
 }
 
+function containsCjkPresentation(value: string): boolean {
+  return /[\u2e80-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u.test(value);
+}
+
 function exportFontFaceForRun(run: EditableMarkdownTextRun, code = false): string {
   if (code || run.code) {
     return "Consolas";
@@ -13891,7 +13958,38 @@ function exportFontFaceForRun(run: EditableMarkdownTextRun, code = false): strin
   if (containsEmojiPresentation(run.text)) {
     return "Segoe UI Emoji";
   }
-  return exportFontFace(run.fontFamily);
+  return exportFontFace(run.fontFamily, run.text);
+}
+
+function getPortableExportFontSizePt(
+  run: EditableMarkdownTextRun,
+  block: NativeExportBlock,
+  baseFontSize: number
+): number {
+  if (block.kind === "heading") {
+    return [24, 20, 17, 15, 13, 12][clamp((block.headingLevel ?? 1) - 1, 0, 5)];
+  }
+  const baseSize = block.kind === "code" ? 10 : block.kind === "callout-title" ? 12 : block.kind === "table" ? 10 : 11;
+  const ratio = clamp(run.fontSize / Math.max(1, baseFontSize), 0.85, 1.35);
+  return Math.round(clamp(baseSize * ratio, 8.5, 18) * 2) / 2;
+}
+
+function getPortableExportCssFontStack(run: EditableMarkdownTextRun, code = false): string {
+  const primary = exportFontFaceForRun(run, code);
+  if (primary === "Consolas") {
+    return 'Consolas,"Liberation Mono","Noto Sans Mono",monospace';
+  }
+  if (primary === "Segoe UI Emoji") {
+    return '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+  }
+  if (containsCjkPresentation(run.text)) {
+    return primary === "SimSun"
+      ? 'SimSun,"Noto Serif CJK SC","Source Han Serif SC",serif'
+      : '"Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC",Arial,sans-serif';
+  }
+  return primary === "Times New Roman"
+    ? '"Times New Roman","Liberation Serif",serif'
+    : 'Arial,"Liberation Sans",sans-serif';
 }
 
 function isHtmlAnnotationExportImage(image: VisualConversionImage): boolean {
@@ -13913,13 +14011,16 @@ function renderNativeExportHtmlBlock(
     const image = block.image;
     const annotation = isHtmlAnnotationExportImage(image);
     const visualKind = annotation ? "annotation" : image.id.startsWith("pdf-raster-page-") ? "native" : "embedded";
-    const width = clamp(image.width * 100, annotation ? 12 : visualKind === "native" ? 24 : 10, 100);
+    const width = clamp(image.width * 100, visualKind === "native" ? 24 : 10, 100);
     const align = getHtmlVisualAlignment(image);
     const imageMarkup = `<img class="block-image" src="${htmlAttributeEscape(image.dataUrl)}" alt="${htmlAttributeEscape(image.assetName)}">`;
     const linkedImage = image.link
       ? `<a class="block-image-link" href="${htmlAttributeEscape(image.link)}">${imageMarkup}</a>`
       : imageMarkup;
-    return `<figure class="block block-visual block-visual-${visualKind} align-${align}" style="--visual-width:${width.toFixed(2)}%;--visual-opacity:${clamp(image.opacity, 0, 1).toFixed(3)}">${linkedImage}</figure>`;
+    const visualStyle = annotation
+      ? `--visual-left:${clamp(image.x * 100, 0, 100).toFixed(3)}%;--visual-top:${clamp(image.y * 100, 0, 100).toFixed(3)}%;--visual-width:${clamp(image.width * 100, 0.05, 100).toFixed(3)}%;--visual-height:${clamp(image.height * 100, 0.05, 100).toFixed(3)}%;--visual-opacity:${clamp(image.opacity, 0, 1).toFixed(3)}`
+      : `--visual-width:${width.toFixed(2)}%;--visual-opacity:${clamp(image.opacity, 0, 1).toFixed(3)}`;
+    return `<figure class="block block-visual block-visual-${visualKind} align-${align}" style="${visualStyle}">${linkedImage}</figure>`;
   }
   if (block.kind === "separator") {
     return `<hr class="block block-separator">`;
@@ -13968,8 +14069,8 @@ function renderNativeHtmlRuns(
     const decorations = [run.underline ? "underline" : "", run.strike ? "line-through" : ""].filter(Boolean).join(" ");
     const style = [
       `color:#${exportHexColor(run.color)}`,
-      `font-family:${htmlAttributeEscape(run.code || block.kind === "code" ? "Consolas, monospace" : run.fontFamily || "system-ui")}`,
-      `font-size:${clamp(15 * run.fontSize / baseFontSize, 10, 36).toFixed(1)}px`,
+      `font-family:${htmlAttributeEscape(getPortableExportCssFontStack(run, block.kind === "code"))}`,
+      `font-size:${(getPortableExportFontSizePt(run, block, baseFontSize) * 4 / 3).toFixed(1)}px`,
       `font-style:${run.italic ? "italic" : "normal"}`,
       `font-weight:${run.bold || block.kind === "callout-title" ? "700" : "400"}`,
       `opacity:${clamp(run.opacity ?? 1, 0, 1).toFixed(3)}`,
@@ -13994,6 +14095,7 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
   pptx.layout = "PDFTION_EXPORT";
   pptx.author = "Murat";
   pptx.subject = title;
+  pptx.theme = { bodyFontFace: "Arial", headFontFace: "Arial" };
   pptx.title = title;
   const document = buildNativeExportDocumentFromVisualPages(pages);
 
@@ -14030,8 +14132,10 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
       }
       const x = imageX + block.left * width;
       const y = imageY + block.top * height;
-      const blockWidth = Math.max(0.02, Math.min(imageX + width - x, block.width * width + 0.12));
-      const blockHeight = Math.max(0.04, (block.height ?? 0.02) * height * 1.45);
+      const blockWidth = Math.max(0.02, Math.min(imageX + width - x, block.width * width + 0.18));
+      const portableSizes = block.runs.map((run) => getPortableExportFontSizePt(run, block, document.baseFontSize));
+      const targetMaxSize = Math.max(9, ...portableSizes);
+      const blockHeight = Math.max(targetMaxSize * 1.35 / 72, (block.height ?? 0.02) * height * 1.35);
       if (block.kind === "separator") {
         slide.addShape(pptx.ShapeType.line, {
           h: 0,
@@ -14047,8 +14151,8 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
           options: {
             bold: rowIndex === 0,
             color: exportHexColor(cell.runs[0]?.color ?? "#000000"),
-            fontFace: exportFontFace(cell.runs[0]?.fontFamily ?? "Arial"),
-            fontSize: Math.max(7, (block.height ?? 0.04) * height * 72 / Math.max(1, block.table?.rows.length ?? 1) * 0.55),
+            fontFace: cell.runs[0] ? exportFontFaceForRun(cell.runs[0]) : "Arial",
+            fontSize: cell.runs[0] ? getPortableExportFontSizePt(cell.runs[0], block, document.baseFontSize) : 10,
             margin: 0.04
           },
           text: cell.runs.map((run) => run.text).join("")
@@ -14066,8 +14170,6 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
         continue;
       }
       const prefix = getNativeExportBlockPrefix(block);
-      const maxRunSize = Math.max(document.baseFontSize, ...block.runs.map((run) => run.fontSize));
-      const targetMaxSize = Math.max(5, (block.height ?? 0.015) * height * 72 * 0.84);
       const textRuns = [
         ...(prefix ? [{
           options: {
@@ -14086,7 +14188,7 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
             breakLine: false,
             color: exportHexColor(run.color),
             fontFace: exportFontFaceForRun(run, block.kind === "code"),
-            fontSize: Math.max(4, targetMaxSize * run.fontSize / maxRunSize),
+            fontSize: getPortableExportFontSizePt(run, block, document.baseFontSize),
             hyperlink: run.link ? { url: run.link } : undefined,
             italic: run.italic,
             strike: run.strike ? ("sngStrike" as const) : undefined,
@@ -14105,11 +14207,12 @@ async function buildPptxFromPageImages(pages: VisualConversionPage[], title: str
           : block.kind === "callout-title" || block.kind === "callout-body"
             ? { color: "EEF5FF", transparency: 10 }
             : undefined,
-        fit: "shrink",
+        fit: "none",
         h: blockHeight,
         isTextBox: true,
-        margin: block.kind === "callout-title" || block.kind === "callout-body" ? 0.05 : 0,
+        margin: 0,
         paraSpaceAfter: 0,
+        paraSpaceBefore: 0,
         valign: "top",
         w: blockWidth,
         wrap: false,
@@ -14145,33 +14248,46 @@ function buildSelfContainedVisualHtml(file: TFile, pages: VisualConversionPage[]
       const annotations = annotationBlocks.length > 0
         ? `<aside class="page-annotations" aria-label="Page ${page.pageIndex + 1} annotations">${annotationBlocks.map((block) => renderNativeExportHtmlBlock(block, document)).join("")}</aside>`
         : "";
-      return `<section class="page" aria-label="Page ${page.pageIndex + 1}">${content}${annotations}</section>`;
+      const pageClass = annotations ? "page page-has-annotations" : "page";
+      return `<section class="${pageClass}" style="--page-aspect:${Math.max(1, page.width).toFixed(2)} / ${Math.max(1, page.height).toFixed(2)}" aria-label="Page ${page.pageIndex + 1}"><div class="page-content">${content}</div>${annotations}</section>`;
     }).join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>*{box-sizing:border-box}html{background:#e7e9ed;color:#202124;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;padding:18px}main{margin:0 auto;max-width:900px}.page{background:#fff;margin:0 auto 18px;padding:32px 42px;width:100%;box-shadow:0 2px 10px #0002}.block{letter-spacing:0;line-height:1.55;margin:.55rem 0;overflow-wrap:anywhere;white-space:pre-wrap}.block a,a.block-image-link{color:#0b57d0;text-decoration:underline;text-underline-offset:2px}.page h1,.page h2,.page h3,.page h4,.page h5,.page h6{line-height:1.25;margin:1.15rem 0 .5rem}.page h1:first-child,.page h2:first-child,.page h3:first-child,.page p:first-child{margin-top:0}.block-code{background:#f3f4f6;border-radius:4px;font-family:Consolas,"Noto Sans Mono",monospace;overflow-x:auto;padding:.75rem;white-space:pre-wrap}.block-callout{background:#eef5ff;border-left:4px solid #4b8fd8;padding:.55rem .75rem}.block-callout+.block-callout{margin-top:-.55rem}.block-quote{border-left:3px solid #9aa0a6;margin-left:0;padding-left:.8rem}.block-list{margin:.3rem 0;padding-left:var(--list-indent,1.5rem)}.block-list+.block-list{margin-top:-.12rem}.block-separator{border:0;border-top:1px solid #888;margin:1rem 0}.block-table-wrap{margin:.8rem 0;overflow-x:auto}.block-table{border-collapse:collapse;table-layout:auto;width:100%}.block-table td{border:1px solid #b7bcc4;padding:.45rem .55rem;vertical-align:top}.block-table tr:first-child td{background:#f4f5f7;font-weight:700}.block-visual{display:block;margin:.8rem 0;max-width:100%;opacity:var(--visual-opacity);width:min(100%,var(--visual-width))}.block-visual.align-left{margin-right:auto}.block-visual.align-center{margin-left:auto;margin-right:auto}.block-visual.align-right{margin-left:auto}.block-image,.block-image-link{display:block;max-width:100%}.block-image{height:auto;max-height:760px;object-fit:contain;width:100%}.block-visual.align-center .block-image{margin-left:auto;margin-right:auto}.block-visual.align-right .block-image{margin-left:auto}.page-annotations{align-items:flex-start;border-top:1px solid #e1e4e8;display:flex;flex-wrap:wrap;gap:10px;margin-top:1rem;padding-top:.75rem}.page-annotations .block-visual{margin:0;max-width:220px}.block-visual-annotation .block-image{height:auto;max-height:280px;width:auto}.block-visual-native .block-image{max-height:720px}@media(max-width:640px){body{padding:0}.page{box-shadow:none;margin-bottom:8px;padding:18px 16px}.block{line-height:1.5}.block-visual{width:100%}.page-annotations .block-visual{max-width:42%}.block-visual-annotation .block-image{max-height:220px}}@media print{html,body{background:#fff;padding:0}.page{box-shadow:none;margin:0;padding:18mm;break-after:page}.page:last-child{break-after:auto}}</style></head><body><main>${pageMarkup}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(file.basename)}</title><style>
+*{box-sizing:border-box}html{background:#e7e9ed;color:#202124;font-family:Arial,"Microsoft YaHei","Noto Sans CJK SC",sans-serif}body{margin:0;padding:18px}main{margin:0 auto;max-width:900px}
+.page{background:#fff;box-shadow:0 2px 10px #0002;isolation:isolate;margin:0 auto 18px;overflow:hidden;padding:32px 42px;position:relative;width:100%}.page-has-annotations{display:grid}.page-has-annotations::before,.page-has-annotations>.page-content{grid-area:1/1}.page-has-annotations::before{aspect-ratio:var(--page-aspect);content:"";display:block;width:100%}.page-content{position:relative;z-index:1}
+.block{letter-spacing:0;line-height:1.55;margin:.55rem 0;overflow-wrap:anywhere;white-space:pre-wrap}.block a,a.block-image-link{color:#0b57d0;text-decoration:underline;text-underline-offset:2px}
+.page h1,.page h2,.page h3,.page h4,.page h5,.page h6{line-height:1.25;margin:1.15rem 0 .5rem}.page h1:first-child,.page h2:first-child,.page h3:first-child,.page p:first-child{margin-top:0}
+.block-code{background:#f3f4f6;border-radius:4px;font-family:Consolas,"Liberation Mono","Noto Sans Mono",monospace;overflow-x:auto;padding:.75rem;white-space:pre-wrap}.block-callout{background:#eef5ff;border-left:4px solid #4b8fd8;padding:.55rem .75rem}.block-callout+.block-callout{margin-top:-.55rem}.block-quote{border-left:3px solid #9aa0a6;margin-left:0;padding-left:.8rem}
+.block-list{margin:.3rem 0;padding-left:var(--list-indent,1.5rem)}.block-list+.block-list{margin-top:-.12rem}.block-separator{border:0;border-top:1px solid #888;margin:1rem 0}.block-table-wrap{margin:.8rem 0;overflow-x:auto}.block-table{border-collapse:collapse;table-layout:fixed;width:100%}.block-table td{border:1px solid #b7bcc4;padding:.45rem .55rem;vertical-align:top}.block-table tr:first-child td{background:#f4f5f7;font-weight:700}
+.block-visual{display:block;margin:.8rem 0;max-width:100%;opacity:var(--visual-opacity);width:min(100%,var(--visual-width))}.block-visual.align-left{margin-right:auto}.block-visual.align-center{margin-left:auto;margin-right:auto}.block-visual.align-right{margin-left:auto}.block-image,.block-image-link{display:block;max-width:100%}.block-image{height:auto;max-height:760px;object-fit:contain;width:100%}.block-visual.align-center .block-image{margin-left:auto;margin-right:auto}.block-visual.align-right .block-image{margin-left:auto}.block-visual-native .block-image{max-height:720px}
+.page-annotations{aspect-ratio:var(--page-aspect);left:0;pointer-events:none;position:absolute;top:0;width:100%;z-index:3}.page-annotations .block-visual{height:var(--visual-height);left:var(--visual-left);margin:0;max-width:none;position:absolute;top:var(--visual-top);width:var(--visual-width)}.page-annotations .block-image,.page-annotations .block-image-link{height:100%;max-height:none;width:100%}.page-annotations .block-image{object-fit:contain}
+@media(max-width:640px){body{padding:0}.page{box-shadow:none;margin-bottom:8px;padding:18px 16px}.block{line-height:1.5}.block-visual{width:100%}}
+@media print{html,body{background:#fff;padding:0}.page{box-shadow:none;margin:0;padding:18mm;break-after:page}.page:last-child{break-after:auto}}
+</style></head><body><main>${pageMarkup}</main></body></html>`;
 }
 
 async function buildDocxFromPageImages(pages: VisualConversionPage[], title: string): Promise<Uint8Array> {
   const {
+    AlignmentType,
     BorderStyle,
     Document,
     ExternalHyperlink,
     HeadingLevel,
-    HorizontalPositionRelativeFrom,
     ImageRun,
+    LineRuleType,
     Packer,
     Paragraph,
     Table,
     TableCell,
+    TableLayoutType,
     TableRow,
     TextRun,
-    TextWrappingType,
     UnderlineType,
-    VerticalPositionRelativeFrom,
     WidthType
   } = await import("docx");
   const nativeDocument = buildNativeExportDocumentFromVisualPages(pages);
   const pageWidthTwips = 11906;
   const pageMarginTwips = 540;
+  const contentWidthTwips = pageWidthTwips - pageMarginTwips * 2;
   const headingLevels = [
     HeadingLevel.HEADING_1,
     HeadingLevel.HEADING_2,
@@ -14181,11 +14297,11 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
     HeadingLevel.HEADING_6
   ];
   const makeTextRun = (run: EditableMarkdownTextRun, block: NativeExportBlock): InstanceType<typeof TextRun> => {
-    const fontSizePt = clamp(11 * run.fontSize / Math.max(1, nativeDocument.baseFontSize), 7.5, 34);
+    const fontSizePt = getPortableExportFontSizePt(run, block, nativeDocument.baseFontSize);
     return new TextRun({
       bold: run.bold || block.kind === "callout-title",
       color: exportHexColor(run.color),
-      font: run.code || block.kind === "code" ? "Consolas" : exportFontFace(run.fontFamily),
+      font: exportFontFaceForRun(run, block.kind === "code"),
       italics: run.italic,
       size: Math.round(fontSizePt * 2),
       strike: run.strike,
@@ -14206,51 +14322,60 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
   };
   const sections = nativeDocument.pages.map((page) => {
     const pageHeightTwips = Math.round(pageWidthTwips * page.height / Math.max(1, page.width));
-    const imageChildren: Array<InstanceType<typeof ImageRun> | InstanceType<typeof ExternalHyperlink>> = [];
-    for (const block of page.blocks) {
-      const image = block.image;
-      if (block.kind !== "image" || !image) continue;
-      const widthPx = Math.max(1, Math.round(pageWidthTwips / 1440 * 96 * image.width));
-      const heightPx = Math.max(1, Math.round(pageHeightTwips / 1440 * 96 * image.height));
-      const imageRun = new ImageRun({
-        data: dataUrlToBytes(image.dataUrl),
-        floating: {
-          behindDocument: image.id.startsWith("pdf-raster-page-"),
-          horizontalPosition: {
-            offset: Math.round(image.x * pageWidthTwips * 635),
-            relative: HorizontalPositionRelativeFrom.PAGE
-          },
-          lockAnchor: true,
-          verticalPosition: {
-            offset: Math.round(image.y * pageHeightTwips * 635),
-            relative: VerticalPositionRelativeFrom.PAGE
-          },
-          wrap: { type: TextWrappingType.NONE }
-        },
-        transformation: { height: heightPx, width: widthPx },
-        type: "png"
-      });
-      imageChildren.push(image.link ? new ExternalHyperlink({ children: [imageRun], link: image.link }) : imageRun);
-    }
     const children: Array<InstanceType<typeof Paragraph> | InstanceType<typeof Table>> = [];
-    if (imageChildren.length > 0) {
-      children.push(new Paragraph({ children: imageChildren, spacing: { after: 0, before: 0, line: 1 } }));
-    }
+    let previousBottom = 0;
     for (const block of page.blocks) {
-      if (block.kind === "image") continue;
+      const sourceGap = Math.max(0, block.top - previousBottom);
+      const gapBefore = Math.round(clamp(sourceGap * pageHeightTwips, 0, 240));
+      previousBottom = Math.max(previousBottom, block.top + (block.height ?? 0));
+      if (block.kind === "image" && block.image) {
+        const image = block.image;
+        const contentWidthPx = contentWidthTwips / 1440 * 96;
+        const contentHeightPx = Math.max(1, (pageHeightTwips - pageMarginTwips * 2) / 1440 * 96);
+        const requestedWidthPx = Math.max(1, image.width * contentWidthPx);
+        const requestedHeightPx = Math.max(1, image.height * contentHeightPx);
+        const scale = Math.min(1, contentWidthPx / requestedWidthPx, contentHeightPx * 0.9 / requestedHeightPx);
+        const imageRun = new ImageRun({
+          data: dataUrlToBytes(image.dataUrl),
+          transformation: {
+            height: Math.max(1, Math.round(requestedHeightPx * scale)),
+            width: Math.max(1, Math.round(requestedWidthPx * scale))
+          },
+          type: "png"
+        });
+        const imageChild = image.link
+          ? new ExternalHyperlink({ children: [imageRun], link: image.link })
+          : imageRun;
+        const center = image.x + image.width / 2;
+        children.push(new Paragraph({
+          alignment: center < 0.38 ? AlignmentType.LEFT : center > 0.62 ? AlignmentType.RIGHT : AlignmentType.CENTER,
+          children: [imageChild],
+          keepLines: true,
+          spacing: { after: 40, before: gapBefore },
+          widowControl: false
+        }));
+        continue;
+      }
       if (block.kind === "table" && block.table) {
+        const tableWidthTwips = Math.round(clamp(block.width * pageWidthTwips, 720, contentWidthTwips));
+        const columnWidths = getEditableTableColumnWidths(block.table, tableWidthTwips).map((width) => Math.round(width));
         children.push(new Table({
+          columnWidths,
+          indent: { size: Math.round(clamp(block.left * pageWidthTwips - pageMarginTwips, 0, contentWidthTwips - tableWidthTwips)), type: WidthType.DXA },
+          layout: TableLayoutType.FIXED,
           rows: block.table.rows.map((row, rowIndex) => new TableRow({
-            children: row.map((cell) => new TableCell({
+            cantSplit: true,
+            children: row.map((cell, columnIndex) => new TableCell({
               children: [new Paragraph({
                 children: cell.runs.map((run) => makeTextRun(run, block)),
-                spacing: { after: 40, before: 40 }
+                keepLines: true,
+                spacing: { after: 20, before: 20 }
               })],
               shading: rowIndex === 0 ? { fill: "F2F3F5" } : undefined,
-              width: { size: 100 / Math.max(1, row.length), type: WidthType.PERCENTAGE }
+              width: { size: columnWidths[columnIndex] ?? Math.round(tableWidthTwips / Math.max(1, row.length)), type: WidthType.DXA }
             }))
           })),
-          width: { size: 100, type: WidthType.PERCENTAGE }
+          width: { size: tableWidthTwips, type: WidthType.DXA }
         }));
         continue;
       }
@@ -14258,11 +14383,12 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
         children.push(new Paragraph({
           border: { bottom: { color: "888888", size: 6, space: 1, style: BorderStyle.SINGLE } },
           children: [],
-          spacing: { after: 120, before: 80 }
+          spacing: { after: 80, before: Math.max(40, gapBefore) }
         }));
         continue;
       }
       const isCallout = block.kind === "callout-title" || block.kind === "callout-body";
+      const maxFontSizePt = Math.max(9, ...block.runs.map((run) => getPortableExportFontSizePt(run, block, nativeDocument.baseFontSize)));
       children.push(new Paragraph({
         border: block.kind === "quote" || isCallout
           ? { left: { color: isCallout ? "4B8FD8" : "9AA0A6", size: 12, space: 8, style: BorderStyle.SINGLE } }
@@ -14271,15 +14397,23 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
         heading: block.kind === "heading" ? headingLevels[clamp((block.headingLevel ?? 1) - 1, 0, 5)] : undefined,
         indent: block.kind === "quote" || isCallout
           ? { left: 360 }
-          : block.listLevel
-            ? { left: 720 }
+          : block.kind === "task" || block.kind === "unordered-list" || block.kind === "ordered-list"
+            ? { hanging: 180, left: 360 + (block.listLevel ?? 0) * 360 }
             : undefined,
+        keepLines: true,
+        keepNext: block.kind === "heading",
         shading: block.kind === "code"
           ? { fill: "F3F4F6" }
           : isCallout
             ? { fill: "EEF5FF" }
             : undefined,
-        spacing: { after: block.kind === "heading" ? 100 : 70, before: block.kind === "heading" ? 120 : 0 }
+        spacing: {
+          after: block.kind === "heading" ? 60 : 20,
+          before: Math.max(gapBefore, block.kind === "heading" ? 80 : 0),
+          line: Math.round(maxFontSizePt * 1.28 * 20),
+          lineRule: LineRuleType.EXACT
+        },
+        widowControl: false
       }));
     }
     if (children.length === 0) {
@@ -14297,9 +14431,18 @@ async function buildDocxFromPageImages(pages: VisualConversionPage[], title: str
   });
 
   const document = new Document({
+    compatabilityModeVersion: 15,
     creator: "Murat",
     description: "Pdftion native editable conversion with text, tables, links, images, and drawings.",
     sections,
+    styles: {
+      default: {
+        document: {
+          paragraph: { spacing: { after: 0, before: 0 } },
+          run: { font: "Arial", size: 22 }
+        }
+      }
+    },
     title
   });
   const blob = await Packer.toBlob(document);
@@ -14342,8 +14485,18 @@ function exportHexColor(value: string): string {
   return (match?.[1] ?? "000000").toUpperCase();
 }
 
-function exportFontFace(value: string): string {
-  return (value.split(",")[0] ?? "Arial").trim().replace(/["']/g, "") || "Arial";
+function exportFontFace(value: string, text = ""): string {
+  const normalized = value.toLowerCase();
+  if (/(?:mono|consolas|courier|code)/u.test(normalized)) {
+    return "Consolas";
+  }
+  if (containsCjkPresentation(text)) {
+    return /(?:serif|simsun|song|宋体)/u.test(normalized) ? "SimSun" : "Microsoft YaHei";
+  }
+  if (/(?:serif|times|georgia)/u.test(normalized) && !/(?:sans-serif|sans serif)/u.test(normalized)) {
+    return "Times New Roman";
+  }
+  return "Arial";
 }
 
 function xmlEscape(value: string): string {
